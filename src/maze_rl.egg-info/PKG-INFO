@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: maze-rl
+Version: 0.1.0
+Summary: Reinforcement learning experiments for maze navigation
+Requires-Python: >=3.11
+Requires-Dist: numpy
+Requires-Dist: matplotlib
+Requires-Dist: tqdm
+Requires-Dist: gymnasium
+Requires-Dist: tensorboard
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"

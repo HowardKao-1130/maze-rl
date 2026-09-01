@@ -1,0 +1,11 @@
+{
+  "generator": "random_obstacle_grid",
+  "height": 11,
+  "width": 11,
+  "wall_probability": 0.25,
+  "min_path_length": 10,
+  "master_seed": 42,
+  "train_size": 1000,
+  "validation_size": 200,
+  "test_size": 200
+}
