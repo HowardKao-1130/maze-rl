@@ -28,6 +28,7 @@ from scripts.train import (
     neural_hyperparameters_from_args,
     optimization_epochs_for_round,
     rollout_episodes_for_algorithm,
+    should_validate_epoch,
     tensorboard_default_enabled,
     validate_neural_hyperparameters,
 )
@@ -416,6 +417,24 @@ def test_rollout_episodes_rejects_non_policy_agents():
             "dqn",
             32,
         )
+
+
+def test_validation_schedule_includes_interval_and_final_epoch():
+    assert should_validate_epoch(
+        epoch=4,
+        final_epoch=10,
+        validation_interval=2,
+    )
+    assert should_validate_epoch(
+        epoch=10,
+        final_epoch=10,
+        validation_interval=3,
+    )
+    assert not should_validate_epoch(
+        epoch=5,
+        final_epoch=10,
+        validation_interval=2,
+    )
 
 
 def test_hierarchical_sampler_deduplicates_tasks_within_dataset_epoch():

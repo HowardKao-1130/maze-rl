@@ -154,12 +154,21 @@ each trial under `runs/tuning/trials`, evaluates every validation task, appends
 `--search-space path/to/search_space.json` to override the default search space.
 
 Keep `--dataset-epochs` as the training budget for comparable trials. Increasing
-it usually improves final performance but also changes compute cost, so mixing
-dataset-epoch counts inside the same hyperparameter sweep makes scores less
-directly comparable. Early stopping should be added as a separate periodic
-validation loop before tuning stopping patience; the current tuner does final
-validation after each full trial. Use `--evaluate-best-on-test` only after
-tuning to score the best validation-selected checkpoint on `--test-dataset`.
+it usually improves final performance but also changes compute cost, so it is
+best treated as a generous fixed maximum budget for the sweep. The tuner asks
+training to evaluate validation mean path efficiency every
+`--validation-interval` dataset epochs, saves each trial's
+`best_checkpoint.pt`, and uses that best validation checkpoint for trial
+selection. The ordinary `checkpoint.pt` remains the final training state.
+
+Early stopping is optional through `--early-stopping-patience` and
+`--early-stopping-min-delta`. When enabled, the same stopping rule applies to
+every trial. Because patience and maximum budget can interact with learning
+rate and other dynamics, inspect `validation_metrics.csv` and
+`training_summary.json` after a sweep to check whether the selected trial was
+limited by the stopping rule or by the maximum budget. Use
+`--evaluate-best-on-test` only after tuning to score the best
+validation-selected checkpoint on `--test-dataset`.
 
 Neural checkpoints for `dqn`, `a2c`, and `ppo` include model snapshots using the
 same epoch schedule as tabular Q-table snapshots. Evaluation renders `dqn`

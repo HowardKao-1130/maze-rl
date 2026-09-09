@@ -55,6 +55,12 @@ def test_training_command_includes_trial_hyperparameters(tmp_path):
         algorithm="ppo",
         dataset_epochs=3,
         max_steps=7,
+        validation_dataset=tmp_path / "validation.npz",
+        validation_interval=2,
+        eval_all_tasks=False,
+        eval_episodes=5,
+        early_stopping_patience=4,
+        early_stopping_min_delta=0.01,
         tensorboard=False,
         keep_plots=False,
     )
@@ -79,6 +85,22 @@ def test_training_command_includes_trial_hyperparameters(tmp_path):
     assert command[
         command.index("--learning-rate") + 1
     ] == "0.0003"
+    assert command[
+        command.index("--validation-dataset") + 1
+    ] == str(tmp_path / "validation.npz")
+    assert command[
+        command.index("--validation-interval") + 1
+    ] == "2"
+    assert "--no-validation-all-tasks" in command
+    assert command[
+        command.index("--validation-episodes") + 1
+    ] == "5"
+    assert command[
+        command.index("--early-stopping-patience") + 1
+    ] == "4"
+    assert command[
+        command.index("--early-stopping-min-delta") + 1
+    ] == "0.01"
     assert command[
         command.index("--rollout-episodes") + 1
     ] == "64"

@@ -222,6 +222,9 @@ def parse_args() -> argparse.Namespace:
         "--dataset-epochs",
         type=int,
         default=20,
+        help=(
+            "Generous maximum training budget for every trial."
+        ),
     )
     parser.add_argument(
         "--max-steps",
@@ -294,6 +297,29 @@ def parse_args() -> argparse.Namespace:
         "--eval-episodes",
         type=int,
         default=200,
+    )
+    parser.add_argument(
+        "--validation-interval",
+        type=int,
+        default=1,
+        help=(
+            "Dataset-epoch interval for validation during each "
+            "trial."
+        ),
+    )
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=None,
+        help=(
+            "Optional shared patience for stopping trials after "
+            "validation stalls."
+        ),
+    )
+    parser.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=0.0,
     )
     parser.add_argument(
         "--tensorboard",
@@ -466,6 +492,10 @@ def build_training_command(
         str(args.dataset_epochs),
         "--max-steps",
         str(args.max_steps),
+        "--validation-dataset",
+        str(args.validation_dataset),
+        "--validation-interval",
+        str(args.validation_interval),
         "--seed",
         str(trial_seed),
         "--output-dir",
@@ -481,6 +511,37 @@ def build_training_command(
 
     if not args.keep_plots:
         command.append("--no-plot")
+
+    if args.eval_all_tasks:
+        command.append(
+            "--validation-all-tasks"
+        )
+    else:
+        command.extend(
+            [
+                "--no-validation-all-tasks",
+                "--validation-episodes",
+                str(args.eval_episodes),
+            ]
+        )
+
+    if args.early_stopping_patience is not None:
+        command.extend(
+            [
+                "--early-stopping-patience",
+                str(args.early_stopping_patience),
+            ]
+        )
+
+    if args.early_stopping_min_delta != 0.0:
+        command.extend(
+            [
+                "--early-stopping-min-delta",
+                cli_value(
+                    args.early_stopping_min_delta
+                ),
+            ]
+        )
 
     for name, value in sorted(
         hyperparameters.items()
@@ -647,6 +708,13 @@ def summarize_evaluation(
     }
 
 
+def read_training_summary(
+    path: Path,
+) -> dict[str, Any]:
+    with path.open() as file:
+        return json.load(file)
+
+
 def write_result_row(
     path: Path,
     row: dict[str, Any],
@@ -665,6 +733,8 @@ def write_result_row(
         "success_rate",
         "average_episode_return",
         "average_successful_path_efficiency",
+        "dataset_epochs_completed",
+        "stopped_early",
         "checkpoint_path",
         "evaluation_path",
         "hyperparameters",
@@ -771,6 +841,12 @@ def main() -> None:
         checkpoint_path = (
             run_dir / "checkpoint.pt"
         )
+        best_checkpoint_path = (
+            run_dir / "best_checkpoint.pt"
+        )
+        training_summary_path = (
+            run_dir / "training_summary.json"
+        )
         evaluation_path = (
             run_dir / "validation_evaluation.csv"
         )
@@ -795,7 +871,7 @@ def main() -> None:
         run_command(
             build_evaluation_command(
                 args=args,
-                checkpoint_path=checkpoint_path,
+                checkpoint_path=best_checkpoint_path,
                 validation_dataset=args.validation_dataset,
                 evaluation_path=evaluation_path,
                 trial_seed=trial_seed,
@@ -806,31 +882,47 @@ def main() -> None:
         if args.dry_run:
             continue
 
-        summary = summarize_evaluation(
-            evaluation_path
+        training_summary = read_training_summary(
+            training_summary_path
         )
-        objective = summary[
+        best_validation = training_summary[
+            "best_validation"
+        ]
+        objective = best_validation[
             "mean_path_efficiency"
         ]
+        summarize_evaluation(
+            evaluation_path
+        )
         result = {
             "trial": trial,
             "algorithm": args.algorithm,
             "seed": trial_seed,
             "objective": objective,
-            "mean_path_efficiency": summary[
+            "mean_path_efficiency": best_validation[
                 "mean_path_efficiency"
             ],
-            "success_rate": summary[
+            "success_rate": best_validation[
                 "success_rate"
             ],
-            "average_episode_return": summary[
+            "average_episode_return": best_validation[
                 "average_episode_return"
             ],
-            "average_successful_path_efficiency": summary[
+            "average_successful_path_efficiency": best_validation[
                 "average_successful_path_efficiency"
             ],
+            "dataset_epochs_completed": (
+                training_summary[
+                    "dataset_epochs_completed"
+                ]
+            ),
+            "stopped_early": training_summary[
+                "stopped_early"
+            ],
             "checkpoint_path": str(
-                checkpoint_path
+                best_checkpoint_path
+                if best_checkpoint_path.exists()
+                else checkpoint_path
             ),
             "evaluation_path": str(
                 evaluation_path

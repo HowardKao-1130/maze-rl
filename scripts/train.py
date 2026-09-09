@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from collections import defaultdict
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import pickle
@@ -26,6 +28,7 @@ from maze_rl.agents.q_learning import QLearningAgent
 from maze_rl.agents.reinforce import ReinforceAgent
 from maze_rl.agents.sarsa import SarsaAgent
 from maze_rl.envs.maze_env import MazeEnv
+from maze_rl.evaluation.evaluator import evaluate
 from maze_rl.training.metrics import append_metrics_csv
 from maze_rl.training.plots import (
     plot_task_training_metrics,
@@ -417,6 +420,58 @@ def parse_args():
         ),
     )
 
+    parser.add_argument(
+        "--validation-dataset",
+        type=Path,
+        default=None,
+        help=(
+            "Optional validation dataset for periodic neural-agent "
+            "selection."
+        ),
+    )
+    parser.add_argument(
+        "--validation-interval",
+        type=int,
+        default=0,
+        help=(
+            "Dataset-epoch interval for validation. Use 0 to "
+            "disable periodic validation."
+        ),
+    )
+    parser.add_argument(
+        "--validation-episodes",
+        type=int,
+        default=200,
+    )
+    parser.add_argument(
+        "--validation-all-tasks",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Evaluate every validation task. Use "
+            "--no-validation-all-tasks with --validation-episodes "
+            "for sampling."
+        ),
+    )
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=None,
+        help=(
+            "Stop after this many validation checks without "
+            "sufficient improvement. Requires --validation-dataset."
+        ),
+    )
+    parser.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=0.0,
+        help=(
+            "Minimum validation mean path-efficiency improvement "
+            "required to reset early-stopping patience."
+        ),
+    )
+
     neural_group = parser.add_argument_group(
         "neural agent hyperparameters"
     )
@@ -713,20 +768,130 @@ def save_checkpoint(
     )
 
 
+def current_neural_state_dict(
+    algorithm,
+    agent,
+):
+    if algorithm == "dqn":
+        state_dict = (
+            agent.online_network.state_dict()
+        )
+
+    elif algorithm == "reinforce":
+        state_dict = (
+            agent.policy.state_dict()
+        )
+
+    else:
+        state_dict = (
+            agent.network.state_dict()
+        )
+
+    return {
+        key: value.detach().cpu().clone()
+        for key, value in state_dict.items()
+    }
+
+
 def model_snapshot_state_dict(
     algorithm,
     agent,
 ):
-    network = (
-        agent.online_network
-        if algorithm == "dqn"
-        else agent.network
+    return current_neural_state_dict(
+        algorithm,
+        agent,
     )
 
-    return {
-        key: value.detach().cpu().clone()
-        for key, value in network.state_dict().items()
-    }
+
+def save_neural_checkpoint_state(
+    path: Path,
+    algorithm: str,
+    model_state_dict,
+    model_snapshots=None,
+    hyperparameters=None,
+    validation_metadata=None,
+) -> None:
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    torch.save(
+        {
+            "algorithm": algorithm,
+            "model_state_dict": model_state_dict,
+            "model_snapshots": model_snapshots or [],
+            "hyperparameters": hyperparameters or {},
+            "validation": validation_metadata or {},
+        },
+        path,
+    )
+
+
+def should_validate_epoch(
+    epoch: int,
+    final_epoch: int,
+    validation_interval: int,
+) -> bool:
+    return (
+        validation_interval > 0
+        and (
+            epoch % validation_interval == 0
+            or epoch == final_epoch
+        )
+    )
+
+
+def append_validation_csv(
+    path: Path,
+    row: dict,
+) -> None:
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    fieldnames = [
+        "dataset_epoch",
+        "episodes",
+        "success_rate",
+        "average_episode_return",
+        "mean_path_efficiency",
+        "average_successful_path_efficiency",
+    ]
+    write_header = not path.exists()
+
+    with path.open(
+        "a",
+        newline="",
+    ) as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=fieldnames,
+        )
+
+        if write_header:
+            writer.writeheader()
+
+        writer.writerow(row)
+
+
+def write_training_summary(
+    path: Path,
+    summary: dict,
+) -> None:
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    with path.open("w") as file:
+        json.dump(
+            summary,
+            file,
+            indent=2,
+            sort_keys=True,
+        )
 
 
 def format_progress_message(
@@ -1324,9 +1489,57 @@ def main():
     metrics_path = (
         run_dir / "metrics.csv"
     )
+    validation_metrics_path = (
+        run_dir / "validation_metrics.csv"
+    )
+    best_checkpoint_path = (
+        run_dir / "best_checkpoint.pt"
+    )
+    training_summary_path = (
+        run_dir / "training_summary.json"
+    )
 
     if metrics_path.exists() and not args.resume:
         metrics_path.unlink()
+
+    if (
+        validation_metrics_path.exists()
+        and not args.resume
+    ):
+        validation_metrics_path.unlink()
+
+    validation_env = None
+
+    if args.validation_dataset is not None:
+        if args.algorithm not in NEURAL_ALGORITHMS:
+            raise ValueError(
+                "Periodic validation checkpoints are only "
+                "supported for DNN agents."
+            )
+
+        if args.validation_interval <= 0:
+            raise ValueError(
+                "--validation-interval must be positive when "
+                "--validation-dataset is provided."
+            )
+
+        if (
+            args.early_stopping_patience is not None
+            and args.early_stopping_patience < 0
+        ):
+            raise ValueError(
+                "--early-stopping-patience cannot be negative."
+            )
+
+        if args.early_stopping_min_delta < 0.0:
+            raise ValueError(
+                "--early-stopping-min-delta cannot be negative."
+            )
+
+        validation_env = MazeEnv(
+            dataset_path=args.validation_dataset,
+            max_steps=args.max_steps,
+        )
 
     task_indices = (
         [args.fixed_index]
@@ -1340,6 +1553,10 @@ def main():
     optimization_epoch = 0
     q_snapshots = []
     model_snapshots = []
+    best_validation = None
+    validation_checks_without_improvement = 0
+    stopped_early = False
+    stopped_epoch = None
     q_snapshot_count = max(
         0,
         args.q_snapshot_count,
@@ -1397,6 +1614,11 @@ def main():
         dataset_epoch,
         epoch_metrics,
     ):
+        nonlocal best_validation
+        nonlocal stopped_early
+        nonlocal stopped_epoch
+        nonlocal validation_checks_without_improvement
+
         if dataset_epoch % 100 == 0:
             for metrics in sorted(
                 epoch_metrics,
@@ -1455,6 +1677,99 @@ def main():
                 }
             )
 
+        if (
+            validation_env is not None
+            and should_validate_epoch(
+                dataset_epoch,
+                args.dataset_epochs,
+                args.validation_interval,
+            )
+        ):
+            validation_task_indices = (
+                list(
+                    range(
+                        validation_env.num_tasks
+                    )
+                )
+                if args.validation_all_tasks
+                else None
+            )
+            _, validation_summary = evaluate(
+                algorithm=args.algorithm,
+                agent=agent,
+                env=validation_env,
+                episodes=args.validation_episodes,
+                seed=args.seed,
+                task_indices=validation_task_indices,
+            )
+            validation_score = validation_summary[
+                "average_path_efficiency"
+            ]
+            validation_row = {
+                "dataset_epoch": dataset_epoch,
+                "episodes": validation_summary[
+                    "episodes"
+                ],
+                "success_rate": validation_summary[
+                    "success_rate"
+                ],
+                "average_episode_return": validation_summary[
+                    "average_episode_return"
+                ],
+                "mean_path_efficiency": validation_score,
+                "average_successful_path_efficiency": (
+                    validation_summary[
+                        "average_successful_path_efficiency"
+                    ]
+                ),
+            }
+
+            append_validation_csv(
+                validation_metrics_path,
+                validation_row,
+            )
+
+            improved = (
+                best_validation is None
+                or validation_score
+                > best_validation[
+                    "mean_path_efficiency"
+                ]
+                + args.early_stopping_min_delta
+            )
+
+            if improved:
+                validation_checks_without_improvement = 0
+                best_validation = validation_row
+                save_neural_checkpoint_state(
+                    best_checkpoint_path,
+                    args.algorithm,
+                    current_neural_state_dict(
+                        args.algorithm,
+                        agent,
+                    ),
+                    model_snapshots=model_snapshots,
+                    hyperparameters=agent_hyperparameters,
+                    validation_metadata=validation_row,
+                )
+            else:
+                validation_checks_without_improvement += 1
+
+            print(
+                f"validation dataset_epoch={dataset_epoch:5d} "
+                f"mean_path_efficiency={validation_score:.3f} "
+                f"best="
+                f"{best_validation['mean_path_efficiency']:.3f}"
+            )
+
+            if (
+                args.early_stopping_patience is not None
+                and validation_checks_without_improvement
+                >= args.early_stopping_patience
+            ):
+                stopped_early = True
+                stopped_epoch = dataset_epoch
+
     def record_training_round(round_metrics):
         nonlocal training_round
         nonlocal optimization_epoch
@@ -1499,6 +1814,7 @@ def main():
             < sampler.current_dataset_epoch
             and next_epoch_to_log
             in epoch_metrics_by_epoch
+            and not stopped_early
         ):
             finish_dataset_epoch(
                 next_epoch_to_log,
@@ -1521,6 +1837,7 @@ def main():
         while (
             sampler.completed_dataset_epochs
             < args.dataset_epochs
+            and not stopped_early
         ):
             rollout_specs = sampler.sample_collection(
                 collection_size=rollout_episodes,
@@ -1591,6 +1908,7 @@ def main():
         while (
             sampler.completed_dataset_epochs
             < args.dataset_epochs
+            and not stopped_early
         ):
             rollout_specs = sampler.sample_collection(
                 collection_size=1,
@@ -1682,6 +2000,35 @@ def main():
         hyperparameters=agent_hyperparameters,
     )
 
+    summary = {
+        "algorithm": args.algorithm,
+        "dataset_epochs_requested": args.dataset_epochs,
+        "dataset_epochs_completed": (
+            stopped_epoch
+            if stopped_early
+            else sampler.completed_dataset_epochs
+        ),
+        "stopped_early": stopped_early,
+        "stopped_epoch": stopped_epoch,
+        "checkpoint_path": str(
+            checkpoint_path
+        ),
+        "hyperparameters": agent_hyperparameters,
+    }
+
+    if best_validation is not None:
+        summary["best_validation"] = (
+            best_validation
+        )
+        summary["best_checkpoint_path"] = str(
+            best_checkpoint_path
+        )
+
+    write_training_summary(
+        training_summary_path,
+        summary,
+    )
+
     print(
         f"Saved metrics to "
         f"{metrics_path}"
@@ -1690,6 +2037,21 @@ def main():
     print(
         f"Saved checkpoint to "
         f"{checkpoint_path}"
+    )
+
+    if best_validation is not None:
+        print(
+            "Saved best validation checkpoint to "
+            f"{best_checkpoint_path}"
+        )
+        print(
+            "Saved validation metrics to "
+            f"{validation_metrics_path}"
+        )
+
+    print(
+        "Saved training summary to "
+        f"{training_summary_path}"
     )
 
     if not args.no_plot:
