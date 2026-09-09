@@ -1,0 +1,252 @@
+from __future__ import annotations
+
+import numpy as np
+import torch
+
+from maze_rl.agents.a2c import A2CAgent
+from maze_rl.agents.reinforce import ReinforceAgent
+from maze_rl.agents.sarsa import SarsaAgent
+from maze_rl.training.trainers import train_sarsa_episode
+from maze_rl.training.trainers import train_reinforce_round
+from scripts.train import HierarchicalTaskSampler
+
+
+class OneStepGoalEnv:
+    def __init__(self) -> None:
+        self.state = "start"
+
+    def reset(
+        self,
+        *,
+        options=None,
+    ):
+        self.state = "start"
+        return None, {}
+
+    def tabular_state(self):
+        return self.state
+
+    def step(self, action):
+        self.state = "goal"
+        return (
+            None,
+            1.0,
+            True,
+            False,
+            {
+                "task_index": 0,
+                "layout_index": 0,
+                "success": True,
+                "steps": 1,
+                "wall_collisions": 0,
+                "optimal_path_length": 1,
+                "path_efficiency": 1.0,
+            },
+        )
+
+
+def test_sarsa_episode_does_not_materialize_terminal_goal_state():
+    agent = SarsaAgent(
+        action_count=4,
+        seed=123,
+    )
+
+    train_sarsa_episode(
+        env=OneStepGoalEnv(),
+        agent=agent,
+        episode=1,
+        epoch=1,
+        task_index=0,
+    )
+
+    assert "start" in agent.q
+    assert "goal" not in agent.q
+
+
+class OneStepArrayEnv:
+    def reset(
+        self,
+        *,
+        options=None,
+    ):
+        return np.zeros(
+            (3, 1, 1),
+            dtype=np.float32,
+        ), {}
+
+    def step(self, action):
+        return (
+            np.zeros(
+                (3, 1, 1),
+                dtype=np.float32,
+            ),
+            1.0,
+            True,
+            False,
+            {
+                "task_index": 0,
+                "layout_index": 0,
+                "success": True,
+                "steps": 1,
+                "wall_collisions": 0,
+                "optimal_path_length": 1,
+                "path_efficiency": 1.0,
+            },
+        )
+
+
+class FakeReinforceAgent:
+    minibatch_size = 2
+
+    def choose_action(self, observation):
+        return 0
+
+    def compute_returns(self, rewards):
+        return rewards
+
+    def update_rollout(
+        self,
+        observations,
+        actions,
+        returns,
+    ):
+        assert len(observations) == 3
+        assert len(actions) == 3
+        assert len(returns) == 3
+        return 7.0
+
+
+def test_reinforce_round_batches_metric_accounting():
+    metrics = train_reinforce_round(
+        env=OneStepArrayEnv(),
+        agent=FakeReinforceAgent(),
+        episode_specs=[
+            (1, 1, 0),
+            (2, 1, 0),
+            (3, 1, 0),
+        ],
+    )
+
+    assert [
+        metric.internal_updates
+        for metric in metrics
+    ] == [
+        None,
+        None,
+        2,
+    ]
+    assert [
+        metric.loss
+        for metric in metrics
+    ] == [
+        None,
+        None,
+        7.0,
+    ]
+
+
+def test_hierarchical_sampler_allows_collection_to_span_dataset_epochs():
+    sampler = HierarchicalTaskSampler(
+        task_indices=[0],
+        layout_indices=[0],
+        seed=123,
+    )
+
+    specs = sampler.sample_collection(
+        collection_size=16,
+        target_dataset_epochs=2,
+    )
+
+    assert len(specs) == 2
+    assert [
+        spec.task_index
+        for spec in specs
+    ] == [
+        0,
+        0,
+    ]
+    assert [
+        spec.dataset_epoch
+        for spec in specs
+    ] == [
+        1,
+        2,
+    ]
+
+
+def test_a2c_gae_bootstraps_truncation_but_not_termination():
+    agent = A2CAgent(
+        height=1,
+        width=1,
+        action_count=2,
+        device=torch.device("cpu"),
+        gamma=1.0,
+        gae_lambda=1.0,
+    )
+
+    truncated_advantages, truncated_returns = (
+        agent.compute_gae(
+            rewards=[1.0],
+            values=[2.0],
+            terminated_flags=[False],
+            last_value=5.0,
+        )
+    )
+
+    terminated_advantages, terminated_returns = (
+        agent.compute_gae(
+            rewards=[1.0],
+            values=[2.0],
+            terminated_flags=[True],
+            last_value=5.0,
+        )
+    )
+
+    assert truncated_advantages.tolist() == [
+        4.0
+    ]
+    assert truncated_returns.tolist() == [
+        6.0
+    ]
+    assert terminated_advantages.tolist() == [
+        -1.0
+    ]
+    assert terminated_returns.tolist() == [
+        1.0
+    ]
+
+
+def test_reinforce_entropy_coefficient_decays_to_floor():
+    agent = ReinforceAgent(
+        height=1,
+        width=1,
+        action_count=2,
+        device=torch.device("cpu"),
+        entropy_coefficient=0.05,
+        entropy_coefficient_min=0.02,
+        entropy_coefficient_decay=0.5,
+    )
+
+    agent.decay_entropy_coefficient()
+    assert agent.entropy_coefficient == 0.025
+
+    agent.decay_entropy_coefficient()
+    assert agent.entropy_coefficient == 0.02
+
+
+def test_a2c_entropy_coefficient_decays_to_floor():
+    agent = A2CAgent(
+        height=1,
+        width=1,
+        action_count=2,
+        device=torch.device("cpu"),
+        entropy_coefficient=0.05,
+        entropy_coefficient_min=0.02,
+        entropy_coefficient_decay=0.5,
+    )
+
+    agent.decay_entropy_coefficient()
+    assert agent.entropy_coefficient == 0.025
+
+    agent.decay_entropy_coefficient()
+    assert agent.entropy_coefficient == 0.02

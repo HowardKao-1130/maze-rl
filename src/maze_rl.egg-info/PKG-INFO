@@ -5,8 +5,11 @@ Summary: Reinforcement learning experiments for maze navigation
 Requires-Python: >=3.11
 Requires-Dist: numpy
 Requires-Dist: matplotlib
+Requires-Dist: imageio[ffmpeg]
 Requires-Dist: tqdm
 Requires-Dist: gymnasium
 Requires-Dist: tensorboard
+Provides-Extra: video
+Requires-Dist: imageio[ffmpeg]; extra == "video"
 Provides-Extra: dev
 Requires-Dist: pytest; extra == "dev"

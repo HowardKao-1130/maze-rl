@@ -1,8 +1,12 @@
 numpy
 matplotlib
+imageio[ffmpeg]
 tqdm
 gymnasium
 tensorboard
 
 [dev]
 pytest
+
+[video]
+imageio[ffmpeg]

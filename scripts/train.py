@@ -1,0 +1,1492 @@
+from __future__ import annotations
+
+import argparse
+from collections import defaultdict
+from dataclasses import dataclass
+import os
+from pathlib import Path
+import pickle
+import random
+
+import numpy as np
+
+os.environ.setdefault(
+    "CUBLAS_WORKSPACE_CONFIG",
+    ":4096:8",
+)
+
+import torch
+
+from maze_rl.agents.a2c import A2CAgent
+from maze_rl.agents.dqn import DQNAgent
+from maze_rl.agents.dyna_q import DynaQAgent
+from maze_rl.agents.monte_carlo import MonteCarloAgent
+from maze_rl.agents.ppo import PPOAgent
+from maze_rl.agents.q_learning import QLearningAgent
+from maze_rl.agents.reinforce import ReinforceAgent
+from maze_rl.agents.sarsa import SarsaAgent
+from maze_rl.envs.maze_env import MazeEnv
+from maze_rl.training.metrics import append_metrics_csv
+from maze_rl.training.plots import (
+    plot_task_training_metrics,
+    plot_training_metrics,
+    write_task_training_metrics_html,
+)
+from maze_rl.training.trainers import (
+    train_a2c_round,
+    train_dqn_episode,
+    train_monte_carlo_episode,
+    train_ppo_round,
+    train_q_learning_episode,
+    train_reinforce_round,
+    train_sarsa_episode,
+)
+
+
+TABULAR_ALGORITHMS = {
+    "mc",
+    "sarsa",
+    "q_learning",
+    "dyna_q",
+}
+
+NEURAL_SNAPSHOT_ALGORITHMS = {
+    "dqn",
+    "a2c",
+    "ppo",
+}
+
+POLICY_ROLLOUT_EPISODES = {
+    "reinforce": 16,
+    "a2c": 16,
+    "ppo": 64,
+}
+
+
+def configure_reproducibility(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.use_deterministic_algorithms(True)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+
+
+def tensorboard_default_enabled(
+    algorithm: str,
+) -> bool:
+    return algorithm not in TABULAR_ALGORITHMS
+
+
+@dataclass(frozen=True)
+class RolloutSpec:
+    rollout: int
+    dataset_epoch: int
+    task_index: int
+
+
+class HierarchicalTaskSampler:
+    def __init__(
+        self,
+        task_indices,
+        layout_indices,
+        seed: int,
+    ) -> None:
+        self.rng = np.random.default_rng(
+            seed
+        )
+        self.task_indices = [
+            int(task_index)
+            for task_index in task_indices
+        ]
+
+        if not self.task_indices:
+            raise ValueError(
+                "At least one task is required for training."
+            )
+
+        self.tasks_by_layout = defaultdict(list)
+
+        for task_index in self.task_indices:
+            layout_index = int(
+                layout_indices[task_index]
+            )
+            self.tasks_by_layout[
+                layout_index
+            ].append(task_index)
+
+        self.layout_indices = sorted(
+            self.tasks_by_layout
+        )
+        self.total_task_count = len(
+            self.task_indices
+        )
+        self.current_dataset_epoch = 1
+        self.completed_dataset_epochs = 0
+        self.seen_in_dataset_epoch = set()
+        self.rollout = 0
+
+    def _sample_task(self) -> int:
+        available_layouts = [
+            layout_index
+            for layout_index in self.layout_indices
+            if any(
+                task_index
+                not in self.seen_in_dataset_epoch
+                for task_index in self.tasks_by_layout[
+                    layout_index
+                ]
+            )
+        ]
+
+        if not available_layouts:
+            raise ValueError(
+                "No unseen tasks remain in the current dataset epoch."
+            )
+
+        layout_index = int(
+            self.rng.choice(
+                available_layouts
+            )
+        )
+        available_tasks = [
+            task_index
+            for task_index in self.tasks_by_layout[
+                layout_index
+            ]
+            if task_index
+            not in self.seen_in_dataset_epoch
+        ]
+
+        return int(
+            self.rng.choice(
+                available_tasks
+            )
+        )
+
+    def sample_collection(
+        self,
+        collection_size: int,
+        target_dataset_epochs: int,
+    ) -> list[RolloutSpec]:
+        specs = []
+
+        while (
+            len(specs) < collection_size
+            and self.completed_dataset_epochs
+            < target_dataset_epochs
+        ):
+            task_index = self._sample_task()
+            self.rollout += 1
+
+            specs.append(
+                RolloutSpec(
+                    rollout=self.rollout,
+                    dataset_epoch=self.current_dataset_epoch,
+                    task_index=task_index,
+                )
+            )
+
+            self.seen_in_dataset_epoch.add(
+                task_index
+            )
+
+            if (
+                len(self.seen_in_dataset_epoch)
+                == self.total_task_count
+            ):
+                self.completed_dataset_epochs += 1
+                self.current_dataset_epoch += 1
+                self.seen_in_dataset_epoch.clear()
+
+        return specs
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--algorithm",
+        required=True,
+        choices=[
+            "mc",
+            "sarsa",
+            "q_learning",
+            "dyna_q",
+            "dqn",
+            "reinforce",
+            "a2c",
+            "ppo",
+        ],
+    )
+
+    parser.add_argument(
+        "--dataset",
+        default="data/train.npz",
+    )
+
+    parser.add_argument(
+        "--dataset-epochs",
+        type=int,
+        default=100,
+        help=(
+            "Number of dataset epochs to train. A dataset epoch "
+            "completes when every selected task has appeared at "
+            "least once in rollout collection."
+        ),
+    )
+
+    parser.add_argument(
+        "--fixed-index",
+        type=int,
+        default=None,
+        help="Train on one fixed task index.",
+    )
+
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=200,
+    )
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+    )
+
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("runs"),
+    )
+
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Append to an existing metrics file instead of starting fresh.",
+    )
+
+    parser.add_argument(
+        "--plot-output",
+        type=Path,
+        default=None,
+        help=(
+            "Training plot path. Defaults to "
+            "<run directory>/training_metrics.png."
+        ),
+    )
+
+    parser.add_argument(
+        "--rolling-window",
+        type=int,
+        default=0,
+        help=(
+            "Number of dataset epochs used for rolling means. "
+            "Use 0 to disable rolling means."
+        ),
+    )
+
+    parser.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="Skip training plot generation.",
+    )
+
+    parser.add_argument(
+        "--task-plot-output",
+        type=Path,
+        default=None,
+        help=(
+            "Per-task training plot path. Defaults to "
+            "<run directory>/task_training_metrics.png."
+        ),
+    )
+
+    parser.add_argument(
+        "--task-html-output",
+        type=Path,
+        default=None,
+        help=(
+            "Interactive per-task training plot path. Defaults to "
+            "<run directory>/task_training_metrics.html."
+        ),
+    )
+
+    parser.add_argument(
+        "--q-snapshot-count",
+        type=int,
+        default=101,
+        help=(
+            "Number of evenly spaced tabular Q-table snapshots to "
+            "save in checkpoints. The first snapshot is dataset "
+            "epoch 1."
+        ),
+    )
+
+    parser.add_argument(
+        "--tensorboard",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Write TensorBoard event logs. Defaults on for neural "
+            "agents and off for tabular agents."
+        ),
+    )
+
+    parser.add_argument(
+        "--tensorboard-dir",
+        type=Path,
+        default=None,
+        help=(
+            "TensorBoard log directory. Defaults to "
+            "<run directory>/tensorboard."
+        ),
+    )
+
+    return parser.parse_args()
+
+
+def create_agent(
+    algorithm,
+    env,
+    device,
+    seed,
+):
+    kwargs = {
+        "action_count": env.action_space.n,
+    }
+
+    if algorithm == "mc":
+        return MonteCarloAgent(
+            **kwargs,
+            seed=seed,
+        )
+
+    if algorithm == "sarsa":
+        return SarsaAgent(
+            **kwargs,
+            seed=seed,
+        )
+
+    if algorithm == "q_learning":
+        return QLearningAgent(
+            **kwargs,
+            seed=seed,
+        )
+
+    if algorithm == "dyna_q":
+        return DynaQAgent(
+            **kwargs,
+            seed=seed,
+        )
+
+    neural_kwargs = {
+        **kwargs,
+        "height": env.height,
+        "width": env.width,
+        "device": device,
+    }
+
+    if algorithm == "dqn":
+        return DQNAgent(
+            **neural_kwargs,
+            seed=seed,
+            replay_capacity=(
+                64 * env.max_steps
+            ),
+        )
+
+    if algorithm == "reinforce":
+        return ReinforceAgent(
+            **neural_kwargs,
+        )
+
+    if algorithm == "a2c":
+        return A2CAgent(
+            **neural_kwargs,
+        )
+
+    if algorithm == "ppo":
+        return PPOAgent(
+            **neural_kwargs,
+        )
+
+    raise ValueError(algorithm)
+
+
+def save_checkpoint(
+    path,
+    algorithm,
+    agent,
+    q_snapshots=None,
+    model_snapshots=None,
+):
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    if algorithm in TABULAR_ALGORITHMS:
+        with path.open("wb") as file:
+            pickle.dump(
+                {
+                    "algorithm": algorithm,
+                    "q": agent.q_state_dict(),
+                    "q_snapshots": q_snapshots or [],
+                },
+                file,
+            )
+
+        return
+
+    if algorithm == "dqn":
+        state_dict = (
+            agent.online_network.state_dict()
+        )
+
+    elif algorithm == "reinforce":
+        state_dict = (
+            agent.policy.state_dict()
+        )
+
+    else:
+        state_dict = (
+            agent.network.state_dict()
+        )
+
+    torch.save(
+        {
+            "algorithm": algorithm,
+            "model_state_dict": state_dict,
+            "model_snapshots": model_snapshots or [],
+        },
+        path,
+    )
+
+
+def model_snapshot_state_dict(
+    algorithm,
+    agent,
+):
+    network = (
+        agent.online_network
+        if algorithm == "dqn"
+        else agent.network
+    )
+
+    return {
+        key: value.detach().cpu().clone()
+        for key, value in network.state_dict().items()
+    }
+
+
+def format_progress_message(
+    algorithm: str,
+    metrics,
+    agent,
+) -> str:
+    message = (
+        f"{algorithm:12s} "
+        f"dataset_epoch={metrics.epoch:5d} "
+        f"rollout={metrics.episode:7d} "
+        f"task={metrics.task_index:5d} "
+        f"episode_return="
+        f"{metrics.episode_return:7.3f} "
+        f"steps={metrics.steps:3d} "
+        f"success={metrics.success} "
+        f"efficiency="
+        f"{metrics.path_efficiency:.3f}"
+    )
+
+    if metrics.mean_abs_td_error is not None:
+        message += (
+            " mean_abs_td_error="
+            f"{metrics.mean_abs_td_error:.6f}"
+        )
+
+    if algorithm == "dqn":
+        message += (
+            f" epsilon="
+            f"{agent.epsilon:.3f}"
+        )
+
+    return message
+
+
+def create_tensorboard_writer(
+    args,
+    run_dir: Path,
+):
+    enabled = (
+        tensorboard_default_enabled(
+            args.algorithm
+        )
+        if args.tensorboard is None
+        else args.tensorboard
+    )
+
+    if not enabled:
+        return None
+
+    from torch.utils.tensorboard import SummaryWriter
+
+    log_dir = (
+        args.tensorboard_dir
+        if args.tensorboard_dir is not None
+        else run_dir / "tensorboard"
+    )
+
+    writer = SummaryWriter(
+        log_dir=str(log_dir)
+    )
+
+    print(
+        f"Writing TensorBoard logs to {log_dir}"
+    )
+
+    return writer
+
+
+def _mean_present(
+    values,
+) -> float | None:
+    present_values = [
+        value
+        for value in values
+        if value is not None
+    ]
+
+    if not present_values:
+        return None
+
+    return float(
+        np.mean(present_values)
+    )
+
+
+def _write_tensorboard_scalars(
+    writer,
+    prefix: str,
+    scalars,
+    step: int,
+) -> None:
+    for name, value in scalars:
+        if value is not None:
+            writer.add_scalar(
+                f"{prefix}/{name}",
+                value,
+                step,
+            )
+
+
+def episode_tensorboard_scalars(
+    metrics,
+    agent,
+) -> list[tuple[str, float | int | None]]:
+    scalars = [
+        (
+            "return",
+            metrics.episode_return,
+        ),
+        (
+            "success",
+            float(metrics.success),
+        ),
+        (
+            "steps",
+            metrics.steps,
+        ),
+        (
+            "path_efficiency",
+            metrics.path_efficiency,
+        ),
+        (
+            "wall_collisions",
+            metrics.wall_collisions,
+        ),
+        (
+            "internal_updates",
+            metrics.internal_updates,
+        ),
+        (
+            "mean_abs_td_error",
+            metrics.mean_abs_td_error,
+        ),
+    ]
+
+    if metrics.loss is not None:
+        scalars.append(
+            (
+                "loss/total",
+                metrics.loss,
+            )
+        )
+
+    for field_name, name in [
+        (
+            "policy_loss",
+            "loss/policy",
+        ),
+        (
+            "value_loss",
+            "loss/value",
+        ),
+        (
+            "entropy",
+            "policy/entropy",
+        ),
+        (
+            "approximate_kl",
+            "policy/approximate_kl",
+        ),
+        (
+            "clip_fraction",
+            "policy/clip_fraction",
+        ),
+        (
+            "mean_value",
+            "value/mean_prediction",
+        ),
+        (
+            "mean_return",
+            "value/mean_return",
+        ),
+        (
+            "mean_advantage",
+            "value/mean_advantage",
+        ),
+        (
+            "mean_q_value",
+            "dqn/mean_selected_q_value",
+        ),
+        (
+            "max_q_value",
+            "dqn/max_q_value",
+        ),
+        (
+            "replay_size",
+            "dqn/replay_size",
+        ),
+    ]:
+        value = getattr(
+            metrics,
+            field_name,
+        )
+
+        if value is not None:
+            scalars.append(
+                (
+                    name,
+                    value,
+                )
+            )
+
+    if hasattr(agent, "epsilon"):
+        scalars.append(
+            (
+                "agent/epsilon",
+                agent.epsilon,
+            )
+        )
+
+    if hasattr(
+        agent,
+        "entropy_coefficient",
+    ):
+        scalars.append(
+            (
+                "agent/entropy_coefficient",
+                agent.entropy_coefficient,
+            )
+        )
+
+    return scalars
+
+
+def aggregate_tensorboard_scalars(
+    metrics_list,
+    agent,
+) -> list[tuple[str, float | None]]:
+    scalars = [
+        (
+            "mean_return",
+            float(
+                np.mean(
+                    [
+                        metrics.episode_return
+                        for metrics in metrics_list
+                    ]
+                )
+            ),
+        ),
+        (
+            "success_rate",
+            float(
+                np.mean(
+                    [
+                        metrics.success
+                        for metrics in metrics_list
+                    ]
+                )
+            ),
+        ),
+        (
+            "mean_steps",
+            float(
+                np.mean(
+                    [
+                        metrics.steps
+                        for metrics in metrics_list
+                    ]
+                )
+            ),
+        ),
+        (
+            "mean_path_efficiency",
+            float(
+                np.mean(
+                    [
+                        metrics.path_efficiency
+                        for metrics in metrics_list
+                    ]
+                )
+            ),
+        ),
+        (
+            "mean_wall_collisions",
+            float(
+                np.mean(
+                    [
+                        metrics.wall_collisions
+                        for metrics in metrics_list
+                    ]
+                )
+            ),
+        ),
+        (
+            "mean_internal_updates",
+            _mean_present(
+                [
+                    metrics.internal_updates
+                    for metrics in metrics_list
+                ]
+            ),
+        ),
+        (
+            "mean_abs_td_error",
+            _mean_present(
+                [
+                    metrics.mean_abs_td_error
+                    for metrics in metrics_list
+                ]
+            ),
+        ),
+        (
+            "loss/mean_total",
+            _mean_present(
+                [
+                    metrics.loss
+                    for metrics in metrics_list
+                ]
+            ),
+        ),
+        (
+            "loss/mean_policy",
+            _mean_present(
+                [
+                    metrics.policy_loss
+                    for metrics in metrics_list
+                ]
+            ),
+        ),
+        (
+            "loss/mean_value",
+            _mean_present(
+                [
+                    metrics.value_loss
+                    for metrics in metrics_list
+                ]
+            ),
+        ),
+        (
+            "policy/mean_entropy",
+            _mean_present(
+                [
+                    metrics.entropy
+                    for metrics in metrics_list
+                ]
+            ),
+        ),
+        (
+            "policy/mean_approximate_kl",
+            _mean_present(
+                [
+                    metrics.approximate_kl
+                    for metrics in metrics_list
+                ]
+            ),
+        ),
+        (
+            "policy/mean_clip_fraction",
+            _mean_present(
+                [
+                    metrics.clip_fraction
+                    for metrics in metrics_list
+                ]
+            ),
+        ),
+        (
+            "value/mean_prediction",
+            _mean_present(
+                [
+                    metrics.mean_value
+                    for metrics in metrics_list
+                ]
+            ),
+        ),
+        (
+            "value/mean_return",
+            _mean_present(
+                [
+                    metrics.mean_return
+                    for metrics in metrics_list
+                ]
+            ),
+        ),
+        (
+            "value/mean_advantage",
+            _mean_present(
+                [
+                    metrics.mean_advantage
+                    for metrics in metrics_list
+                ]
+            ),
+        ),
+        (
+            "dqn/mean_selected_q_value",
+            _mean_present(
+                [
+                    metrics.mean_q_value
+                    for metrics in metrics_list
+                ]
+            ),
+        ),
+        (
+            "dqn/max_q_value",
+            _mean_present(
+                [
+                    metrics.max_q_value
+                    for metrics in metrics_list
+                ]
+            ),
+        ),
+        (
+            "dqn/mean_replay_size",
+            _mean_present(
+                [
+                    metrics.replay_size
+                    for metrics in metrics_list
+                ]
+            ),
+        ),
+    ]
+
+    if hasattr(agent, "epsilon"):
+        scalars.append(
+            (
+                "agent/epsilon",
+                agent.epsilon,
+            )
+        )
+
+    if hasattr(
+        agent,
+        "entropy_coefficient",
+    ):
+        scalars.append(
+            (
+                "agent/entropy_coefficient",
+                agent.entropy_coefficient,
+            )
+        )
+
+    return scalars
+
+
+def log_tensorboard_episode(
+    writer,
+    metrics,
+    agent,
+    transition_step: int,
+) -> None:
+    if writer is None:
+        return
+
+    scalars = episode_tensorboard_scalars(
+        metrics,
+        agent,
+    )
+
+    _write_tensorboard_scalars(
+        writer,
+        "by_rollout",
+        scalars,
+        metrics.episode,
+    )
+    _write_tensorboard_scalars(
+        writer,
+        "by_transition",
+        scalars,
+        transition_step,
+    )
+
+
+def log_tensorboard_epoch(
+    writer,
+    epoch: int,
+    epoch_metrics,
+    agent,
+) -> None:
+    if writer is None or not epoch_metrics:
+        return
+
+    _write_tensorboard_scalars(
+        writer,
+        "by_dataset_epoch",
+        aggregate_tensorboard_scalars(
+            epoch_metrics,
+            agent,
+        ),
+        epoch,
+    )
+
+    writer.flush()
+
+
+def log_tensorboard_training_round(
+    writer,
+    training_round: int,
+    round_metrics,
+    agent,
+) -> None:
+    if writer is None or not round_metrics:
+        return
+
+    _write_tensorboard_scalars(
+        writer,
+        "by_training_round",
+        aggregate_tensorboard_scalars(
+            round_metrics,
+            agent,
+        ),
+        training_round,
+    )
+    writer.flush()
+
+
+def log_tensorboard_optimization_epoch(
+    writer,
+    optimization_epoch: int,
+    round_metrics,
+    agent,
+) -> None:
+    if writer is None or not round_metrics:
+        return
+
+    _write_tensorboard_scalars(
+        writer,
+        "by_optimization_epoch",
+        aggregate_tensorboard_scalars(
+            round_metrics,
+            agent,
+        ),
+        optimization_epoch,
+    )
+    writer.flush()
+
+
+def optimization_epochs_for_round(
+    algorithm: str,
+    agent,
+    round_metrics,
+) -> int:
+    if not any(
+        metrics.internal_updates
+        for metrics in round_metrics
+    ):
+        return 0
+
+    if algorithm == "ppo":
+        return int(agent.update_epochs)
+
+    if algorithm in {
+        "reinforce",
+        "a2c",
+    }:
+        return 1
+
+    return sum(
+        int(metrics.internal_updates or 0)
+        for metrics in round_metrics
+    )
+
+
+def main():
+    args = parse_args()
+
+    configure_reproducibility(args.seed)
+
+    device = torch.device(
+        "cuda"
+        if torch.cuda.is_available()
+        else "cpu"
+    )
+
+    env = MazeEnv(
+        dataset_path=args.dataset,
+        max_steps=args.max_steps,
+        fixed_index=args.fixed_index,
+    )
+
+    agent = create_agent(
+        algorithm=args.algorithm,
+        env=env,
+        device=device,
+        seed=args.seed,
+    )
+
+    run_dir = (
+        args.output_dir
+        / args.algorithm
+    )
+
+    tensorboard_writer = create_tensorboard_writer(
+        args,
+        run_dir,
+    )
+
+    metrics_path = (
+        run_dir / "metrics.csv"
+    )
+
+    if metrics_path.exists() and not args.resume:
+        metrics_path.unlink()
+
+    task_indices = (
+        [args.fixed_index]
+        if args.fixed_index is not None
+        else list(range(env.num_tasks))
+    )
+
+    reached_task_indices = set()
+    cumulative_transitions = 0
+    training_round = 0
+    optimization_epoch = 0
+    q_snapshots = []
+    model_snapshots = []
+    q_snapshot_count = max(
+        0,
+        args.q_snapshot_count,
+    )
+    snapshot_epochs = [
+        int(epoch)
+        for epoch in np.unique(
+            np.linspace(
+                1,
+                args.dataset_epochs,
+                num=min(q_snapshot_count, args.dataset_epochs),
+                dtype=np.int64,
+            )
+        )
+    ]
+    snapshot_indices = {
+        epoch: index
+        for index, epoch in enumerate(
+            snapshot_epochs,
+            start=1,
+        )
+    }
+
+    def record_episode_metrics(metrics):
+        nonlocal cumulative_transitions
+
+        append_metrics_csv(
+            metrics_path,
+            metrics,
+        )
+
+        cumulative_transitions += int(
+            metrics.steps
+        )
+
+        if metrics.success:
+            reached_task_indices.add(
+                int(metrics.task_index)
+            )
+
+        log_tensorboard_episode(
+            tensorboard_writer,
+            metrics,
+            agent,
+            cumulative_transitions,
+        )
+
+    sampler = HierarchicalTaskSampler(
+        task_indices=task_indices,
+        layout_indices=env.layout_indices,
+        seed=args.seed,
+    )
+
+    def finish_dataset_epoch(
+        dataset_epoch,
+        epoch_metrics,
+    ):
+        if dataset_epoch % 100 == 0:
+            for metrics in sorted(
+                epoch_metrics,
+                key=lambda item: item.task_index,
+            ):
+                print(
+                    format_progress_message(
+                        args.algorithm,
+                        metrics,
+                        agent,
+                    )
+                )
+
+        log_tensorboard_epoch(
+            tensorboard_writer,
+            dataset_epoch,
+            epoch_metrics,
+            agent,
+        )
+
+        if (
+            args.algorithm in TABULAR_ALGORITHMS
+            and dataset_epoch in snapshot_indices
+        ):
+            q_snapshots.append(
+                {
+                    "snapshot_index": snapshot_indices[
+                        dataset_epoch
+                    ],
+                    "epoch": dataset_epoch,
+                    "q": agent.q_state_dict(),
+                    "reached_task_indices": sorted(
+                        reached_task_indices
+                    ),
+                }
+            )
+
+        if (
+            args.algorithm
+            in NEURAL_SNAPSHOT_ALGORITHMS
+            and dataset_epoch in snapshot_indices
+        ):
+            model_snapshots.append(
+                {
+                    "snapshot_index": snapshot_indices[
+                        dataset_epoch
+                    ],
+                    "epoch": dataset_epoch,
+                    "model_state_dict": model_snapshot_state_dict(
+                        args.algorithm,
+                        agent,
+                    ),
+                    "reached_task_indices": sorted(
+                        reached_task_indices
+                    ),
+                }
+            )
+
+    def record_training_round(round_metrics):
+        nonlocal training_round
+        nonlocal optimization_epoch
+
+        optimization_epochs = (
+            optimization_epochs_for_round(
+                args.algorithm,
+                agent,
+                round_metrics,
+            )
+        )
+
+        if optimization_epochs <= 0:
+            return
+
+        training_round += 1
+
+        log_tensorboard_training_round(
+            tensorboard_writer,
+            training_round,
+            round_metrics,
+            agent,
+        )
+
+        for _ in range(
+            optimization_epochs
+        ):
+            optimization_epoch += 1
+            log_tensorboard_optimization_epoch(
+                tensorboard_writer,
+                optimization_epoch,
+                round_metrics,
+                agent,
+            )
+
+    def maybe_finish_dataset_epochs(
+        epoch_metrics_by_epoch,
+        next_epoch_to_log,
+    ) -> int:
+        while (
+            next_epoch_to_log
+            < sampler.current_dataset_epoch
+            and next_epoch_to_log
+            in epoch_metrics_by_epoch
+        ):
+            finish_dataset_epoch(
+                next_epoch_to_log,
+                epoch_metrics_by_epoch.pop(
+                    next_epoch_to_log
+                ),
+            )
+            next_epoch_to_log += 1
+
+        return next_epoch_to_log
+
+    if args.algorithm in POLICY_ROLLOUT_EPISODES:
+        epoch_metrics_by_epoch = {}
+        next_epoch_to_log = 1
+
+        while (
+            sampler.completed_dataset_epochs
+            < args.dataset_epochs
+        ):
+            rollout_specs = sampler.sample_collection(
+                collection_size=POLICY_ROLLOUT_EPISODES[
+                    args.algorithm
+                ],
+                target_dataset_epochs=args.dataset_epochs,
+            )
+            episode_specs = [
+                (
+                    spec.rollout,
+                    spec.dataset_epoch,
+                    spec.task_index,
+                )
+                for spec in rollout_specs
+            ]
+
+            if not episode_specs:
+                break
+
+            if args.algorithm == "reinforce":
+                round_metrics = (
+                    train_reinforce_round(
+                        env,
+                        agent,
+                        episode_specs,
+                    )
+                )
+            elif args.algorithm == "a2c":
+                round_metrics = train_a2c_round(
+                    env,
+                    agent,
+                    episode_specs,
+                )
+            else:
+                round_metrics = train_ppo_round(
+                    env,
+                    agent,
+                    episode_specs,
+                )
+
+            for metrics in round_metrics:
+                epoch_metrics_by_epoch.setdefault(
+                    metrics.epoch,
+                    [],
+                ).append(metrics)
+
+                record_episode_metrics(metrics)
+
+            record_training_round(
+                round_metrics
+            )
+
+            next_epoch_to_log = (
+                maybe_finish_dataset_epochs(
+                    epoch_metrics_by_epoch,
+                    next_epoch_to_log,
+                )
+            )
+
+    else:
+        epoch_metrics_by_epoch = {}
+        next_epoch_to_log = 1
+
+        while (
+            sampler.completed_dataset_epochs
+            < args.dataset_epochs
+        ):
+            rollout_specs = sampler.sample_collection(
+                collection_size=1,
+                target_dataset_epochs=args.dataset_epochs,
+            )
+
+            if not rollout_specs:
+                break
+
+            spec = rollout_specs[0]
+
+            if args.algorithm == "mc":
+                metrics = (
+                    train_monte_carlo_episode(
+                        env,
+                        agent,
+                        spec.rollout,
+                        spec.dataset_epoch,
+                        spec.task_index,
+                    )
+                )
+
+            elif args.algorithm == "sarsa":
+                metrics = train_sarsa_episode(
+                    env,
+                    agent,
+                    spec.rollout,
+                    spec.dataset_epoch,
+                    spec.task_index,
+                )
+
+            elif args.algorithm in {
+                "q_learning",
+                "dyna_q",
+            }:
+                metrics = (
+                    train_q_learning_episode(
+                        env,
+                        agent,
+                        spec.rollout,
+                        spec.dataset_epoch,
+                        spec.task_index,
+                    )
+                )
+
+            else:
+                metrics = train_dqn_episode(
+                    env,
+                    agent,
+                    spec.rollout,
+                    spec.dataset_epoch,
+                    spec.task_index,
+                )
+
+            record_episode_metrics(metrics)
+            record_training_round(
+                [metrics]
+            )
+            epoch_metrics_by_epoch.setdefault(
+                metrics.epoch,
+                [],
+            ).append(metrics)
+
+            next_epoch_to_log = (
+                maybe_finish_dataset_epochs(
+                    epoch_metrics_by_epoch,
+                    next_epoch_to_log,
+                )
+            )
+
+    checkpoint_suffix = (
+        ".pkl"
+        if args.algorithm
+        in TABULAR_ALGORITHMS
+        else ".pt"
+    )
+
+    checkpoint_path = (
+        run_dir
+        / f"checkpoint{checkpoint_suffix}"
+    )
+
+    save_checkpoint(
+        checkpoint_path,
+        args.algorithm,
+        agent,
+        q_snapshots=q_snapshots,
+        model_snapshots=model_snapshots,
+    )
+
+    print(
+        f"Saved metrics to "
+        f"{metrics_path}"
+    )
+
+    print(
+        f"Saved checkpoint to "
+        f"{checkpoint_path}"
+    )
+
+    if not args.no_plot:
+        plot_path = (
+            args.plot_output
+            if args.plot_output is not None
+            else run_dir / "training_metrics.png"
+        )
+
+        plot_training_metrics(
+            metrics_path=metrics_path,
+            output_path=plot_path,
+            rolling_window=args.rolling_window,
+        )
+
+        print(
+            f"Saved training plot to "
+            f"{plot_path}"
+        )
+
+        task_plot_path = (
+            args.task_plot_output
+            if args.task_plot_output is not None
+            else run_dir / "task_training_metrics.png"
+        )
+
+        plot_task_training_metrics(
+            metrics_path=metrics_path,
+            output_path=task_plot_path,
+        )
+
+        print(
+            f"Saved task training plot to "
+            f"{task_plot_path}"
+        )
+
+        task_html_path = (
+            args.task_html_output
+            if args.task_html_output is not None
+            else run_dir / "task_training_metrics.html"
+        )
+
+        write_task_training_metrics_html(
+            metrics_path=metrics_path,
+            output_path=task_html_path,
+        )
+
+        print(
+            f"Saved interactive task training plot to "
+            f"{task_html_path}"
+        )
+
+    if tensorboard_writer is not None:
+        tensorboard_writer.close()
+
+
+if __name__ == "__main__":
+    main()

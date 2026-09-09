@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
         "--index",
         type=int,
         default=0,
+        help="Task index to visualize.",
     )
 
     return parser.parse_args()
@@ -33,7 +34,23 @@ def main() -> None:
 
     data = np.load(args.dataset)
 
-    maze = data["mazes"][args.index]
+    layouts = (
+        data["layouts"]
+        if "layouts" in data
+        else data["mazes"]
+    )
+    layout_indices = (
+        data["layout_indices"]
+        if "layout_indices" in data
+        else np.arange(len(data["starts"]))
+    )
+
+    task_index = args.index
+    layout_index = int(
+        layout_indices[task_index]
+    )
+
+    maze = layouts[layout_index]
     start = data["starts"][args.index]
     goal = data["goals"][args.index]
 
@@ -148,13 +165,15 @@ def main() -> None:
     )
 
     plt.title(
-        f"Maze {args.index} | Shortest path: {distance}"
+        f"Task {task_index} | Layout {layout_index} | "
+        f"Shortest path: {distance}"
     )
 
     plt.tight_layout()
     plt.show()
 
-    print(f"Maze index: {args.index}")
+    print(f"Task index: {task_index}")
+    print(f"Layout index: {layout_index}")
     print(f"Start: {start}")
     print(f"Goal: {goal}")
     print(f"Shortest path length: {distance}")
