@@ -259,6 +259,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--same-layout-dataset",
+        type=Path,
+        default=Path("data")
+        / "same_layout_new_goals.npz",
+        help=(
+            "Pre-generated same-layout new-task dataset to monitor "
+            "beside validation performance."
+        ),
+    )
+    parser.add_argument(
         "--test-dataset",
         type=Path,
         default=Path("data") / "test.npz",
@@ -494,6 +504,8 @@ def build_training_command(
         str(args.max_steps),
         "--validation-dataset",
         str(args.validation_dataset),
+        "--same-layout-dataset",
+        str(args.same_layout_dataset),
         "--validation-interval",
         str(args.validation_interval),
         "--seed",
@@ -788,6 +800,7 @@ def main() -> None:
         for dataset_path in [
             args.train_dataset,
             args.validation_dataset,
+            args.same_layout_dataset,
         ]:
             if not dataset_path.exists():
                 raise FileNotFoundError(
@@ -853,7 +866,8 @@ def main() -> None:
 
         print()
         print(
-            f"Trial {trial}/{args.trials}: "
+            f"Trial {trial}/{args.trials} "
+            f"({trial / args.trials:.0%}): "
             f"{json.dumps(hyperparameters, sort_keys=True)}",
             flush=True,
         )

@@ -56,6 +56,8 @@ def test_training_command_includes_trial_hyperparameters(tmp_path):
         dataset_epochs=3,
         max_steps=7,
         validation_dataset=tmp_path / "validation.npz",
+        same_layout_dataset=tmp_path
+        / "same_layout_new_goals.npz",
         validation_interval=2,
         eval_all_tasks=False,
         eval_episodes=5,
@@ -88,6 +90,11 @@ def test_training_command_includes_trial_hyperparameters(tmp_path):
     assert command[
         command.index("--validation-dataset") + 1
     ] == str(tmp_path / "validation.npz")
+    assert command[
+        command.index("--same-layout-dataset") + 1
+    ] == str(
+        tmp_path / "same_layout_new_goals.npz"
+    )
     assert command[
         command.index("--validation-interval") + 1
     ] == "2"

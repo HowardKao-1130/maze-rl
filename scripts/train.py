@@ -33,6 +33,7 @@ from maze_rl.training.metrics import append_metrics_csv
 from maze_rl.training.plots import (
     plot_task_training_metrics,
     plot_training_metrics,
+    plot_validation_metrics,
     write_task_training_metrics_html,
 )
 from maze_rl.training.trainers import (
@@ -426,6 +427,16 @@ def parse_args():
         default=None,
         help=(
             "Optional validation dataset for periodic neural-agent "
+            "selection."
+        ),
+    )
+    parser.add_argument(
+        "--same-layout-dataset",
+        type=Path,
+        default=None,
+        help=(
+            "Optional same-layout new-task dataset to evaluate "
+            "alongside validation during periodic neural-agent "
             "selection."
         ),
     )
@@ -852,6 +863,7 @@ def append_validation_csv(
     )
 
     fieldnames = [
+        "split",
         "dataset_epoch",
         "episodes",
         "success_rate",
@@ -1508,7 +1520,7 @@ def main():
     ):
         validation_metrics_path.unlink()
 
-    validation_env = None
+    validation_envs = {}
 
     if args.validation_dataset is not None:
         if args.algorithm not in NEURAL_ALGORITHMS:
@@ -1540,6 +1552,22 @@ def main():
             dataset_path=args.validation_dataset,
             max_steps=args.max_steps,
         )
+        validation_envs[
+            "validation"
+        ] = validation_env
+
+        if args.same_layout_dataset is not None:
+            validation_envs[
+                "same_layout"
+            ] = MazeEnv(
+                dataset_path=args.same_layout_dataset,
+                max_steps=args.max_steps,
+            )
+
+    elif args.same_layout_dataset is not None:
+        raise ValueError(
+            "--same-layout-dataset requires --validation-dataset."
+        )
 
     task_indices = (
         [args.fixed_index]
@@ -1554,6 +1582,7 @@ def main():
     q_snapshots = []
     model_snapshots = []
     best_validation = None
+    latest_validation_by_split = {}
     validation_checks_without_improvement = 0
     stopped_early = False
     stopped_epoch = None
@@ -1615,6 +1644,7 @@ def main():
         epoch_metrics,
     ):
         nonlocal best_validation
+        nonlocal latest_validation_by_split
         nonlocal stopped_early
         nonlocal stopped_epoch
         nonlocal validation_checks_without_improvement
@@ -1677,90 +1707,103 @@ def main():
                 }
             )
 
-        if (
-            validation_env is not None
-            and should_validate_epoch(
-                dataset_epoch,
-                args.dataset_epochs,
-                args.validation_interval,
-            )
+        if validation_envs and should_validate_epoch(
+            dataset_epoch,
+            args.dataset_epochs,
+            args.validation_interval,
         ):
-            validation_task_indices = (
-                list(
-                    range(
-                        validation_env.num_tasks
+            for split, validation_env in validation_envs.items():
+                validation_task_indices = (
+                    list(
+                        range(
+                            validation_env.num_tasks
+                        )
                     )
+                    if args.validation_all_tasks
+                    else None
                 )
-                if args.validation_all_tasks
-                else None
-            )
-            _, validation_summary = evaluate(
-                algorithm=args.algorithm,
-                agent=agent,
-                env=validation_env,
-                episodes=args.validation_episodes,
-                seed=args.seed,
-                task_indices=validation_task_indices,
-            )
-            validation_score = validation_summary[
-                "average_path_efficiency"
-            ]
-            validation_row = {
-                "dataset_epoch": dataset_epoch,
-                "episodes": validation_summary[
-                    "episodes"
-                ],
-                "success_rate": validation_summary[
-                    "success_rate"
-                ],
-                "average_episode_return": validation_summary[
-                    "average_episode_return"
-                ],
-                "mean_path_efficiency": validation_score,
-                "average_successful_path_efficiency": (
-                    validation_summary[
-                        "average_successful_path_efficiency"
-                    ]
-                ),
-            }
-
-            append_validation_csv(
-                validation_metrics_path,
-                validation_row,
-            )
-
-            improved = (
-                best_validation is None
-                or validation_score
-                > best_validation[
-                    "mean_path_efficiency"
+                _, validation_summary = evaluate(
+                    algorithm=args.algorithm,
+                    agent=agent,
+                    env=validation_env,
+                    episodes=args.validation_episodes,
+                    seed=args.seed,
+                    task_indices=validation_task_indices,
+                )
+                validation_score = validation_summary[
+                    "average_path_efficiency"
                 ]
-                + args.early_stopping_min_delta
-            )
-
-            if improved:
-                validation_checks_without_improvement = 0
-                best_validation = validation_row
-                save_neural_checkpoint_state(
-                    best_checkpoint_path,
-                    args.algorithm,
-                    current_neural_state_dict(
-                        args.algorithm,
-                        agent,
+                validation_row = {
+                    "split": split,
+                    "dataset_epoch": dataset_epoch,
+                    "episodes": validation_summary[
+                        "episodes"
+                    ],
+                    "success_rate": validation_summary[
+                        "success_rate"
+                    ],
+                    "average_episode_return": validation_summary[
+                        "average_episode_return"
+                    ],
+                    "mean_path_efficiency": validation_score,
+                    "average_successful_path_efficiency": (
+                        validation_summary[
+                            "average_successful_path_efficiency"
+                        ]
                     ),
-                    model_snapshots=model_snapshots,
-                    hyperparameters=agent_hyperparameters,
-                    validation_metadata=validation_row,
-                )
-            else:
-                validation_checks_without_improvement += 1
+                }
 
-            print(
-                f"validation dataset_epoch={dataset_epoch:5d} "
-                f"mean_path_efficiency={validation_score:.3f} "
-                f"best="
-                f"{best_validation['mean_path_efficiency']:.3f}"
-            )
+                append_validation_csv(
+                    validation_metrics_path,
+                    validation_row,
+                )
+                latest_validation_by_split[
+                    split
+                ] = validation_row
+
+                if split != "validation":
+                    print(
+                        f"{split} dataset_epoch="
+                        f"{dataset_epoch:5d}/{args.dataset_epochs} "
+                        f"({dataset_epoch / args.dataset_epochs:.0%}) "
+                        f"mean_path_efficiency={validation_score:.3f}"
+                    )
+                    continue
+
+                improved = (
+                    best_validation is None
+                    or validation_score
+                    > best_validation[
+                        "mean_path_efficiency"
+                    ]
+                    + args.early_stopping_min_delta
+                )
+
+                if improved:
+                    validation_checks_without_improvement = 0
+                    best_validation = validation_row
+                    save_neural_checkpoint_state(
+                        best_checkpoint_path,
+                        args.algorithm,
+                        current_neural_state_dict(
+                            args.algorithm,
+                            agent,
+                        ),
+                        model_snapshots=model_snapshots,
+                        hyperparameters=agent_hyperparameters,
+                        validation_metadata=validation_row,
+                    )
+                else:
+                    validation_checks_without_improvement += 1
+
+                print(
+                    f"validation dataset_epoch="
+                    f"{dataset_epoch:5d}/{args.dataset_epochs} "
+                    f"({dataset_epoch / args.dataset_epochs:.0%}) "
+                    f"mean_path_efficiency={validation_score:.3f} "
+                    f"best="
+                    f"{best_validation['mean_path_efficiency']:.3f}"
+                )
 
             if (
                 args.early_stopping_patience is not None
@@ -2024,6 +2067,11 @@ def main():
             best_checkpoint_path
         )
 
+    if latest_validation_by_split:
+        summary["latest_validation_by_split"] = (
+            latest_validation_by_split
+        )
+
     write_training_summary(
         training_summary_path,
         summary,
@@ -2102,6 +2150,19 @@ def main():
         print(
             f"Saved interactive task training plot to "
             f"{task_html_path}"
+        )
+
+    if validation_metrics_path.exists():
+        validation_plot_path = (
+            run_dir / "validation_metrics.png"
+        )
+        plot_validation_metrics(
+            metrics_path=validation_metrics_path,
+            output_path=validation_plot_path,
+        )
+        print(
+            f"Saved validation plot to "
+            f"{validation_plot_path}"
         )
 
     if tensorboard_writer is not None:

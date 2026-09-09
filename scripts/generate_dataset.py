@@ -115,6 +115,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    if args.validation_mazes > args.train_mazes:
+        raise SystemExit(
+            "--validation-mazes cannot exceed --train-mazes because "
+            "same_layout_new_goals.npz uses validation-sized held-out "
+            "tasks on unique training layouts."
+        )
+
     (
         train_seeds,
         validation_seeds,
@@ -157,13 +164,20 @@ def main() -> None:
     )
 
     print("Generating same-layout held-out tasks...")
+    same_layout_maze_count = args.validation_mazes
+    same_layout_layouts = train_layouts[
+        :same_layout_maze_count
+    ]
+    same_layout_seeds = train_seeds[
+        :same_layout_maze_count
+    ]
     (
         same_layout_indices,
         same_layout_starts,
         same_layout_goals,
     ) = generate_tasks_for_layouts(
-        layouts=train_layouts,
-        seeds=train_seeds,
+        layouts=same_layout_layouts,
+        seeds=same_layout_seeds,
         tasks_per_maze=args.tasks_per_maze,
         min_path_length=args.min_path_length,
         excluded_tasks_by_layout=task_pairs_by_layout(
@@ -208,8 +222,8 @@ def main() -> None:
 
     save_dataset(
         args.output_dir / "same_layout_new_goals.npz",
-        train_layouts,
-        train_seeds,
+        same_layout_layouts,
+        same_layout_seeds,
         same_layout_indices,
         same_layout_starts,
         same_layout_goals,
@@ -237,6 +251,7 @@ def main() -> None:
         "tasks_per_maze": args.tasks_per_maze,
         "same_layout_new_goals": {
             "source": "train_layouts",
+            "layout_count": same_layout_maze_count,
             "tasks_per_maze": args.tasks_per_maze,
         },
     }

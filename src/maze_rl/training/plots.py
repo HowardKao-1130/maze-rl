@@ -1119,6 +1119,111 @@ def plot_training_metrics(
     plt.close(figure)
 
 
+def plot_validation_metrics(
+    metrics_path: Path,
+    output_path: Path,
+) -> None:
+    rows = load_rows(metrics_path)
+
+    if not rows:
+        raise RuntimeError(
+            f"No metrics found in {metrics_path}"
+        )
+
+    metrics = [
+        (
+            "mean_path_efficiency",
+            "Mean path efficiency",
+        ),
+        (
+            "success_rate",
+            "Success rate",
+        ),
+    ]
+    splits = sorted(
+        {
+            row.get(
+                "split",
+                "validation",
+            )
+            for row in rows
+        }
+    )
+    figure, axes = plt.subplots(
+        len(metrics),
+        1,
+        figsize=(7.0, 3.2 * len(metrics)),
+        sharex=True,
+    )
+    axes = np.asarray(axes).reshape(
+        len(metrics),
+    )
+
+    for axis, (metric_name, ylabel) in zip(
+        axes,
+        metrics,
+    ):
+        for split in splits:
+            points = [
+                (
+                    int(row["dataset_epoch"]),
+                    metric_value(
+                        row,
+                        metric_name,
+                    ),
+                )
+                for row in rows
+                if row.get(
+                    "split",
+                    "validation",
+                )
+                == split
+            ]
+            points = [
+                (epoch, value)
+                for epoch, value in points
+                if value is not None
+            ]
+
+            if not points:
+                continue
+
+            points.sort()
+            axis.plot(
+                [epoch for epoch, _ in points],
+                [value for _, value in points],
+                marker="o",
+                linewidth=1.5,
+                label=split,
+            )
+
+        axis.set_ylabel(ylabel)
+        axis.set_ylim(-0.05, 1.05)
+        axis.grid(
+            True,
+            alpha=0.25,
+        )
+        axis.legend()
+
+    axes[-1].set_xlabel(
+        "Dataset epoch"
+    )
+    figure.suptitle(
+        metrics_path.as_posix()
+    )
+    figure.tight_layout()
+
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    figure.savefig(
+        output_path,
+        dpi=150,
+    )
+    plt.close(figure)
+
+
 def plot_task_training_metrics(
     metrics_path: Path,
     output_path: Path,

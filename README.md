@@ -14,7 +14,8 @@ The split sizes control the number of unique layouts. `--train`,
 Each layout gets `--tasks-per-maze` valid start/goal tasks.
 
 - `data/train.npz`: seen tasks for training and memorization evaluation.
-- `data/same_layout_new_goals.npz`: held-out start/goal tasks on training layouts.
+- `data/same_layout_new_goals.npz`: validation-sized held-out start/goal tasks
+  on training layouts.
 - `data/validation.npz`: held-out validation layouts.
 - `data/test.npz`: held-out test layouts.
 
@@ -144,22 +145,28 @@ python scripts/generate_dataset.py --train-mazes 200 --validation-mazes 50 --tes
 Then tune against the pre-generated train and validation sets:
 
 ```bash
-python scripts/tune_dnn.py --algorithm ppo --trials 20 --dataset-epochs 20 --train-dataset data/train.npz --validation-dataset data/validation.npz
+python scripts/tune_dnn.py --algorithm ppo --trials 20 --dataset-epochs 20 --train-dataset data/train.npz --validation-dataset data/validation.npz --same-layout-dataset data/same_layout_new_goals.npz
 ```
 
-By default, the tuner reads `data/train.npz` and `data/validation.npz`, trains
-each trial under `runs/tuning/trials`, evaluates every validation task, appends
-`runs/tuning/tuning_results.csv`, and writes the current best trial to
-`runs/tuning/best_config.json`. Pass
+By default, the tuner reads `data/train.npz`, `data/validation.npz`, and
+`data/same_layout_new_goals.npz`, trains each trial under `runs/tuning/trials`,
+evaluates every validation task, appends `runs/tuning/tuning_results.csv`, and
+writes the current best trial to `runs/tuning/best_config.json`. Pass
 `--search-space path/to/search_space.json` to override the default search space.
 
 Keep `--dataset-epochs` as the training budget for comparable trials. Increasing
 it usually improves final performance but also changes compute cost, so it is
 best treated as a generous fixed maximum budget for the sweep. The tuner asks
 training to evaluate validation mean path efficiency every
-`--validation-interval` dataset epochs, saves each trial's
-`best_checkpoint.pt`, and uses that best validation checkpoint for trial
-selection. The ordinary `checkpoint.pt` remains the final training state.
+`--validation-interval` dataset epochs, also evaluates
+`--same-layout-dataset` when provided, saves each trial's `best_checkpoint.pt`,
+and uses the best validation-layout checkpoint for trial selection. The
+ordinary `checkpoint.pt` remains the final training state.
+
+Training writes `validation_metrics.png` beside `validation_metrics.csv`; the
+plot overlays validation-layout performance with same-layout new-task
+performance when both splits are available. Tuning and training progress logs
+show trial percentages and dataset-epoch percentages at validation checks.
 
 Early stopping is optional through `--early-stopping-patience` and
 `--early-stopping-min-delta`. When enabled, the same stopping rule applies to

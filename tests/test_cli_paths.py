@@ -4,12 +4,17 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 import torch
 
 from maze_rl.training.metrics import EpisodeMetrics
-from scripts.generate_dataset import parse_args as parse_dataset_args
+from maze_rl.training.plots import plot_validation_metrics
+from scripts.generate_dataset import (
+    main as generate_dataset_main,
+    parse_args as parse_dataset_args,
+)
 from scripts.evaluate import default_checkpoint_path
 from scripts.open_q_video import q_video_path
 from scripts.open_tensorboard import (
@@ -141,6 +146,49 @@ def test_legacy_dataset_split_flags_still_parse(monkeypatch):
     assert args.train_mazes == 3
     assert args.validation_mazes == 2
     assert args.test_mazes == 1
+
+
+def test_same_layout_dataset_matches_validation_size(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "generate_dataset.py",
+            "--train-mazes",
+            "3",
+            "--validation-mazes",
+            "2",
+            "--test-mazes",
+            "1",
+            "--tasks-per-maze",
+            "1",
+            "--height",
+            "5",
+            "--width",
+            "5",
+            "--min-path-length",
+            "2",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+
+    generate_dataset_main()
+
+    with np.load(
+        tmp_path / "validation.npz"
+    ) as validation_data, np.load(
+        tmp_path / "same_layout_new_goals.npz"
+    ) as same_layout_data:
+        assert validation_data[
+            "layouts"
+        ].shape == same_layout_data[
+            "layouts"
+        ].shape
+        assert len(
+            validation_data["starts"]
+        ) == len(
+            same_layout_data["starts"]
+        )
 
 
 def test_neural_hyperparameters_filter_unset_values():
@@ -435,6 +483,26 @@ def test_validation_schedule_includes_interval_and_final_epoch():
         final_epoch=10,
         validation_interval=2,
     )
+
+
+def test_plot_validation_metrics_writes_split_curve(tmp_path):
+    metrics_path = tmp_path / "validation_metrics.csv"
+    metrics_path.write_text(
+        "split,dataset_epoch,episodes,success_rate,"
+        "average_episode_return,mean_path_efficiency,"
+        "average_successful_path_efficiency\n"
+        "validation,1,2,0.5,1.0,0.4,0.8\n"
+        "same_layout,1,2,1.0,2.0,0.9,0.9\n"
+    )
+    output_path = tmp_path / "validation_metrics.png"
+
+    plot_validation_metrics(
+        metrics_path=metrics_path,
+        output_path=output_path,
+    )
+
+    assert output_path.exists()
+    assert output_path.stat().st_size > 0
 
 
 def test_hierarchical_sampler_deduplicates_tasks_within_dataset_epoch():
