@@ -42,20 +42,29 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--train",
+        "--train-mazes",
+        dest="train_mazes",
         type=int,
         default=1000,
+        help="Number of training layouts to generate.",
     )
 
     parser.add_argument(
         "--validation",
+        "--validation-mazes",
+        dest="validation_mazes",
         type=int,
         default=200,
+        help="Number of validation layouts to generate.",
     )
 
     parser.add_argument(
         "--test",
+        "--test-mazes",
+        dest="test_mazes",
         type=int,
         default=200,
+        help="Number of test layouts to generate.",
     )
 
     parser.add_argument(
@@ -111,9 +120,9 @@ def main() -> None:
         validation_seeds,
         test_seeds,
     ) = generate_split_seeds(
-        train_size=args.train,
-        validation_size=args.validation,
-        test_size=args.test,
+        train_size=args.train_mazes,
+        validation_size=args.validation_mazes,
+        test_size=args.test_mazes,
         master_seed=args.seed,
     )
 
@@ -222,9 +231,9 @@ def main() -> None:
         "wall_probability": args.wall_probability,
         "min_path_length": args.min_path_length,
         "master_seed": args.seed,
-        "train_size": args.train,
-        "validation_size": args.validation,
-        "test_size": args.test,
+        "train_mazes": args.train_mazes,
+        "validation_mazes": args.validation_mazes,
+        "test_mazes": args.test_mazes,
         "tasks_per_maze": args.tasks_per_maze,
         "same_layout_new_goals": {
             "source": "train_layouts",

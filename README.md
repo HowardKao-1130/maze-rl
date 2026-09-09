@@ -6,11 +6,12 @@ practice project for RL
 Generate datasets with multiple tasks per layout:
 
 ```bash
-python scripts/generate_dataset.py --train 1000 --validation 200 --test 200 --tasks-per-maze 5
+python scripts/generate_dataset.py --train-mazes 1000 --validation-mazes 200 --test-mazes 200 --tasks-per-maze 5
 ```
 
-The split sizes control the number of unique layouts. Each layout gets
-`--tasks-per-maze` valid start/goal tasks.
+The split sizes control the number of unique layouts. `--train`,
+`--validation`, and `--test` remain accepted aliases for those maze counts.
+Each layout gets `--tasks-per-maze` valid start/goal tasks.
 
 - `data/train.npz`: seen tasks for training and memorization evaluation.
 - `data/same_layout_new_goals.npz`: held-out start/goal tasks on training layouts.
@@ -70,6 +71,12 @@ Use `--no-tensorboard` to disable neural-agent event logs, `--tensorboard` to
 enable them for a tabular run, or `--tensorboard-dir` to choose another log
 directory.
 
+Neural-agent hyperparameters can be passed directly to training, for example:
+
+```bash
+python scripts/train.py --algorithm dqn --dataset-epochs 20 --learning-rate 0.0001 --batch-size 64 --epsilon-decay 0.999
+```
+
 TensorBoard logs include aggregate rollout metrics plus update diagnostics when
 the algorithm provides them. Neural policy methods log total loss, policy loss,
 value loss, entropy, return targets, advantages, and value predictions; `ppo`
@@ -115,6 +122,24 @@ runs.
 `dqn` also uses a minibatch size of 64, a neural learning rate of `3e-4`, and a
 replay buffer sized to about 64 max-length episodes. It starts updates after a
 1,000-transition replay warmup rather than waiting for the buffer to fill.
+
+## DNN Hyperparameter Tuning
+
+Tune neural agents with randomized search over standard RL knobs such as
+learning rate, discount factor, entropy regularization, PPO clipping, DQN replay
+warmup, minibatch size, and update cadence. The tuner optimizes validation mean
+path efficiency across all evaluated tasks.
+
+```bash
+python scripts/tune_dnn.py --algorithm ppo --trials 20 --dataset-epochs 20 --train-mazes 200 --validation-mazes 50 --tasks-per-maze 5
+```
+
+By default, the tuner generates a train/validation dataset under
+`runs/tuning/datasets`, trains each trial under `runs/tuning/trials`, evaluates
+every validation task, appends `runs/tuning/tuning_results.csv`, and writes the
+current best trial to `runs/tuning/best_config.json`. Pass `--dataset-dir` to
+reuse an existing directory containing `train.npz` and `validation.npz`, or
+`--search-space path/to/search_space.json` to override the default search space.
 
 Neural checkpoints for `dqn`, `a2c`, and `ppo` include model snapshots using the
 same epoch schedule as tabular Q-table snapshots. Evaluation renders `dqn`

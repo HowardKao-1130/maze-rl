@@ -149,6 +149,13 @@ def evaluate(
         ]
     )
 
+    average_path_efficiency = np.mean(
+        [
+            result["path_efficiency"]
+            for result in results
+        ]
+    )
+
     successful_efficiencies = [
         result["path_efficiency"]
         for result in results
@@ -170,6 +177,9 @@ def evaluate(
         ),
         "average_episode_return": float(
             average_episode_return
+        ),
+        "average_path_efficiency": float(
+            average_path_efficiency
         ),
         "average_successful_path_efficiency":
             float(average_efficiency),

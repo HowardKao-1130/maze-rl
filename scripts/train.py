@@ -50,11 +50,68 @@ TABULAR_ALGORITHMS = {
     "dyna_q",
 }
 
+NEURAL_ALGORITHMS = {
+    "dqn",
+    "reinforce",
+    "a2c",
+    "ppo",
+}
+
 NEURAL_SNAPSHOT_ALGORITHMS = {
     "dqn",
     "a2c",
     "ppo",
 }
+
+NEURAL_HYPERPARAMETERS = {
+    "dqn": {
+        "gamma",
+        "learning_rate",
+        "epsilon_start",
+        "epsilon_min",
+        "epsilon_decay",
+        "replay_capacity",
+        "min_replay_size",
+        "batch_size",
+        "target_update_interval",
+    },
+    "reinforce": {
+        "gamma",
+        "learning_rate",
+        "entropy_coefficient",
+        "entropy_coefficient_min",
+        "entropy_coefficient_decay",
+        "minibatch_size",
+    },
+    "a2c": {
+        "gamma",
+        "gae_lambda",
+        "learning_rate",
+        "value_coefficient",
+        "entropy_coefficient",
+        "entropy_coefficient_min",
+        "entropy_coefficient_decay",
+        "minibatch_size",
+    },
+    "ppo": {
+        "gamma",
+        "gae_lambda",
+        "learning_rate",
+        "clip_epsilon",
+        "value_coefficient",
+        "entropy_coefficient",
+        "update_epochs",
+        "minibatch_size",
+    },
+}
+
+NEURAL_HYPERPARAMETER_DESTS = sorted(
+    {
+        name
+        for names in NEURAL_HYPERPARAMETERS.values()
+        for name in names
+    }
+)
 
 POLICY_ROLLOUT_EPISODES = {
     "reinforce": 16,
@@ -350,7 +407,138 @@ def parse_args():
         ),
     )
 
+    neural_group = parser.add_argument_group(
+        "neural agent hyperparameters"
+    )
+
+    neural_group.add_argument(
+        "--learning-rate",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--gamma",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="DQN replay minibatch size.",
+    )
+    neural_group.add_argument(
+        "--minibatch-size",
+        type=int,
+        default=None,
+        help="Policy-gradient optimization minibatch size.",
+    )
+    neural_group.add_argument(
+        "--epsilon-start",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--epsilon-min",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--epsilon-decay",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--replay-capacity",
+        type=int,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--min-replay-size",
+        type=int,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--target-update-interval",
+        type=int,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--gae-lambda",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--value-coefficient",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--entropy-coefficient",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--entropy-coefficient-min",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--entropy-coefficient-decay",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--clip-epsilon",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--update-epochs",
+        type=int,
+        default=None,
+    )
+
     return parser.parse_args()
+
+
+def neural_hyperparameters_from_args(
+    args,
+) -> dict[str, float | int]:
+    return {
+        name: getattr(args, name)
+        for name in NEURAL_HYPERPARAMETER_DESTS
+        if getattr(args, name) is not None
+    }
+
+
+def validate_neural_hyperparameters(
+    algorithm: str,
+    hyperparameters: dict[str, float | int],
+) -> None:
+    if not hyperparameters:
+        return
+
+    if algorithm not in NEURAL_ALGORITHMS:
+        names = ", ".join(
+            sorted(hyperparameters)
+        )
+        raise ValueError(
+            "Neural hyperparameters are only supported for "
+            f"DNN agents, but got {algorithm}: {names}"
+        )
+
+    unsupported = sorted(
+        set(hyperparameters)
+        - NEURAL_HYPERPARAMETERS[algorithm]
+    )
+
+    if unsupported:
+        names = ", ".join(unsupported)
+        raise ValueError(
+            f"{algorithm} does not use these hyperparameters: "
+            f"{names}"
+        )
 
 
 def create_agent(
@@ -358,7 +546,16 @@ def create_agent(
     env,
     device,
     seed,
+    hyperparameters=None,
 ):
+    hyperparameters = dict(
+        hyperparameters or {}
+    )
+    validate_neural_hyperparameters(
+        algorithm,
+        hyperparameters,
+    )
+
     kwargs = {
         "action_count": env.action_space.n,
     }
@@ -395,27 +592,37 @@ def create_agent(
     }
 
     if algorithm == "dqn":
-        return DQNAgent(
-            **neural_kwargs,
-            seed=seed,
-            replay_capacity=(
+        dqn_kwargs = {
+            "seed": seed,
+            "replay_capacity": (
                 64 * env.max_steps
             ),
+        }
+        dqn_kwargs.update(
+            hyperparameters
+        )
+
+        return DQNAgent(
+            **neural_kwargs,
+            **dqn_kwargs,
         )
 
     if algorithm == "reinforce":
         return ReinforceAgent(
             **neural_kwargs,
+            **hyperparameters,
         )
 
     if algorithm == "a2c":
         return A2CAgent(
             **neural_kwargs,
+            **hyperparameters,
         )
 
     if algorithm == "ppo":
         return PPOAgent(
             **neural_kwargs,
+            **hyperparameters,
         )
 
     raise ValueError(algorithm)
@@ -427,6 +634,7 @@ def save_checkpoint(
     agent,
     q_snapshots=None,
     model_snapshots=None,
+    hyperparameters=None,
 ):
     path.parent.mkdir(
         parents=True,
@@ -466,6 +674,7 @@ def save_checkpoint(
             "algorithm": algorithm,
             "model_state_dict": state_dict,
             "model_snapshots": model_snapshots or [],
+            "hyperparameters": hyperparameters or {},
         },
         path,
     )
@@ -1055,11 +1264,18 @@ def main():
         fixed_index=args.fixed_index,
     )
 
+    agent_hyperparameters = (
+        neural_hyperparameters_from_args(
+            args
+        )
+    )
+
     agent = create_agent(
         algorithm=args.algorithm,
         env=env,
         device=device,
         seed=args.seed,
+        hyperparameters=agent_hyperparameters,
     )
 
     run_dir = (
@@ -1422,6 +1638,7 @@ def main():
         agent,
         q_snapshots=q_snapshots,
         model_snapshots=model_snapshots,
+        hyperparameters=agent_hyperparameters,
     )
 
     print(

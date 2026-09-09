@@ -77,6 +77,12 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=200,
+    )
+
+    parser.add_argument(
         "--episodes",
         type=int,
         default=200,
@@ -199,6 +205,16 @@ def parse_args():
         help=(
             "Interactive per-task training plot path. Defaults to "
             "<checkpoint directory>/task_training_metrics.html."
+        ),
+    )
+
+    parser.add_argument(
+        "--evaluation-output",
+        type=Path,
+        default=None,
+        help=(
+            "Evaluation CSV path. Defaults to "
+            "runs/<algorithm>/evaluation.csv."
         ),
     )
 
@@ -352,6 +368,7 @@ def main():
 
     env = MazeEnv(
         dataset_path=args.dataset,
+        max_steps=args.max_steps,
         fixed_index=args.fixed_index,
     )
 
@@ -384,11 +401,14 @@ def main():
         task_indices=task_indices,
     )
 
-    # Evaluation output is always stored under runs/<algorithm>.
     evaluation_path = (
-        Path("runs")
-        / args.algorithm
-        / "evaluation.csv"
+        args.evaluation_output
+        if args.evaluation_output is not None
+        else (
+            Path("runs")
+            / args.algorithm
+            / "evaluation.csv"
+        )
     )
 
     evaluation_path.parent.mkdir(
@@ -416,6 +436,11 @@ def main():
     print(
         "Average episode return: "
         f"{summary['average_episode_return']:.3f}"
+    )
+
+    print(
+        "Average path efficiency: "
+        f"{summary['average_path_efficiency']:.3f}"
     )
 
     print(

@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 import torch
 
 from maze_rl.training.metrics import EpisodeMetrics
+from scripts.generate_dataset import parse_args as parse_dataset_args
 from scripts.evaluate import default_checkpoint_path
 from scripts.open_q_video import q_video_path
 from scripts.open_tensorboard import (
@@ -21,8 +25,10 @@ from scripts.train import (
     log_tensorboard_epoch,
     log_tensorboard_optimization_epoch,
     log_tensorboard_training_round,
+    neural_hyperparameters_from_args,
     optimization_epochs_for_round,
     tensorboard_default_enabled,
+    validate_neural_hyperparameters,
 )
 
 
@@ -88,6 +94,94 @@ def test_default_checkpoint_path_uses_algorithm_specific_suffix():
     assert default_checkpoint_path(
         "dqn"
     ) == Path("runs/dqn/checkpoint.pt")
+
+
+def test_dataset_split_aliases_name_layout_counts(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "generate_dataset.py",
+            "--train-mazes",
+            "3",
+            "--validation-mazes",
+            "2",
+            "--test-mazes",
+            "1",
+            "--tasks-per-maze",
+            "4",
+        ],
+    )
+
+    args = parse_dataset_args()
+
+    assert args.train_mazes == 3
+    assert args.validation_mazes == 2
+    assert args.test_mazes == 1
+    assert args.tasks_per_maze == 4
+
+
+def test_legacy_dataset_split_flags_still_parse(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "generate_dataset.py",
+            "--train",
+            "3",
+            "--validation",
+            "2",
+            "--test",
+            "1",
+        ],
+    )
+
+    args = parse_dataset_args()
+
+    assert args.train_mazes == 3
+    assert args.validation_mazes == 2
+    assert args.test_mazes == 1
+
+
+def test_neural_hyperparameters_filter_unset_values():
+    args = SimpleNamespace(
+        batch_size=32,
+        clip_epsilon=None,
+        entropy_coefficient=None,
+        entropy_coefficient_decay=None,
+        entropy_coefficient_min=None,
+        epsilon_decay=None,
+        epsilon_min=None,
+        epsilon_start=None,
+        gae_lambda=None,
+        gamma=0.97,
+        learning_rate=0.0001,
+        min_replay_size=None,
+        minibatch_size=None,
+        replay_capacity=None,
+        target_update_interval=None,
+        update_epochs=None,
+        value_coefficient=None,
+    )
+
+    assert neural_hyperparameters_from_args(
+        args
+    ) == {
+        "batch_size": 32,
+        "gamma": 0.97,
+        "learning_rate": 0.0001,
+    }
+
+
+def test_neural_hyperparameters_reject_tabular_agents():
+    with pytest.raises(
+        ValueError,
+        match="only supported for DNN agents",
+    ):
+        validate_neural_hyperparameters(
+            "q_learning",
+            {
+                "learning_rate": 0.001,
+            },
+        )
 
 
 def test_configure_reproducibility_enables_deterministic_torch():
