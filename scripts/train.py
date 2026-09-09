@@ -407,6 +407,16 @@ def parse_args():
         ),
     )
 
+    parser.add_argument(
+        "--rollout-episodes",
+        type=int,
+        default=None,
+        help=(
+            "Rollouts collected per policy-gradient training "
+            "round. Defaults to the algorithm-specific value."
+        ),
+    )
+
     neural_group = parser.add_argument_group(
         "neural agent hyperparameters"
     )
@@ -539,6 +549,29 @@ def validate_neural_hyperparameters(
             f"{algorithm} does not use these hyperparameters: "
             f"{names}"
         )
+
+
+def rollout_episodes_for_algorithm(
+    algorithm: str,
+    rollout_episodes: int | None,
+) -> int:
+    if rollout_episodes is None:
+        return POLICY_ROLLOUT_EPISODES[
+            algorithm
+        ]
+
+    if algorithm not in POLICY_ROLLOUT_EPISODES:
+        raise ValueError(
+            "--rollout-episodes is only supported for "
+            "policy-gradient agents."
+        )
+
+    if rollout_episodes <= 0:
+        raise ValueError(
+            "--rollout-episodes must be positive."
+        )
+
+    return rollout_episodes
 
 
 def create_agent(
@@ -1478,6 +1511,10 @@ def main():
         return next_epoch_to_log
 
     if args.algorithm in POLICY_ROLLOUT_EPISODES:
+        rollout_episodes = rollout_episodes_for_algorithm(
+            args.algorithm,
+            args.rollout_episodes,
+        )
         epoch_metrics_by_epoch = {}
         next_epoch_to_log = 1
 
@@ -1486,9 +1523,7 @@ def main():
             < args.dataset_epochs
         ):
             rollout_specs = sampler.sample_collection(
-                collection_size=POLICY_ROLLOUT_EPISODES[
-                    args.algorithm
-                ],
+                collection_size=rollout_episodes,
                 target_dataset_epochs=args.dataset_epochs,
             )
             episode_specs = [
@@ -1544,6 +1579,12 @@ def main():
             )
 
     else:
+        if args.rollout_episodes is not None:
+            rollout_episodes_for_algorithm(
+                args.algorithm,
+                args.rollout_episodes,
+            )
+
         epoch_metrics_by_epoch = {}
         next_epoch_to_log = 1
 

@@ -77,6 +77,10 @@ Neural-agent hyperparameters can be passed directly to training, for example:
 python scripts/train.py --algorithm dqn --dataset-epochs 20 --learning-rate 0.0001 --batch-size 64 --epsilon-decay 0.999
 ```
 
+For policy-gradient agents, `--rollout-episodes` controls how many rollouts are
+collected before each training update. Defaults remain 16 for `reinforce` and
+`a2c`, and 64 for `ppo`.
+
 TensorBoard logs include aggregate rollout metrics plus update diagnostics when
 the algorithm provides them. Neural policy methods log total loss, policy loss,
 value loss, entropy, return targets, advantages, and value predictions; `ppo`
@@ -126,20 +130,36 @@ replay buffer sized to about 64 max-length episodes. It starts updates after a
 ## DNN Hyperparameter Tuning
 
 Tune neural agents with randomized search over standard RL knobs such as
-learning rate, discount factor, entropy regularization, PPO clipping, DQN replay
-warmup, minibatch size, and update cadence. The tuner optimizes validation mean
-path efficiency across all evaluated tasks.
+learning rate, discount factor, entropy regularization, PPO clipping, PPO
+optimization epochs per training round, policy rollout collection size, DQN
+replay warmup, minibatch size, and target-network update cadence. The tuner
+optimizes validation mean path efficiency across all evaluated tasks.
+
+Generate datasets first:
 
 ```bash
-python scripts/tune_dnn.py --algorithm ppo --trials 20 --dataset-epochs 20 --train-mazes 200 --validation-mazes 50 --tasks-per-maze 5
+python scripts/generate_dataset.py --train-mazes 200 --validation-mazes 50 --test-mazes 50 --tasks-per-maze 5
 ```
 
-By default, the tuner generates a train/validation dataset under
-`runs/tuning/datasets`, trains each trial under `runs/tuning/trials`, evaluates
-every validation task, appends `runs/tuning/tuning_results.csv`, and writes the
-current best trial to `runs/tuning/best_config.json`. Pass `--dataset-dir` to
-reuse an existing directory containing `train.npz` and `validation.npz`, or
+Then tune against the pre-generated train and validation sets:
+
+```bash
+python scripts/tune_dnn.py --algorithm ppo --trials 20 --dataset-epochs 20 --train-dataset data/train.npz --validation-dataset data/validation.npz
+```
+
+By default, the tuner reads `data/train.npz` and `data/validation.npz`, trains
+each trial under `runs/tuning/trials`, evaluates every validation task, appends
+`runs/tuning/tuning_results.csv`, and writes the current best trial to
+`runs/tuning/best_config.json`. Pass
 `--search-space path/to/search_space.json` to override the default search space.
+
+Keep `--dataset-epochs` as the training budget for comparable trials. Increasing
+it usually improves final performance but also changes compute cost, so mixing
+dataset-epoch counts inside the same hyperparameter sweep makes scores less
+directly comparable. Early stopping should be added as a separate periodic
+validation loop before tuning stopping patience; the current tuner does final
+validation after each full trial. Use `--evaluate-best-on-test` only after
+tuning to score the best validation-selected checkpoint on `--test-dataset`.
 
 Neural checkpoints for `dqn`, `a2c`, and `ppo` include model snapshots using the
 same epoch schedule as tabular Q-table snapshots. Evaluation renders `dqn`

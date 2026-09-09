@@ -15,9 +15,6 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TRAIN_SCRIPT = REPO_ROOT / "scripts" / "train.py"
 EVALUATE_SCRIPT = REPO_ROOT / "scripts" / "evaluate.py"
-GENERATE_DATASET_SCRIPT = (
-    REPO_ROOT / "scripts" / "generate_dataset.py"
-)
 
 for import_path in [
     REPO_ROOT / "src",
@@ -31,7 +28,11 @@ for import_path in [
             import_path_text,
         )
 
-from scripts.train import NEURAL_ALGORITHMS
+from scripts.train import (
+    NEURAL_ALGORITHMS,
+    NEURAL_HYPERPARAMETERS,
+    POLICY_ROLLOUT_EPISODES,
+)
 
 DEFAULT_SEARCH_SPACES: dict[
     str,
@@ -99,6 +100,10 @@ DEFAULT_SEARCH_SPACES: dict[
             "type": "choice",
             "values": [32, 64, 128],
         },
+        "rollout_episodes": {
+            "type": "choice",
+            "values": [8, 16, 32],
+        },
     },
     "a2c": {
         "learning_rate": {
@@ -138,6 +143,10 @@ DEFAULT_SEARCH_SPACES: dict[
         "minibatch_size": {
             "type": "choice",
             "values": [32, 64, 128],
+        },
+        "rollout_episodes": {
+            "type": "choice",
+            "values": [8, 16, 32],
         },
     },
     "ppo": {
@@ -179,7 +188,15 @@ DEFAULT_SEARCH_SPACES: dict[
             "type": "choice",
             "values": [32, 64, 128],
         },
+        "rollout_episodes": {
+            "type": "choice",
+            "values": [32, 64, 128],
+        },
     },
+}
+
+TRAINING_LOOP_PARAMETERS = {
+    "rollout_episodes",
 }
 
 
@@ -222,56 +239,38 @@ def parse_args() -> argparse.Namespace:
         default=Path("runs") / "tuning",
     )
     parser.add_argument(
-        "--dataset-dir",
+        "--train-dataset",
         type=Path,
-        default=None,
+        default=Path("data") / "train.npz",
         help=(
-            "Existing directory with train.npz and validation.npz. "
-            "When omitted, a tuning dataset is generated."
+            "Pre-generated training dataset path."
         ),
     )
     parser.add_argument(
-        "--train-mazes",
-        type=int,
-        default=100,
-        help="Number of training layouts to generate.",
+        "--validation-dataset",
+        type=Path,
+        default=Path("data") / "validation.npz",
+        help=(
+            "Pre-generated validation dataset path used for "
+            "trial selection."
+        ),
     )
     parser.add_argument(
-        "--validation-mazes",
-        type=int,
-        default=40,
-        help="Number of validation layouts to generate.",
+        "--test-dataset",
+        type=Path,
+        default=Path("data") / "test.npz",
+        help=(
+            "Pre-generated test dataset path. Used only with "
+            "--evaluate-best-on-test."
+        ),
     )
     parser.add_argument(
-        "--test-mazes",
-        type=int,
-        default=0,
-        help="Number of test layouts to generate.",
-    )
-    parser.add_argument(
-        "--tasks-per-maze",
-        type=int,
-        default=5,
-    )
-    parser.add_argument(
-        "--height",
-        type=int,
-        default=11,
-    )
-    parser.add_argument(
-        "--width",
-        type=int,
-        default=11,
-    )
-    parser.add_argument(
-        "--wall-probability",
-        type=float,
-        default=0.25,
-    )
-    parser.add_argument(
-        "--min-path-length",
-        type=int,
-        default=10,
+        "--evaluate-best-on-test",
+        action="store_true",
+        help=(
+            "After tuning, evaluate the best validation trial on "
+            "the held-out test dataset."
+        ),
     )
     parser.add_argument(
         "--search-space",
@@ -394,6 +393,26 @@ def load_search_space(
             "Search space JSON must contain a parameter mapping."
         )
 
+    valid_parameters = set(
+        NEURAL_HYPERPARAMETERS[algorithm]
+    )
+
+    if algorithm in POLICY_ROLLOUT_EPISODES:
+        valid_parameters |= (
+            TRAINING_LOOP_PARAMETERS
+        )
+
+    unsupported = sorted(
+        set(data) - valid_parameters
+    )
+
+    if unsupported:
+        names = ", ".join(unsupported)
+        raise ValueError(
+            f"{algorithm} search space has unsupported "
+            f"parameters: {names}"
+        )
+
     return data
 
 
@@ -426,36 +445,6 @@ def cli_value(
         return f"{value:.12g}"
 
     return str(value)
-
-
-def build_dataset_command(
-    args: argparse.Namespace,
-    dataset_dir: Path,
-) -> list[str]:
-    return [
-        sys.executable,
-        str(GENERATE_DATASET_SCRIPT),
-        "--train-mazes",
-        str(args.train_mazes),
-        "--validation-mazes",
-        str(args.validation_mazes),
-        "--test-mazes",
-        str(args.test_mazes),
-        "--tasks-per-maze",
-        str(args.tasks_per_maze),
-        "--height",
-        str(args.height),
-        "--width",
-        str(args.width),
-        "--wall-probability",
-        cli_value(args.wall_probability),
-        "--min-path-length",
-        str(args.min_path_length),
-        "--seed",
-        str(args.seed),
-        "--output-dir",
-        str(dataset_dir),
-    ]
 
 
 def build_training_command(
@@ -496,10 +485,25 @@ def build_training_command(
     for name, value in sorted(
         hyperparameters.items()
     ):
+        if name in TRAINING_LOOP_PARAMETERS:
+            continue
+
         command.extend(
             [
                 cli_name(name),
                 cli_value(value),
+            ]
+        )
+
+    if "rollout_episodes" in hyperparameters:
+        command.extend(
+            [
+                "--rollout-episodes",
+                cli_value(
+                    hyperparameters[
+                        "rollout_episodes"
+                    ]
+                ),
             ]
         )
 
@@ -710,35 +714,23 @@ def main() -> None:
         exist_ok=True,
     )
 
-    dataset_dir = (
-        args.dataset_dir
-        if args.dataset_dir is not None
-        else args.output_dir / "datasets"
-    )
-
-    if args.dataset_dir is None:
-        run_command(
-            build_dataset_command(
-                args,
-                dataset_dir,
-            ),
-            dry_run=args.dry_run,
-        )
-
-    train_dataset = dataset_dir / "train.npz"
-    validation_dataset = (
-        dataset_dir / "validation.npz"
-    )
-
     if not args.dry_run:
         for dataset_path in [
-            train_dataset,
-            validation_dataset,
+            args.train_dataset,
+            args.validation_dataset,
         ]:
             if not dataset_path.exists():
                 raise FileNotFoundError(
                     dataset_path
                 )
+
+        if (
+            args.evaluate_best_on_test
+            and not args.test_dataset.exists()
+        ):
+            raise FileNotFoundError(
+                args.test_dataset
+            )
 
     search_space = load_search_space(
         args.algorithm,
@@ -794,7 +786,7 @@ def main() -> None:
             build_training_command(
                 args=args,
                 trial_dir=trial_dir,
-                train_dataset=train_dataset,
+                train_dataset=args.train_dataset,
                 trial_seed=trial_seed,
                 hyperparameters=hyperparameters,
             ),
@@ -804,7 +796,7 @@ def main() -> None:
             build_evaluation_command(
                 args=args,
                 checkpoint_path=checkpoint_path,
-                validation_dataset=validation_dataset,
+                validation_dataset=args.validation_dataset,
                 evaluation_path=evaluation_path,
                 trial_seed=trial_seed,
             ),
@@ -881,6 +873,36 @@ def main() -> None:
         print(
             f"Saved best config to {best_config_path}"
         )
+
+        if args.evaluate_best_on_test:
+            test_evaluation_path = (
+                args.output_dir
+                / "best_test_evaluation.csv"
+            )
+            run_command(
+                build_evaluation_command(
+                    args=args,
+                    checkpoint_path=Path(
+                        best_result[
+                            "checkpoint_path"
+                        ]
+                    ),
+                    validation_dataset=args.test_dataset,
+                    evaluation_path=test_evaluation_path,
+                    trial_seed=int(
+                        best_result["seed"]
+                    ),
+                ),
+                dry_run=False,
+            )
+            test_summary = summarize_evaluation(
+                test_evaluation_path
+            )
+            print(
+                "Best-trial test mean path efficiency: "
+                f"{test_summary['mean_path_efficiency']:.3f}",
+                flush=True,
+            )
 
 
 if __name__ == "__main__":

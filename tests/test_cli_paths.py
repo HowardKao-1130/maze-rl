@@ -27,6 +27,7 @@ from scripts.train import (
     log_tensorboard_training_round,
     neural_hyperparameters_from_args,
     optimization_epochs_for_round,
+    rollout_episodes_for_algorithm,
     tensorboard_default_enabled,
     validate_neural_hyperparameters,
 )
@@ -393,6 +394,28 @@ def test_optimization_epoch_counts_match_algorithm_meaning():
         object(),
         metrics,
     ) == 4
+
+
+def test_rollout_episodes_can_override_policy_defaults():
+    assert rollout_episodes_for_algorithm(
+        "ppo",
+        None,
+    ) == 64
+    assert rollout_episodes_for_algorithm(
+        "ppo",
+        32,
+    ) == 32
+
+
+def test_rollout_episodes_rejects_non_policy_agents():
+    with pytest.raises(
+        ValueError,
+        match="policy-gradient",
+    ):
+        rollout_episodes_for_algorithm(
+            "dqn",
+            32,
+        )
 
 
 def test_hierarchical_sampler_deduplicates_tasks_within_dataset_epoch():

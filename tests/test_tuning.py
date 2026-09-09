@@ -4,10 +4,12 @@ import csv
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from scripts.tune_dnn import (
     build_evaluation_command,
     build_training_command,
+    load_search_space,
     sample_hyperparameters,
     summarize_evaluation,
 )
@@ -50,7 +52,7 @@ def test_sample_hyperparameters_uses_space_distributions():
 
 def test_training_command_includes_trial_hyperparameters(tmp_path):
     args = SimpleNamespace(
-        algorithm="dqn",
+        algorithm="ppo",
         dataset_epochs=3,
         max_steps=7,
         tensorboard=False,
@@ -63,19 +65,23 @@ def test_training_command_includes_trial_hyperparameters(tmp_path):
         train_dataset=tmp_path / "train.npz",
         trial_seed=11,
         hyperparameters={
-            "batch_size": 32,
             "learning_rate": 0.0003,
+            "minibatch_size": 32,
+            "rollout_episodes": 64,
         },
     )
 
     assert "--no-tensorboard" in command
     assert "--no-plot" in command
     assert command[
-        command.index("--batch-size") + 1
+        command.index("--minibatch-size") + 1
     ] == "32"
     assert command[
         command.index("--learning-rate") + 1
     ] == "0.0003"
+    assert command[
+        command.index("--rollout-episodes") + 1
+    ] == "64"
 
 
 def test_evaluation_command_defaults_to_all_validation_tasks(tmp_path):
@@ -141,3 +147,20 @@ def test_summarize_evaluation_uses_mean_path_efficiency(tmp_path):
         ]
         == 1.0
     )
+
+
+def test_load_search_space_rejects_unsupported_parameters(tmp_path):
+    path = tmp_path / "space.json"
+    path.write_text(
+        '{"learning_rate": {"type": "uniform", "low": 0.1, "high": 0.2}, '
+        '"rollout_episodes": {"type": "choice", "values": [8]}}'
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="unsupported",
+    ):
+        load_search_space(
+            "dqn",
+            path,
+        )
