@@ -42,7 +42,10 @@ def choose_greedy_action(
                 ).item()
             )
 
-        if algorithm == "reinforce":
+        if algorithm in {
+            "reinforce",
+            "grpo",
+        }:
             logits = agent.policy(
                 observation_tensor
             )

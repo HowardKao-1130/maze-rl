@@ -113,6 +113,42 @@ def test_training_command_includes_trial_hyperparameters(tmp_path):
     ] == "64"
 
 
+def test_training_command_passes_grpo_group_size(tmp_path):
+    args = SimpleNamespace(
+        algorithm="grpo",
+        dataset_epochs=16,
+        max_steps=7,
+        validation_dataset=tmp_path / "validation.npz",
+        same_layout_dataset=tmp_path
+        / "same_layout_new_goals.npz",
+        validation_interval=2,
+        eval_all_tasks=True,
+        eval_episodes=5,
+        early_stopping_patience=None,
+        early_stopping_min_delta=0.0,
+        tensorboard=False,
+        keep_plots=False,
+    )
+
+    command = build_training_command(
+        args=args,
+        trial_dir=tmp_path / "trial",
+        train_dataset=tmp_path / "train.npz",
+        trial_seed=11,
+        hyperparameters={
+            "learning_rate": 0.0003,
+            "group_size": 8,
+        },
+    )
+
+    assert command[
+        command.index("--learning-rate") + 1
+    ] == "0.0003"
+    assert command[
+        command.index("--group-size") + 1
+    ] == "8"
+
+
 def test_evaluation_command_defaults_to_all_validation_tasks(tmp_path):
     args = SimpleNamespace(
         algorithm="ppo",
@@ -193,3 +229,18 @@ def test_load_search_space_rejects_unsupported_parameters(tmp_path):
             "dqn",
             path,
         )
+
+
+def test_load_search_space_allows_grpo_group_size(tmp_path):
+    path = tmp_path / "space.json"
+    path.write_text(
+        '{"learning_rate": {"type": "uniform", "low": 0.1, "high": 0.2}, '
+        '"group_size": {"type": "choice", "values": [8]}}'
+    )
+
+    search_space = load_search_space(
+        "grpo",
+        path,
+    )
+
+    assert "group_size" in search_space

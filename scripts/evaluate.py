@@ -12,6 +12,7 @@ import torch
 from maze_rl.agents.a2c import A2CAgent
 from maze_rl.agents.dqn import DQNAgent
 from maze_rl.agents.dyna_q import DynaQAgent
+from maze_rl.agents.grpo import GRPOAgent
 from maze_rl.agents.monte_carlo import MonteCarloAgent
 from maze_rl.agents.ppo import PPOAgent
 from maze_rl.agents.q_learning import QLearningAgent
@@ -290,6 +291,11 @@ def create_agent(
             **neural_kwargs
         )
 
+    if algorithm == "grpo":
+        return GRPOAgent(
+            **neural_kwargs
+        )
+
     raise ValueError(
         algorithm
     )
@@ -329,7 +335,10 @@ def load_checkpoint(
             state_dict
         )
 
-    elif algorithm == "reinforce":
+    elif algorithm in {
+        "reinforce",
+        "grpo",
+    }:
         agent.policy.load_state_dict(
             state_dict
         )

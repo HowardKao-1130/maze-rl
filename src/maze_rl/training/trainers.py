@@ -10,6 +10,7 @@ from maze_rl.agents.dqn import (
     Transition,
 )
 from maze_rl.agents.dyna_q import DynaQAgent
+from maze_rl.agents.grpo import GRPOAgent
 from maze_rl.agents.monte_carlo import MonteCarloAgent
 from maze_rl.agents.ppo import PPOAgent
 from maze_rl.agents.q_learning import QLearningAgent
@@ -897,4 +898,192 @@ def train_ppo_round(
         metrics,
         internal_updates,
         loss,
+    )
+
+
+def train_grpo_episode(
+    env,
+    agent: GRPOAgent,
+    episode: int,
+    epoch: int,
+    task_index: int | None = None,
+):
+    return train_grpo_round(
+        env,
+        agent,
+        [
+            (
+                episode,
+                epoch,
+                task_index,
+            )
+        ],
+    )[0]
+
+
+def _collect_grpo_episode(
+    env,
+    agent: GRPOAgent,
+    episode: int,
+    epoch: int,
+    task_index: int | None = None,
+):
+    observation, _ = _reset_env(env, task_index)
+
+    observations = []
+    actions = []
+    log_probabilities = []
+    rewards = []
+    episode_return = 0.0
+
+    while True:
+        (
+            action,
+            log_probability,
+        ) = agent.choose_action(
+            observation
+        )
+
+        observations.append(
+            observation.copy()
+        )
+        actions.append(action)
+        log_probabilities.append(
+            log_probability
+        )
+
+        (
+            observation,
+            reward,
+            terminated,
+            truncated,
+            info,
+        ) = env.step(action)
+
+        rewards.append(reward)
+        episode_return += reward
+
+        if terminated or truncated:
+            break
+
+    return (
+        _metrics(
+            episode,
+            epoch,
+            episode_return,
+            info,
+            None,
+            None,
+            None,
+        ),
+        observations,
+        actions,
+        log_probabilities,
+        agent.compute_episode_return(
+            rewards
+        ),
+    )
+
+
+def train_grpo_round(
+    env,
+    agent: GRPOAgent,
+    episode_specs,
+):
+    metrics = []
+    episode_observations = []
+    episode_actions = []
+    episode_log_probabilities = []
+    episode_returns = []
+
+    for (
+        episode,
+        epoch,
+        task_index,
+    ) in episode_specs:
+        (
+            episode_metrics,
+            observations,
+            actions,
+            log_probabilities,
+            episode_return,
+        ) = _collect_grpo_episode(
+            env,
+            agent,
+            episode,
+            epoch,
+            task_index,
+        )
+
+        metrics.append(episode_metrics)
+        episode_observations.append(
+            observations
+        )
+        episode_actions.append(actions)
+        episode_log_probabilities.append(
+            log_probabilities
+        )
+        episode_returns.append(
+            episode_return
+        )
+
+    returns_array = np.asarray(
+        episode_returns,
+        dtype=np.float32,
+    )
+    returns_std = float(
+        returns_array.std()
+    )
+
+    if returns_std <= 1e-8:
+        episode_advantages = np.zeros_like(
+            returns_array
+        )
+    else:
+        episode_advantages = (
+            returns_array
+            - returns_array.mean()
+        ) / returns_std
+
+    observations = []
+    actions = []
+    log_probabilities = []
+    advantages = []
+
+    for index, advantage in enumerate(
+        episode_advantages
+    ):
+        observations.extend(
+            episode_observations[index]
+        )
+        actions.extend(
+            episode_actions[index]
+        )
+        log_probabilities.extend(
+            episode_log_probabilities[index]
+        )
+        advantages.extend(
+            [float(advantage)]
+            * len(episode_actions[index])
+        )
+
+    diagnostics = agent.update(
+        observations=observations,
+        actions=actions,
+        old_log_probabilities=log_probabilities,
+        advantages=advantages,
+    )
+    diagnostics["mean_return"] = float(
+        returns_array.mean()
+    )
+
+    internal_updates = _minibatch_count(
+        len(actions),
+        agent.minibatch_size,
+    )
+
+    return _apply_round_diagnostics(
+        metrics,
+        internal_updates,
+        diagnostics,
     )

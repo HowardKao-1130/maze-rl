@@ -29,6 +29,7 @@ for import_path in [
         )
 
 from scripts.train import (
+    GROUPED_POLICY_ALGORITHMS,
     NEURAL_ALGORITHMS,
     NEURAL_HYPERPARAMETERS,
     POLICY_ROLLOUT_EPISODES,
@@ -193,10 +194,50 @@ DEFAULT_SEARCH_SPACES: dict[
             "values": [32, 64, 128],
         },
     },
+    "grpo": {
+        "learning_rate": {
+            "type": "loguniform",
+            "low": 1e-5,
+            "high": 1e-3,
+        },
+        "gamma": {
+            "type": "uniform",
+            "low": 0.95,
+            "high": 0.999,
+        },
+        "clip_epsilon": {
+            "type": "uniform",
+            "low": 0.1,
+            "high": 0.3,
+        },
+        "entropy_coefficient": {
+            "type": "loguniform",
+            "low": 0.001,
+            "high": 0.08,
+        },
+        "entropy_coefficient_min": {
+            "type": "choice",
+            "values": [0.0, 0.001, 0.005, 0.01],
+        },
+        "entropy_coefficient_decay": {
+            "type": "uniform",
+            "low": 0.995,
+            "high": 0.9999,
+        },
+        "minibatch_size": {
+            "type": "choice",
+            "values": [32, 64, 128],
+        },
+        "group_size": {
+            "type": "choice",
+            "values": [4, 8, 16],
+        },
+    },
 }
 
 TRAINING_LOOP_PARAMETERS = {
     "rollout_episodes",
+    "group_size",
 }
 
 
@@ -433,7 +474,10 @@ def load_search_space(
         NEURAL_HYPERPARAMETERS[algorithm]
     )
 
-    if algorithm in POLICY_ROLLOUT_EPISODES:
+    if (
+        algorithm in POLICY_ROLLOUT_EPISODES
+        or algorithm in GROUPED_POLICY_ALGORITHMS
+    ):
         valid_parameters |= (
             TRAINING_LOOP_PARAMETERS
         )
@@ -575,6 +619,18 @@ def build_training_command(
                 cli_value(
                     hyperparameters[
                         "rollout_episodes"
+                    ]
+                ),
+            ]
+        )
+
+    if "group_size" in hyperparameters:
+        command.extend(
+            [
+                "--group-size",
+                cli_value(
+                    hyperparameters[
+                        "group_size"
                     ]
                 ),
             ]

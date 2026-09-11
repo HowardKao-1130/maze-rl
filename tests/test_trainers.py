@@ -6,6 +6,7 @@ import torch
 from maze_rl.agents.a2c import A2CAgent
 from maze_rl.agents.reinforce import ReinforceAgent
 from maze_rl.agents.sarsa import SarsaAgent
+from maze_rl.training.trainers import train_grpo_round
 from maze_rl.training.trainers import train_sarsa_episode
 from maze_rl.training.trainers import train_reinforce_round
 from scripts.train import HierarchicalTaskSampler
@@ -143,6 +144,70 @@ def test_reinforce_round_batches_metric_accounting():
         None,
         7.0,
     ]
+
+
+class FakeGRPOAgent:
+    minibatch_size = 2
+    gamma = 1.0
+
+    def __init__(self) -> None:
+        self.received_advantages = None
+
+    def choose_action(self, observation):
+        return 0, -0.5
+
+    def compute_episode_return(
+        self,
+        rewards,
+    ):
+        return rewards[0]
+
+    def update(
+        self,
+        observations,
+        actions,
+        old_log_probabilities,
+        advantages,
+    ):
+        self.received_advantages = advantages
+
+        return {
+            "loss": 3.0,
+            "policy_loss": 2.0,
+            "entropy": 0.1,
+            "mean_advantage": float(
+                np.mean(advantages)
+            ),
+        }
+
+
+def test_grpo_round_uses_group_relative_advantages():
+    agent = FakeGRPOAgent()
+
+    metrics = train_grpo_round(
+        env=OneStepArrayEnv(),
+        agent=agent,
+        episode_specs=[
+            (1, 1, 0),
+            (2, 1, 0),
+            (3, 1, 0),
+        ],
+    )
+
+    assert agent.received_advantages == [
+        0.0,
+        0.0,
+        0.0,
+    ]
+    assert [
+        metric.internal_updates
+        for metric in metrics
+    ] == [
+        None,
+        None,
+        2,
+    ]
+    assert metrics[-1].loss == 3.0
 
 
 def test_hierarchical_sampler_allows_collection_to_span_dataset_epochs():

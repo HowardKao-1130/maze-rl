@@ -26,6 +26,7 @@ from scripts.open_tensorboard import (
 from scripts.train import (
     HierarchicalTaskSampler,
     configure_reproducibility,
+    group_size_for_algorithm,
     log_tensorboard_episode,
     log_tensorboard_epoch,
     log_tensorboard_optimization_epoch,
@@ -35,6 +36,7 @@ from scripts.train import (
     rollout_episodes_for_algorithm,
     should_validate_epoch,
     tensorboard_default_enabled,
+    training_epoch_budget_for_algorithm,
     validate_neural_hyperparameters,
 )
 
@@ -443,6 +445,34 @@ def test_optimization_epoch_counts_match_algorithm_meaning():
         object(),
         metrics,
     ) == 4
+
+
+def test_grpo_dataset_epochs_convert_to_optimization_budget():
+    assert group_size_for_algorithm(
+        "grpo",
+        None,
+    ) == 8
+    assert training_epoch_budget_for_algorithm(
+        "grpo",
+        dataset_epochs=100,
+        group_size=8,
+    ) == 13
+    assert training_epoch_budget_for_algorithm(
+        "ppo",
+        dataset_epochs=100,
+        group_size=0,
+    ) == 100
+
+
+def test_group_size_rejects_non_grpo_agents():
+    with pytest.raises(
+        ValueError,
+        match="GRPO",
+    ):
+        group_size_for_algorithm(
+            "ppo",
+            8,
+        )
 
 
 def test_rollout_episodes_can_override_policy_defaults():

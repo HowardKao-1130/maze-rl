@@ -22,6 +22,7 @@ import torch
 from maze_rl.agents.a2c import A2CAgent
 from maze_rl.agents.dqn import DQNAgent
 from maze_rl.agents.dyna_q import DynaQAgent
+from maze_rl.agents.grpo import GRPOAgent
 from maze_rl.agents.monte_carlo import MonteCarloAgent
 from maze_rl.agents.ppo import PPOAgent
 from maze_rl.agents.q_learning import QLearningAgent
@@ -39,6 +40,7 @@ from maze_rl.training.plots import (
 from maze_rl.training.trainers import (
     train_a2c_round,
     train_dqn_episode,
+    train_grpo_round,
     train_monte_carlo_episode,
     train_ppo_round,
     train_q_learning_episode,
@@ -59,6 +61,7 @@ NEURAL_ALGORITHMS = {
     "reinforce",
     "a2c",
     "ppo",
+    "grpo",
 }
 
 NEURAL_SNAPSHOT_ALGORITHMS = {
@@ -107,6 +110,15 @@ NEURAL_HYPERPARAMETERS = {
         "update_epochs",
         "minibatch_size",
     },
+    "grpo": {
+        "gamma",
+        "learning_rate",
+        "clip_epsilon",
+        "entropy_coefficient",
+        "entropy_coefficient_min",
+        "entropy_coefficient_decay",
+        "minibatch_size",
+    },
 }
 
 NEURAL_HYPERPARAMETER_DESTS = sorted(
@@ -121,6 +133,10 @@ POLICY_ROLLOUT_EPISODES = {
     "reinforce": 16,
     "a2c": 16,
     "ppo": 64,
+}
+
+GROUPED_POLICY_ALGORITHMS = {
+    "grpo",
 }
 
 
@@ -284,6 +300,7 @@ def parse_args():
             "reinforce",
             "a2c",
             "ppo",
+            "grpo",
         ],
     )
 
@@ -574,6 +591,16 @@ def parse_args():
         type=int,
         default=None,
     )
+    neural_group.add_argument(
+        "--group-size",
+        type=int,
+        default=None,
+        help=(
+            "GRPO rollouts per grouped update. GRPO runs "
+            "ceil(dataset_epochs / group_size) optimization "
+            "epochs."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -638,6 +665,53 @@ def rollout_episodes_for_algorithm(
         )
 
     return rollout_episodes
+
+
+def group_size_for_algorithm(
+    algorithm: str,
+    group_size: int | None,
+) -> int:
+    if group_size is None:
+        if algorithm in GROUPED_POLICY_ALGORITHMS:
+            return 8
+
+        return 0
+
+    if algorithm not in GROUPED_POLICY_ALGORITHMS:
+        raise ValueError(
+            "--group-size is only supported for GRPO."
+        )
+
+    if group_size < 2:
+        raise ValueError(
+            "--group-size must be at least 2."
+        )
+
+    return group_size
+
+
+def training_epoch_budget_for_algorithm(
+    algorithm: str,
+    dataset_epochs: int,
+    group_size: int,
+) -> int:
+    if dataset_epochs <= 0:
+        raise ValueError(
+            "--dataset-epochs must be positive."
+        )
+
+    if algorithm in GROUPED_POLICY_ALGORITHMS:
+        return max(
+            1,
+            (
+                dataset_epochs
+                + group_size
+                - 1
+            )
+            // group_size,
+        )
+
+    return dataset_epochs
 
 
 def create_agent(
@@ -724,6 +798,12 @@ def create_agent(
             **hyperparameters,
         )
 
+    if algorithm == "grpo":
+        return GRPOAgent(
+            **neural_kwargs,
+            **hyperparameters,
+        )
+
     raise ValueError(algorithm)
 
 
@@ -758,7 +838,10 @@ def save_checkpoint(
             agent.online_network.state_dict()
         )
 
-    elif algorithm == "reinforce":
+    elif algorithm in {
+        "reinforce",
+        "grpo",
+    }:
         state_dict = (
             agent.policy.state_dict()
         )
@@ -788,7 +871,10 @@ def current_neural_state_dict(
             agent.online_network.state_dict()
         )
 
-    elif algorithm == "reinforce":
+    elif algorithm in {
+        "reinforce",
+        "grpo",
+    }:
         state_dict = (
             agent.policy.state_dict()
         )
@@ -1448,6 +1534,7 @@ def optimization_epochs_for_round(
     if algorithm in {
         "reinforce",
         "a2c",
+        "grpo",
     }:
         return 1
 
@@ -1477,6 +1564,17 @@ def main():
     agent_hyperparameters = (
         neural_hyperparameters_from_args(
             args
+        )
+    )
+    group_size = group_size_for_algorithm(
+        args.algorithm,
+        args.group_size,
+    )
+    training_epoch_budget = (
+        training_epoch_budget_for_algorithm(
+            args.algorithm,
+            args.dataset_epochs,
+            group_size,
         )
     )
 
@@ -1595,8 +1693,11 @@ def main():
         for epoch in np.unique(
             np.linspace(
                 1,
-                args.dataset_epochs,
-                num=min(q_snapshot_count, args.dataset_epochs),
+                training_epoch_budget,
+                num=min(
+                    q_snapshot_count,
+                    training_epoch_budget,
+                ),
                 dtype=np.int64,
             )
         )
@@ -1709,7 +1810,7 @@ def main():
 
         if validation_envs and should_validate_epoch(
             dataset_epoch,
-            args.dataset_epochs,
+            training_epoch_budget,
             args.validation_interval,
         ):
             for split, validation_env in validation_envs.items():
@@ -1764,8 +1865,8 @@ def main():
                 if split != "validation":
                     print(
                         f"{split} dataset_epoch="
-                        f"{dataset_epoch:5d}/{args.dataset_epochs} "
-                        f"({dataset_epoch / args.dataset_epochs:.0%}) "
+                        f"{dataset_epoch:5d}/{training_epoch_budget} "
+                        f"({dataset_epoch / training_epoch_budget:.0%}) "
                         f"mean_path_efficiency={validation_score:.3f}"
                     )
                     continue
@@ -1798,8 +1899,8 @@ def main():
 
                 print(
                     f"validation dataset_epoch="
-                    f"{dataset_epoch:5d}/{args.dataset_epochs} "
-                    f"({dataset_epoch / args.dataset_epochs:.0%}) "
+                    f"{dataset_epoch:5d}/{training_epoch_budget} "
+                    f"({dataset_epoch / training_epoch_budget:.0%}) "
                     f"mean_path_efficiency={validation_score:.3f} "
                     f"best="
                     f"{best_validation['mean_path_efficiency']:.3f}"
@@ -1879,12 +1980,12 @@ def main():
 
         while (
             sampler.completed_dataset_epochs
-            < args.dataset_epochs
+            < training_epoch_budget
             and not stopped_early
         ):
             rollout_specs = sampler.sample_collection(
                 collection_size=rollout_episodes,
-                target_dataset_epochs=args.dataset_epochs,
+                target_dataset_epochs=training_epoch_budget,
             )
             episode_specs = [
                 (
@@ -1938,6 +2039,75 @@ def main():
                 )
             )
 
+    elif args.algorithm in GROUPED_POLICY_ALGORITHMS:
+        if args.rollout_episodes is not None:
+            rollout_episodes_for_algorithm(
+                args.algorithm,
+                args.rollout_episodes,
+            )
+
+        epoch_metrics_by_epoch = {}
+        next_epoch_to_log = 1
+        grpo_rollout = 0
+
+        print(
+            "grpo optimization_epochs="
+            f"{training_epoch_budget} from dataset_epochs="
+            f"{args.dataset_epochs} and group_size={group_size}",
+            flush=True,
+        )
+
+        while (
+            sampler.completed_dataset_epochs
+            < training_epoch_budget
+            and not stopped_early
+        ):
+            rollout_specs = sampler.sample_collection(
+                collection_size=1,
+                target_dataset_epochs=training_epoch_budget,
+            )
+
+            if not rollout_specs:
+                break
+
+            spec = rollout_specs[0]
+            episode_specs = []
+
+            for _ in range(group_size):
+                grpo_rollout += 1
+                episode_specs.append(
+                    (
+                        grpo_rollout,
+                        spec.dataset_epoch,
+                        spec.task_index,
+                    )
+                )
+
+            round_metrics = train_grpo_round(
+                env,
+                agent,
+                episode_specs,
+            )
+
+            for metrics in round_metrics:
+                epoch_metrics_by_epoch.setdefault(
+                    metrics.epoch,
+                    [],
+                ).append(metrics)
+
+                record_episode_metrics(metrics)
+
+            record_training_round(
+                round_metrics
+            )
+
+            next_epoch_to_log = (
+                maybe_finish_dataset_epochs(
+                    epoch_metrics_by_epoch,
+                    next_epoch_to_log,
+                )
+            )
+
     else:
         if args.rollout_episodes is not None:
             rollout_episodes_for_algorithm(
@@ -1950,12 +2120,12 @@ def main():
 
         while (
             sampler.completed_dataset_epochs
-            < args.dataset_epochs
+            < training_epoch_budget
             and not stopped_early
         ):
             rollout_specs = sampler.sample_collection(
                 collection_size=1,
-                target_dataset_epochs=args.dataset_epochs,
+                target_dataset_epochs=training_epoch_budget,
             )
 
             if not rollout_specs:
@@ -2050,6 +2220,13 @@ def main():
             stopped_epoch
             if stopped_early
             else sampler.completed_dataset_epochs
+        ),
+        "optimization_epochs_requested": training_epoch_budget,
+        "group_size": (
+            group_size
+            if args.algorithm
+            in GROUPED_POLICY_ALGORITHMS
+            else None
         ),
         "stopped_early": stopped_early,
         "stopped_epoch": stopped_epoch,
