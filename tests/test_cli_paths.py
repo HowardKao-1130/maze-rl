@@ -35,6 +35,7 @@ from scripts.train import (
     optimization_epochs_for_round,
     rollout_episodes_for_algorithm,
     should_validate_epoch,
+    should_stop_early,
     tensorboard_default_enabled,
     training_epoch_budget_for_algorithm,
     validate_neural_hyperparameters,
@@ -512,6 +513,37 @@ def test_validation_schedule_includes_interval_and_final_epoch():
         epoch=5,
         final_epoch=10,
         validation_interval=2,
+    )
+
+
+def test_early_stopping_ignores_all_zero_startup_plateau():
+    assert not should_stop_early(
+        patience=4,
+        checks_without_improvement=4,
+        has_positive_validation_score=False,
+    )
+    assert not should_stop_early(
+        patience=4,
+        checks_without_improvement=5,
+        has_positive_validation_score=False,
+    )
+
+
+def test_early_stopping_still_applies_after_positive_validation():
+    assert should_stop_early(
+        patience=4,
+        checks_without_improvement=4,
+        has_positive_validation_score=True,
+    )
+    assert not should_stop_early(
+        patience=4,
+        checks_without_improvement=3,
+        has_positive_validation_score=True,
+    )
+    assert not should_stop_early(
+        patience=None,
+        checks_without_improvement=4,
+        has_positive_validation_score=True,
     )
 
 

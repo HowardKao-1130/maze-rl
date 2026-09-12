@@ -939,6 +939,18 @@ def should_validate_epoch(
     )
 
 
+def should_stop_early(
+    patience: int | None,
+    checks_without_improvement: int,
+    has_positive_validation_score: bool,
+) -> bool:
+    return (
+        patience is not None
+        and has_positive_validation_score
+        and checks_without_improvement >= patience
+    )
+
+
 def append_validation_csv(
     path: Path,
     row: dict,
@@ -1682,6 +1694,7 @@ def main():
     best_validation = None
     latest_validation_by_split = {}
     validation_checks_without_improvement = 0
+    validation_has_positive_score = False
     stopped_early = False
     stopped_epoch = None
     q_snapshot_count = max(
@@ -1748,6 +1761,7 @@ def main():
         nonlocal latest_validation_by_split
         nonlocal stopped_early
         nonlocal stopped_epoch
+        nonlocal validation_has_positive_score
         nonlocal validation_checks_without_improvement
 
         if dataset_epoch % 100 == 0:
@@ -1871,6 +1885,9 @@ def main():
                     )
                     continue
 
+                if validation_score > 0.0:
+                    validation_has_positive_score = True
+
                 improved = (
                     best_validation is None
                     or validation_score
@@ -1907,9 +1924,11 @@ def main():
                 )
 
             if (
-                args.early_stopping_patience is not None
-                and validation_checks_without_improvement
-                >= args.early_stopping_patience
+                should_stop_early(
+                    args.early_stopping_patience,
+                    validation_checks_without_improvement,
+                    validation_has_positive_score,
+                )
             ):
                 stopped_early = True
                 stopped_epoch = dataset_epoch
