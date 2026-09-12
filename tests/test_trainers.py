@@ -99,6 +99,47 @@ class OneStepArrayEnv:
         )
 
 
+class OneStepRewardEnv:
+    def reset(
+        self,
+        *,
+        options=None,
+    ):
+        self.task_index = (
+            options or {}
+        ).get(
+            "task_index",
+            0,
+        )
+
+        return np.zeros(
+            (3, 1, 1),
+            dtype=np.float32,
+        ), {}
+
+    def step(self, action):
+        reward = float(action)
+
+        return (
+            np.zeros(
+                (3, 1, 1),
+                dtype=np.float32,
+            ),
+            reward,
+            True,
+            False,
+            {
+                "task_index": self.task_index,
+                "layout_index": 0,
+                "success": True,
+                "steps": 1,
+                "wall_collisions": 0,
+                "optimal_path_length": 1,
+                "path_efficiency": 1.0,
+            },
+        )
+
+
 class FakeReinforceAgent:
     minibatch_size = 2
 
@@ -232,13 +273,25 @@ class FakeGRPOAgent:
         }
 
 
+class SequenceGRPOAgent(FakeGRPOAgent):
+    def __init__(
+        self,
+        actions,
+    ) -> None:
+        super().__init__()
+        self.actions = list(actions)
+
+    def choose_action(self, observation):
+        return self.actions.pop(0), -0.5
+
+
 def test_grpo_round_uses_group_relative_advantages():
     agent = FakeGRPOAgent()
 
     metrics = train_grpo_round(
         env=OneStepArrayEnv(),
         agent=agent,
-        episode_specs=[
+        rollout_groups=[
             (1, 1, 0),
             (2, 1, 0),
             (3, 1, 0),
@@ -259,6 +312,48 @@ def test_grpo_round_uses_group_relative_advantages():
         2,
     ]
     assert metrics[-1].loss == 3.0
+
+
+def test_grpo_round_normalizes_advantages_within_each_task_group():
+    agent = SequenceGRPOAgent(
+        actions=[
+            1,
+            3,
+            10,
+            14,
+        ]
+    )
+
+    metrics = train_grpo_round(
+        env=OneStepRewardEnv(),
+        agent=agent,
+        rollout_groups=[
+            [
+                (1, 1, 0),
+                (2, 1, 0),
+            ],
+            [
+                (3, 1, 1),
+                (4, 1, 1),
+            ],
+        ],
+    )
+
+    assert agent.received_advantages == [
+        -1.0,
+        1.0,
+        -1.0,
+        1.0,
+    ]
+    assert [
+        metric.task_index
+        for metric in metrics
+    ] == [
+        0,
+        0,
+        1,
+        1,
+    ]
 
 
 def test_hierarchical_sampler_allows_collection_to_span_dataset_epochs():

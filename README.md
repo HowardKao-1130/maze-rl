@@ -21,13 +21,19 @@ Each layout gets `--tasks-per-maze` valid start/goal tasks.
 
 ## Training Metrics
 
-Training uses `--dataset-epochs` to set the number of task-coverage passes. One
-dataset epoch is exactly one rollout attempt for each selected training task.
-With 1000 layouts and 5 tasks per layout, `--dataset-epochs 20` trains for
-100,000 rollout attempts: 20 passes over the 5000 selected tasks.
+Training uses `--rollouts-per-task` as the top-level exposure budget: each
+selected training task is allowed roughly that many rollout attempts. For
+single-rollout agents, one task selection produces one rollout. For grouped
+agents such as GRPO, one task selection produces `--rollout-group-size`
+rollouts, so the number of internal task-selection passes is
+`ceil(rollouts_per_task / rollout_group_size)`.
+
+With 1000 layouts and 5 tasks per layout, `--rollouts-per-task 20` trains a
+single-rollout agent for 100,000 rollout attempts: 20 rollout attempts for each
+of the 5000 selected tasks.
 
 ```bash
-python scripts/train.py --algorithm q_learning --dataset-epochs 20
+python scripts/train.py --algorithm q_learning --rollouts-per-task 20
 ```
 
 Plot aggregate training curves:
@@ -75,12 +81,18 @@ directory.
 Neural-agent hyperparameters can be passed directly to training, for example:
 
 ```bash
-python scripts/train.py --algorithm dqn --dataset-epochs 20 --learning-rate 0.0001 --batch-size 64 --epsilon-decay 0.999
+python scripts/train.py --algorithm dqn --rollouts-per-task 20 --learning-rate 0.0001 --batch-size 64 --epsilon-decay 0.999
 ```
 
-For policy-gradient agents, `--rollout-episodes` controls how many rollouts are
-collected before each training update. Defaults remain 16 for `reinforce` and
-`a2c`, and 64 for `ppo`.
+For DNN agents, `--task-batch-size` controls how many distinct tasks are
+sampled for a training round, and `--rollout-group-size` controls how many
+rollouts are generated per selected task. Defaults are `task_batch_size=16` for
+`reinforce`, `a2c`, and `grpo`, `64` for `ppo`, and `1` for `dqn`.
+`rollout_group_size` defaults to `1` for older DNN agents and `8` for `grpo`.
+The old `--rollout-episodes` and `--group-size` flags remain accepted aliases
+for `--task-batch-size` and `--rollout-group-size`.
+See `docs/rollout_budget_terms.md` for the full vocabulary and per-agent
+schematics.
 
 TensorBoard logs include aggregate rollout metrics plus update diagnostics when
 the algorithm provides them. Neural policy methods log total loss, policy loss,
@@ -109,14 +121,16 @@ within the selected layout. A task cannot repeat within the same dataset epoch,
 including across rollout collections. When all selected tasks have appeared
 once, the next dataset epoch starts and tasks become eligible again.
 
-Policy-gradient agents update from rollout collections instead of one rollout at
-a time. `reinforce` and `a2c` collect 16 rollouts per training round, while
-`ppo` collects 64. All three compute returns/advantages while trajectories are
-intact, then shuffle collected transitions into minibatches of 64 for
-optimization. `ppo` trains for 4 optimization epochs per training round. `a2c`
-and `ppo` bootstrap from time-limit truncations and stop bootstrapping only at
-true task termination. `reinforce` uses Monte Carlo returns from observed
-rewards only, so truncated rollouts receive no additional terminal reward.
+Policy-gradient agents update from task batches instead of one rollout at a
+time. `reinforce` and `a2c` collect 16 distinct tasks per training round, while
+`ppo` collects 64. With the default `rollout_group_size=1`, each selected task
+corresponds to one rollout. All three compute returns/advantages while
+trajectories are intact, then shuffle collected transitions into minibatches of
+64 for optimization. `ppo` trains for 4 optimization epochs per training round.
+`a2c` and `ppo` bootstrap from time-limit truncations and stop bootstrapping
+only at true task termination. `reinforce` uses Monte Carlo returns from
+observed rewards only, so truncated rollouts receive no additional terminal
+reward.
 `reinforce` starts with an entropy coefficient of `0.05`, decays it by `0.9995`
 after each rollout update, and keeps a `0.01` floor to reduce early policy
 collapse. `a2c` uses a smaller default learning rate of `1e-4`, starts with a
@@ -137,8 +151,8 @@ per observed transition.
 
 Tune neural agents with randomized search over standard RL knobs such as
 learning rate, discount factor, entropy regularization, PPO clipping, PPO
-optimization epochs per training round, policy rollout collection size, DQN
-replay warmup, minibatch size, and target-network update cadence. The tuner
+optimization epochs per training round, task batch size, rollout group size,
+DQN replay warmup, minibatch size, and target-network update cadence. The tuner
 optimizes validation mean path efficiency across all evaluated tasks.
 
 Generate datasets first:
@@ -154,26 +168,26 @@ python scripts/tune_dnn.py --algorithm ppo
 ```
 
 By default, the tuner reads `data/train.npz`, `data/validation.npz`, and
-`data/same_layout_new_goals.npz`, runs 60 trials with a 200 dataset-epoch
+`data/same_layout_new_goals.npz`, runs 60 trials with a 200 rollouts-per-task
 maximum budget per trial, trains each trial under `runs/tuning/trials`,
 evaluates every validation task, writes TensorBoard logs, appends
 `runs/tuning/tuning_results.csv`, and writes the current best trial to
 `runs/tuning/best_config.json`. Pass
 `--search-space path/to/search_space.json` to override the default search space.
 
-Keep `--dataset-epochs` as the training budget for comparable trials. Increasing
-it usually improves final performance but also changes compute cost, so it is
-best treated as a generous fixed maximum budget for the sweep. The tuner asks
-training to evaluate validation mean path efficiency every
-`--validation-interval` dataset epochs, also evaluates
+Keep `--rollouts-per-task` as the training budget for comparable trials.
+Increasing it usually improves final performance but also changes compute cost,
+so it is best treated as a generous fixed maximum budget for the sweep. The
+tuner asks training to evaluate validation mean path efficiency every
+`--validation-interval` internal task-selection passes, also evaluates
 `--same-layout-dataset` when provided, saves each trial's `best_checkpoint.pt`,
-and uses the best validation-layout checkpoint for trial selection. The
-ordinary `checkpoint.pt` remains the final training state.
+and uses the best validation-layout checkpoint for trial selection. The ordinary
+`checkpoint.pt` remains the final training state.
 
 Training writes `validation_metrics.png` beside `validation_metrics.csv`; the
 plot overlays validation-layout performance with same-layout new-task
 performance when both splits are available. Tuning and training progress logs
-show trial percentages and dataset-epoch percentages at validation checks.
+show trial percentages and task-selection-pass percentages at validation checks.
 
 Early stopping defaults to `--early-stopping-patience 35` with
 `--early-stopping-min-delta 0.0`, and the same stopping rule applies to every

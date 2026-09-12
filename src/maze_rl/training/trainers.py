@@ -912,12 +912,14 @@ def train_grpo_episode(
         env,
         agent,
         [
-            (
-                episode,
-                epoch,
-                task_index,
-            )
-        ],
+            [
+                (
+                    episode,
+                    epoch,
+                    task_index,
+                )
+            ]
+        ]
     )[0]
 
 
@@ -988,84 +990,105 @@ def _collect_grpo_episode(
 def train_grpo_round(
     env,
     agent: GRPOAgent,
-    episode_specs,
+    rollout_groups,
 ):
     metrics = []
-    episode_observations = []
-    episode_actions = []
-    episode_log_probabilities = []
-    episode_returns = []
-
-    for (
-        episode,
-        epoch,
-        task_index,
-    ) in episode_specs:
-        (
-            episode_metrics,
-            observations,
-            actions,
-            log_probabilities,
-            episode_return,
-        ) = _collect_grpo_episode(
-            env,
-            agent,
-            episode,
-            epoch,
-            task_index,
-        )
-
-        metrics.append(episode_metrics)
-        episode_observations.append(
-            observations
-        )
-        episode_actions.append(actions)
-        episode_log_probabilities.append(
-            log_probabilities
-        )
-        episode_returns.append(
-            episode_return
-        )
-
-    returns_array = np.asarray(
-        episode_returns,
-        dtype=np.float32,
-    )
-    returns_std = float(
-        returns_array.std()
-    )
-
-    if returns_std <= 1e-8:
-        episode_advantages = np.zeros_like(
-            returns_array
-        )
-    else:
-        episode_advantages = (
-            returns_array
-            - returns_array.mean()
-        ) / returns_std
-
     observations = []
     actions = []
     log_probabilities = []
     advantages = []
+    all_returns = []
 
-    for index, advantage in enumerate(
-        episode_advantages
+    if rollout_groups and isinstance(
+        rollout_groups[0],
+        tuple,
     ):
-        observations.extend(
-            episode_observations[index]
+        rollout_groups = [rollout_groups]
+
+    for episode_specs in rollout_groups:
+        group_observations = []
+        group_actions = []
+        group_log_probabilities = []
+        group_returns = []
+
+        for (
+            episode,
+            epoch,
+            task_index,
+        ) in episode_specs:
+            (
+                episode_metrics,
+                episode_observations,
+                episode_actions,
+                episode_log_probabilities,
+                episode_return,
+            ) = _collect_grpo_episode(
+                env,
+                agent,
+                episode,
+                epoch,
+                task_index,
+            )
+
+            metrics.append(episode_metrics)
+            group_observations.append(
+                episode_observations
+            )
+            group_actions.append(
+                episode_actions
+            )
+            group_log_probabilities.append(
+                episode_log_probabilities
+            )
+            group_returns.append(
+                episode_return
+            )
+            all_returns.append(
+                episode_return
+            )
+
+        returns_array = np.asarray(
+            group_returns,
+            dtype=np.float32,
         )
-        actions.extend(
-            episode_actions[index]
+        returns_std = float(
+            returns_array.std()
         )
-        log_probabilities.extend(
-            episode_log_probabilities[index]
-        )
-        advantages.extend(
-            [float(advantage)]
-            * len(episode_actions[index])
-        )
+
+        if returns_std <= 1e-8:
+            episode_advantages = np.zeros_like(
+                returns_array
+            )
+        else:
+            episode_advantages = (
+                returns_array
+                - returns_array.mean()
+            ) / returns_std
+
+        for index, advantage in enumerate(
+            episode_advantages
+        ):
+            observations.extend(
+                group_observations[index]
+            )
+            actions.extend(
+                group_actions[index]
+            )
+            log_probabilities.extend(
+                group_log_probabilities[index]
+            )
+            advantages.extend(
+                [float(advantage)]
+                * len(group_actions[index])
+            )
+
+    if not metrics:
+        return metrics
+
+    returns_array = np.asarray(
+        all_returns,
+        dtype=np.float32,
+    )
 
     diagnostics = agent.update(
         observations=observations,

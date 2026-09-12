@@ -64,7 +64,7 @@ def test_parse_args_uses_tuning_run_defaults(monkeypatch):
     args = parse_args()
 
     assert args.trials == 60
-    assert args.dataset_epochs == 200
+    assert args.rollouts_per_task == 200
     assert args.eval_all_tasks is True
     assert args.eval_episodes == 200
     assert args.early_stopping_patience == 35
@@ -74,7 +74,7 @@ def test_parse_args_uses_tuning_run_defaults(monkeypatch):
 def test_training_command_includes_trial_hyperparameters(tmp_path):
     args = SimpleNamespace(
         algorithm="ppo",
-        dataset_epochs=3,
+        rollouts_per_task=3,
         max_steps=7,
         validation_dataset=tmp_path / "validation.npz",
         same_layout_dataset=tmp_path
@@ -96,7 +96,8 @@ def test_training_command_includes_trial_hyperparameters(tmp_path):
         hyperparameters={
             "learning_rate": 0.0003,
             "minibatch_size": 32,
-            "rollout_episodes": 64,
+            "task_batch_size": 64,
+            "rollout_group_size": 1,
         },
     )
 
@@ -130,14 +131,20 @@ def test_training_command_includes_trial_hyperparameters(tmp_path):
         command.index("--early-stopping-min-delta") + 1
     ] == "0.01"
     assert command[
-        command.index("--rollout-episodes") + 1
+        command.index("--rollouts-per-task") + 1
+    ] == "3"
+    assert command[
+        command.index("--task-batch-size") + 1
     ] == "64"
+    assert command[
+        command.index("--rollout-group-size") + 1
+    ] == "1"
 
 
-def test_training_command_passes_grpo_group_size(tmp_path):
+def test_training_command_passes_grpo_task_and_group_sizes(tmp_path):
     args = SimpleNamespace(
         algorithm="grpo",
-        dataset_epochs=16,
+        rollouts_per_task=16,
         max_steps=7,
         validation_dataset=tmp_path / "validation.npz",
         same_layout_dataset=tmp_path
@@ -158,7 +165,8 @@ def test_training_command_passes_grpo_group_size(tmp_path):
         trial_seed=11,
         hyperparameters={
             "learning_rate": 0.0003,
-            "group_size": 8,
+            "task_batch_size": 16,
+            "rollout_group_size": 8,
         },
     )
 
@@ -166,7 +174,10 @@ def test_training_command_passes_grpo_group_size(tmp_path):
         command.index("--learning-rate") + 1
     ] == "0.0003"
     assert command[
-        command.index("--group-size") + 1
+        command.index("--task-batch-size") + 1
+    ] == "16"
+    assert command[
+        command.index("--rollout-group-size") + 1
     ] == "8"
 
 
@@ -235,21 +246,21 @@ def test_summarize_evaluation_uses_mean_path_efficiency(tmp_path):
     )
 
 
-def test_load_search_space_rejects_unsupported_parameters(tmp_path):
+def test_load_search_space_allows_training_loop_parameters(tmp_path):
     path = tmp_path / "space.json"
     path.write_text(
         '{"learning_rate": {"type": "uniform", "low": 0.1, "high": 0.2}, '
-        '"rollout_episodes": {"type": "choice", "values": [8]}}'
+        '"task_batch_size": {"type": "choice", "values": [8]}, '
+        '"rollout_group_size": {"type": "choice", "values": [1]}}'
     )
 
-    with pytest.raises(
-        ValueError,
-        match="unsupported",
-    ):
-        load_search_space(
-            "dqn",
-            path,
-        )
+    search_space = load_search_space(
+        "dqn",
+        path,
+    )
+
+    assert "task_batch_size" in search_space
+    assert "rollout_group_size" in search_space
 
 
 def test_load_search_space_allows_dqn_train_frequency(tmp_path):
@@ -267,7 +278,7 @@ def test_load_search_space_allows_dqn_train_frequency(tmp_path):
     assert "train_frequency" in search_space
 
 
-def test_load_search_space_allows_policy_rollout_episodes(tmp_path):
+def test_load_search_space_normalizes_rollout_episodes_alias(tmp_path):
     path = tmp_path / "space.json"
     path.write_text(
         '{"learning_rate": {"type": "uniform", "low": 0.1, "high": 0.2}, '
@@ -279,27 +290,11 @@ def test_load_search_space_allows_policy_rollout_episodes(tmp_path):
         path,
     )
 
-    assert "rollout_episodes" in search_space
+    assert "task_batch_size" in search_space
+    assert "rollout_episodes" not in search_space
 
 
-def test_load_search_space_rejects_policy_group_size(tmp_path):
-    path = tmp_path / "space.json"
-    path.write_text(
-        '{"learning_rate": {"type": "uniform", "low": 0.1, "high": 0.2}, '
-        '"group_size": {"type": "choice", "values": [8]}}'
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="unsupported.*group_size",
-    ):
-        load_search_space(
-            "ppo",
-            path,
-        )
-
-
-def test_load_search_space_allows_grpo_group_size(tmp_path):
+def test_load_search_space_normalizes_group_size_alias(tmp_path):
     path = tmp_path / "space.json"
     path.write_text(
         '{"learning_rate": {"type": "uniform", "low": 0.1, "high": 0.2}, '
@@ -307,25 +302,39 @@ def test_load_search_space_allows_grpo_group_size(tmp_path):
     )
 
     search_space = load_search_space(
+        "ppo",
+        path,
+    )
+
+    assert "rollout_group_size" in search_space
+    assert "group_size" not in search_space
+
+
+def test_load_search_space_allows_grpo_rollout_group_size(tmp_path):
+    path = tmp_path / "space.json"
+    path.write_text(
+        '{"learning_rate": {"type": "uniform", "low": 0.1, "high": 0.2}, '
+        '"rollout_group_size": {"type": "choice", "values": [8]}}'
+    )
+
+    search_space = load_search_space(
         "grpo",
         path,
     )
 
-    assert "group_size" in search_space
+    assert "rollout_group_size" in search_space
 
 
-def test_load_search_space_rejects_grpo_rollout_episodes(tmp_path):
+def test_load_search_space_allows_grpo_task_batch_size(tmp_path):
     path = tmp_path / "space.json"
     path.write_text(
         '{"learning_rate": {"type": "uniform", "low": 0.1, "high": 0.2}, '
-        '"rollout_episodes": {"type": "choice", "values": [64]}}'
+        '"task_batch_size": {"type": "choice", "values": [16]}}'
     )
 
-    with pytest.raises(
-        ValueError,
-        match="unsupported.*rollout_episodes",
-    ):
-        load_search_space(
-            "grpo",
-            path,
-        )
+    search_space = load_search_space(
+        "grpo",
+        path,
+    )
+
+    assert "task_batch_size" in search_space

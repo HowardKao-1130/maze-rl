@@ -130,14 +130,20 @@ NEURAL_HYPERPARAMETER_DESTS = sorted(
     }
 )
 
-POLICY_ROLLOUT_EPISODES = {
+DEFAULT_TASK_BATCH_SIZES = {
+    "dqn": 1,
     "reinforce": 16,
     "a2c": 16,
     "ppo": 64,
+    "grpo": 16,
 }
 
-GROUPED_POLICY_ALGORITHMS = {
-    "grpo",
+DEFAULT_ROLLOUT_GROUP_SIZES = {
+    "dqn": 1,
+    "reinforce": 1,
+    "a2c": 1,
+    "ppo": 1,
+    "grpo": 8,
 }
 
 
@@ -311,13 +317,15 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--rollouts-per-task",
         "--dataset-epochs",
+        dest="rollouts_per_task",
         type=int,
         default=100,
         help=(
-            "Number of dataset epochs to train. A dataset epoch "
-            "completes when every selected task has appeared at "
-            "least once in rollout collection."
+            "Training budget expressed as rollout attempts allowed "
+            "per training task. --dataset-epochs is accepted as a "
+            "backward-compatible alias."
         ),
     )
 
@@ -367,7 +375,7 @@ def parse_args():
         type=int,
         default=0,
         help=(
-            "Number of dataset epochs used for rolling means. "
+            "Number of task-selection passes used for rolling means. "
             "Use 0 to disable rolling means."
         ),
     )
@@ -404,8 +412,8 @@ def parse_args():
         default=101,
         help=(
             "Number of evenly spaced tabular Q-table snapshots to "
-            "save in checkpoints. The first snapshot is dataset "
-            "epoch 1."
+            "save in checkpoints. The first snapshot is task-selection "
+            "pass 1."
         ),
     )
 
@@ -430,12 +438,15 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--task-batch-size",
         "--rollout-episodes",
+        dest="task_batch_size",
         type=int,
         default=None,
         help=(
-            "Rollouts collected per policy-gradient training "
-            "round. Defaults to the algorithm-specific value."
+            "Distinct tasks selected per training round. "
+            "--rollout-episodes is accepted as a "
+            "backward-compatible alias."
         ),
     )
 
@@ -463,7 +474,7 @@ def parse_args():
         type=int,
         default=0,
         help=(
-            "Dataset-epoch interval for validation. Use 0 to "
+            "Task-selection-pass interval for validation. Use 0 to "
             "disable periodic validation."
         ),
     )
@@ -602,13 +613,16 @@ def parse_args():
         default=None,
     )
     neural_group.add_argument(
+        "--rollout-group-size",
         "--group-size",
+        dest="rollout_group_size",
         type=int,
         default=None,
         help=(
-            "GRPO rollouts per grouped update. GRPO runs "
-            "ceil(dataset_epochs / group_size) optimization "
-            "epochs."
+            "Rollouts generated per selected task in a task batch. "
+            "Defaults to 1 for older DNN agents and 8 for GRPO. "
+            "--group-size is accepted as a backward-compatible "
+            "alias."
         ),
     )
 
@@ -654,50 +668,89 @@ def validate_neural_hyperparameters(
         )
 
 
+def task_batch_size_for_algorithm(
+    algorithm: str,
+    task_batch_size: int | None,
+) -> int:
+    if task_batch_size is None:
+        return DEFAULT_TASK_BATCH_SIZES.get(
+            algorithm,
+            1,
+        )
+
+    if task_batch_size <= 0:
+        raise ValueError(
+            "--task-batch-size must be positive."
+        )
+
+    return task_batch_size
+
+
+def rollout_group_size_for_algorithm(
+    algorithm: str,
+    rollout_group_size: int | None,
+) -> int:
+    if rollout_group_size is None:
+        return DEFAULT_ROLLOUT_GROUP_SIZES.get(
+            algorithm,
+            1,
+        )
+
+    if rollout_group_size <= 0:
+        raise ValueError(
+            "--rollout-group-size must be positive."
+        )
+
+    if (
+        rollout_group_size > 1
+        and algorithm not in NEURAL_ALGORITHMS
+    ):
+        raise ValueError(
+            "--rollout-group-size greater than 1 is only "
+            "supported for DNN agents."
+        )
+
+    return rollout_group_size
+
+
+def task_selection_passes_for_budget(
+    rollouts_per_task: int,
+    rollout_group_size: int,
+) -> int:
+    if rollouts_per_task <= 0:
+        raise ValueError(
+            "--rollouts-per-task must be positive."
+        )
+
+    return max(
+        1,
+        (
+            rollouts_per_task
+            + rollout_group_size
+            - 1
+        )
+        // rollout_group_size,
+    )
+
+
 def rollout_episodes_for_algorithm(
     algorithm: str,
     rollout_episodes: int | None,
 ) -> int:
-    if rollout_episodes is None:
-        return POLICY_ROLLOUT_EPISODES[
-            algorithm
-        ]
-
-    if algorithm not in POLICY_ROLLOUT_EPISODES:
-        raise ValueError(
-            "--rollout-episodes is only supported for "
-            "policy-gradient agents."
-        )
-
-    if rollout_episodes <= 0:
-        raise ValueError(
-            "--rollout-episodes must be positive."
-        )
-
-    return rollout_episodes
+    return task_batch_size_for_algorithm(
+        algorithm,
+        rollout_episodes,
+    )
 
 
 def group_size_for_algorithm(
     algorithm: str,
     group_size: int | None,
 ) -> int:
-    if group_size is None:
-        if algorithm in GROUPED_POLICY_ALGORITHMS:
-            return 8
-
-        return 0
-
-    if algorithm not in GROUPED_POLICY_ALGORITHMS:
-        raise ValueError(
-            "--group-size is only supported for GRPO."
-        )
-
-    if group_size < 2:
-        raise ValueError(
-            "--group-size must be at least 2."
-        )
-
-    return group_size
+    return rollout_group_size_for_algorithm(
+        algorithm,
+        group_size,
+    )
 
 
 def training_epoch_budget_for_algorithm(
@@ -705,23 +758,12 @@ def training_epoch_budget_for_algorithm(
     dataset_epochs: int,
     group_size: int,
 ) -> int:
-    if dataset_epochs <= 0:
-        raise ValueError(
-            "--dataset-epochs must be positive."
-        )
+    del algorithm
 
-    if algorithm in GROUPED_POLICY_ALGORITHMS:
-        return max(
-            1,
-            (
-                dataset_epochs
-                + group_size
-                - 1
-            )
-            // group_size,
-        )
-
-    return dataset_epochs
+    return task_selection_passes_for_budget(
+        dataset_epochs,
+        max(1, group_size),
+    )
 
 
 def create_agent(
@@ -1021,7 +1063,7 @@ def format_progress_message(
 ) -> str:
     message = (
         f"{algorithm:12s} "
-        f"dataset_epoch={metrics.epoch:5d} "
+        f"task_selection_pass={metrics.epoch:5d} "
         f"rollout={metrics.episode:7d} "
         f"task={metrics.task_index:5d} "
         f"episode_return="
@@ -1588,15 +1630,20 @@ def main():
             args
         )
     )
-    group_size = group_size_for_algorithm(
+    task_batch_size = task_batch_size_for_algorithm(
         args.algorithm,
-        args.group_size,
+        args.task_batch_size,
     )
-    training_epoch_budget = (
-        training_epoch_budget_for_algorithm(
+    rollout_group_size = (
+        rollout_group_size_for_algorithm(
             args.algorithm,
-            args.dataset_epochs,
-            group_size,
+            args.rollout_group_size,
+        )
+    )
+    task_selection_pass_budget = (
+        task_selection_passes_for_budget(
+            args.rollouts_per_task,
+            rollout_group_size,
         )
     )
 
@@ -1722,10 +1769,10 @@ def main():
         for epoch in np.unique(
             np.linspace(
                 1,
-                training_epoch_budget,
+                task_selection_pass_budget,
                 num=min(
                     q_snapshot_count,
-                    training_epoch_budget,
+                    task_selection_pass_budget,
                 ),
                 dtype=np.int64,
             )
@@ -1768,6 +1815,42 @@ def main():
         layout_indices=env.layout_indices,
         seed=args.seed,
     )
+    rollout = 0
+
+    def build_rollout_groups(
+        rollout_specs,
+    ):
+        nonlocal rollout
+
+        groups = []
+
+        for spec in rollout_specs:
+            group = []
+
+            for _ in range(
+                rollout_group_size
+            ):
+                rollout += 1
+                group.append(
+                    (
+                        rollout,
+                        spec.dataset_epoch,
+                        spec.task_index,
+                    )
+                )
+
+            groups.append(group)
+
+        return groups
+
+    def flatten_rollout_groups(
+        rollout_groups,
+    ):
+        return [
+            episode_spec
+            for group in rollout_groups
+            for episode_spec in group
+        ]
 
     def finish_dataset_epoch(
         dataset_epoch,
@@ -1840,7 +1923,7 @@ def main():
 
         if validation_envs and should_validate_epoch(
             dataset_epoch,
-            training_epoch_budget,
+            task_selection_pass_budget,
             args.validation_interval,
         ):
             for split, validation_env in validation_envs.items():
@@ -1894,9 +1977,9 @@ def main():
 
                 if split != "validation":
                     print(
-                        f"{split} dataset_epoch="
-                        f"{dataset_epoch:5d}/{training_epoch_budget} "
-                        f"({dataset_epoch / training_epoch_budget:.0%}) "
+                        f"{split} task_selection_pass="
+                        f"{dataset_epoch:5d}/{task_selection_pass_budget} "
+                        f"({dataset_epoch / task_selection_pass_budget:.0%}) "
                         f"mean_path_efficiency={validation_score:.3f}"
                     )
                     continue
@@ -1931,9 +2014,9 @@ def main():
                     validation_checks_without_improvement += 1
 
                 print(
-                    f"validation dataset_epoch="
-                    f"{dataset_epoch:5d}/{training_epoch_budget} "
-                    f"({dataset_epoch / training_epoch_budget:.0%}) "
+                    f"validation task_selection_pass="
+                    f"{dataset_epoch:5d}/{task_selection_pass_budget} "
+                    f"({dataset_epoch / task_selection_pass_budget:.0%}) "
                     f"mean_path_efficiency={validation_score:.3f} "
                     f"best="
                     f"{best_validation['mean_path_efficiency']:.3f}"
@@ -2005,31 +2088,28 @@ def main():
 
         return next_epoch_to_log
 
-    if args.algorithm in POLICY_ROLLOUT_EPISODES:
-        rollout_episodes = rollout_episodes_for_algorithm(
-            args.algorithm,
-            args.rollout_episodes,
-        )
+    if args.algorithm in {
+        "reinforce",
+        "a2c",
+        "ppo",
+    }:
         epoch_metrics_by_epoch = {}
         next_epoch_to_log = 1
 
         while (
             sampler.completed_dataset_epochs
-            < training_epoch_budget
+            < task_selection_pass_budget
             and not stopped_early
         ):
             rollout_specs = sampler.sample_collection(
-                collection_size=rollout_episodes,
-                target_dataset_epochs=training_epoch_budget,
+                collection_size=task_batch_size,
+                target_dataset_epochs=task_selection_pass_budget,
             )
-            episode_specs = [
-                (
-                    spec.rollout,
-                    spec.dataset_epoch,
-                    spec.task_index,
+            episode_specs = flatten_rollout_groups(
+                build_rollout_groups(
+                    rollout_specs
                 )
-                for spec in rollout_specs
-            ]
+            )
 
             if not episode_specs:
                 break
@@ -2074,54 +2154,40 @@ def main():
                 )
             )
 
-    elif args.algorithm in GROUPED_POLICY_ALGORITHMS:
-        if args.rollout_episodes is not None:
-            rollout_episodes_for_algorithm(
-                args.algorithm,
-                args.rollout_episodes,
-            )
-
+    elif args.algorithm == "grpo":
         epoch_metrics_by_epoch = {}
         next_epoch_to_log = 1
-        grpo_rollout = 0
 
         print(
-            "grpo optimization_epochs="
-            f"{training_epoch_budget} from dataset_epochs="
-            f"{args.dataset_epochs} and group_size={group_size}",
+            "grpo task_selection_passes="
+            f"{task_selection_pass_budget} from rollouts_per_task="
+            f"{args.rollouts_per_task}, task_batch_size="
+            f"{task_batch_size}, rollout_group_size="
+            f"{rollout_group_size}",
             flush=True,
         )
 
         while (
             sampler.completed_dataset_epochs
-            < training_epoch_budget
+            < task_selection_pass_budget
             and not stopped_early
         ):
             rollout_specs = sampler.sample_collection(
-                collection_size=1,
-                target_dataset_epochs=training_epoch_budget,
+                collection_size=task_batch_size,
+                target_dataset_epochs=task_selection_pass_budget,
             )
 
             if not rollout_specs:
                 break
 
-            spec = rollout_specs[0]
-            episode_specs = []
-
-            for _ in range(group_size):
-                grpo_rollout += 1
-                episode_specs.append(
-                    (
-                        grpo_rollout,
-                        spec.dataset_epoch,
-                        spec.task_index,
-                    )
-                )
+            rollout_groups = build_rollout_groups(
+                rollout_specs
+            )
 
             round_metrics = train_grpo_round(
                 env,
                 agent,
-                episode_specs,
+                rollout_groups,
             )
 
             for metrics in round_metrics:
@@ -2144,81 +2210,88 @@ def main():
             )
 
     else:
-        if args.rollout_episodes is not None:
-            rollout_episodes_for_algorithm(
-                args.algorithm,
-                args.rollout_episodes,
-            )
-
         epoch_metrics_by_epoch = {}
         next_epoch_to_log = 1
 
         while (
             sampler.completed_dataset_epochs
-            < training_epoch_budget
+            < task_selection_pass_budget
             and not stopped_early
         ):
             rollout_specs = sampler.sample_collection(
-                collection_size=1,
-                target_dataset_epochs=training_epoch_budget,
+                collection_size=task_batch_size,
+                target_dataset_epochs=task_selection_pass_budget,
             )
 
             if not rollout_specs:
                 break
 
-            spec = rollout_specs[0]
+            round_metrics = []
 
-            if args.algorithm == "mc":
-                metrics = (
-                    train_monte_carlo_episode(
+            for (
+                rollout_id,
+                dataset_epoch,
+                task_index,
+            ) in flatten_rollout_groups(
+                build_rollout_groups(
+                    rollout_specs
+                )
+            ):
+                if args.algorithm == "mc":
+                    metrics = (
+                        train_monte_carlo_episode(
+                            env,
+                            agent,
+                            rollout_id,
+                            dataset_epoch,
+                            task_index,
+                        )
+                    )
+
+                elif args.algorithm == "sarsa":
+                    metrics = train_sarsa_episode(
                         env,
                         agent,
-                        spec.rollout,
-                        spec.dataset_epoch,
-                        spec.task_index,
+                        rollout_id,
+                        dataset_epoch,
+                        task_index,
                     )
-                )
 
-            elif args.algorithm == "sarsa":
-                metrics = train_sarsa_episode(
-                    env,
-                    agent,
-                    spec.rollout,
-                    spec.dataset_epoch,
-                    spec.task_index,
-                )
+                elif args.algorithm in {
+                    "q_learning",
+                    "dyna_q",
+                }:
+                    metrics = (
+                        train_q_learning_episode(
+                            env,
+                            agent,
+                            rollout_id,
+                            dataset_epoch,
+                            task_index,
+                        )
+                    )
 
-            elif args.algorithm in {
-                "q_learning",
-                "dyna_q",
-            }:
-                metrics = (
-                    train_q_learning_episode(
+                else:
+                    metrics = train_dqn_episode(
                         env,
                         agent,
-                        spec.rollout,
-                        spec.dataset_epoch,
-                        spec.task_index,
+                        rollout_id,
+                        dataset_epoch,
+                        task_index,
                     )
-                )
 
-            else:
-                metrics = train_dqn_episode(
-                    env,
-                    agent,
-                    spec.rollout,
-                    spec.dataset_epoch,
-                    spec.task_index,
-                )
+                round_metrics.append(metrics)
 
-            record_episode_metrics(metrics)
+            for metrics in round_metrics:
+                record_episode_metrics(metrics)
+                epoch_metrics_by_epoch.setdefault(
+                    metrics.epoch,
+                    [],
+                ).append(metrics)
+
             record_training_round(
-                [metrics]
+                round_metrics
             )
-            epoch_metrics_by_epoch.setdefault(
-                metrics.epoch,
-                [],
-            ).append(metrics)
 
             next_epoch_to_log = (
                 maybe_finish_dataset_epochs(
@@ -2250,19 +2323,23 @@ def main():
 
     summary = {
         "algorithm": args.algorithm,
-        "dataset_epochs_requested": args.dataset_epochs,
+        "rollouts_per_task_requested": args.rollouts_per_task,
+        "task_batch_size": task_batch_size,
+        "rollout_group_size": rollout_group_size,
+        "task_selection_passes_requested": task_selection_pass_budget,
+        "task_selection_passes_completed": (
+            stopped_epoch
+            if stopped_early
+            else sampler.completed_dataset_epochs
+        ),
+        "dataset_epochs_requested": task_selection_pass_budget,
         "dataset_epochs_completed": (
             stopped_epoch
             if stopped_early
             else sampler.completed_dataset_epochs
         ),
-        "optimization_epochs_requested": training_epoch_budget,
-        "group_size": (
-            group_size
-            if args.algorithm
-            in GROUPED_POLICY_ALGORITHMS
-            else None
-        ),
+        "optimization_epochs_requested": task_selection_pass_budget,
+        "group_size": rollout_group_size,
         "stopped_early": stopped_early,
         "stopped_epoch": stopped_epoch,
         "checkpoint_path": str(

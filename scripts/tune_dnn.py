@@ -29,10 +29,8 @@ for import_path in [
         )
 
 from scripts.train import (
-    GROUPED_POLICY_ALGORITHMS,
     NEURAL_ALGORITHMS,
     NEURAL_HYPERPARAMETERS,
-    POLICY_ROLLOUT_EPISODES,
 )
 
 DEFAULT_SEARCH_SPACES: dict[
@@ -71,6 +69,14 @@ DEFAULT_SEARCH_SPACES: dict[
             "type": "choice",
             "values": [100, 250, 500, 1000],
         },
+        "task_batch_size": {
+            "type": "choice",
+            "values": [1],
+        },
+        "rollout_group_size": {
+            "type": "choice",
+            "values": [1],
+        },
     },
     "reinforce": {
         "learning_rate": {
@@ -101,9 +107,13 @@ DEFAULT_SEARCH_SPACES: dict[
             "type": "choice",
             "values": [32, 64, 128],
         },
-        "rollout_episodes": {
+        "task_batch_size": {
             "type": "choice",
             "values": [8, 16, 32],
+        },
+        "rollout_group_size": {
+            "type": "choice",
+            "values": [1],
         },
     },
     "a2c": {
@@ -145,9 +155,13 @@ DEFAULT_SEARCH_SPACES: dict[
             "type": "choice",
             "values": [32, 64, 128],
         },
-        "rollout_episodes": {
+        "task_batch_size": {
             "type": "choice",
             "values": [8, 16, 32],
+        },
+        "rollout_group_size": {
+            "type": "choice",
+            "values": [1],
         },
     },
     "ppo": {
@@ -189,9 +203,13 @@ DEFAULT_SEARCH_SPACES: dict[
             "type": "choice",
             "values": [32, 64, 128],
         },
-        "rollout_episodes": {
+        "task_batch_size": {
             "type": "choice",
             "values": [32, 64, 128],
+        },
+        "rollout_group_size": {
+            "type": "choice",
+            "values": [1],
         },
     },
     "grpo": {
@@ -228,7 +246,11 @@ DEFAULT_SEARCH_SPACES: dict[
             "type": "choice",
             "values": [32, 64, 128],
         },
-        "group_size": {
+        "task_batch_size": {
+            "type": "choice",
+            "values": [8, 16, 32],
+        },
+        "rollout_group_size": {
             "type": "choice",
             "values": [4, 8, 16],
         },
@@ -236,8 +258,13 @@ DEFAULT_SEARCH_SPACES: dict[
 }
 
 TRAINING_LOOP_PARAMETERS = {
-    "rollout_episodes",
-    "group_size",
+    "task_batch_size",
+    "rollout_group_size",
+}
+
+TRAINING_LOOP_PARAMETER_ALIASES = {
+    "rollout_episodes": "task_batch_size",
+    "group_size": "rollout_group_size",
 }
 
 
@@ -260,11 +287,15 @@ def parse_args() -> argparse.Namespace:
         default=60,
     )
     parser.add_argument(
+        "--rollouts-per-task",
         "--dataset-epochs",
+        dest="rollouts_per_task",
         type=int,
         default=200,
         help=(
-            "Generous maximum training budget for every trial."
+            "Generous rollout budget per training task for every "
+            "trial. --dataset-epochs is accepted as a "
+            "backward-compatible alias."
         ),
     )
     parser.add_argument(
@@ -354,8 +385,8 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help=(
-            "Dataset-epoch interval for validation during each "
-            "trial."
+            "Task-selection-pass interval for validation during "
+            "each trial."
         ),
     )
     parser.add_argument(
@@ -470,15 +501,20 @@ def load_search_space(
             "Search space JSON must contain a parameter mapping."
         )
 
+    data = {
+        TRAINING_LOOP_PARAMETER_ALIASES.get(
+            name,
+            name,
+        ): spec
+        for name, spec in data.items()
+    }
+
     valid_parameters = set(
         NEURAL_HYPERPARAMETERS[algorithm]
     )
-
-    if algorithm in POLICY_ROLLOUT_EPISODES:
-        valid_parameters.add("rollout_episodes")
-
-    if algorithm in GROUPED_POLICY_ALGORITHMS:
-        valid_parameters.add("group_size")
+    valid_parameters.update(
+        TRAINING_LOOP_PARAMETERS
+    )
 
     unsupported = sorted(
         set(data) - valid_parameters
@@ -540,8 +576,8 @@ def build_training_command(
         args.algorithm,
         "--dataset",
         str(train_dataset),
-        "--dataset-epochs",
-        str(args.dataset_epochs),
+        "--rollouts-per-task",
+        str(args.rollouts_per_task),
         "--max-steps",
         str(args.max_steps),
         "--validation-dataset",
@@ -610,25 +646,25 @@ def build_training_command(
             ]
         )
 
-    if "rollout_episodes" in hyperparameters:
+    if "task_batch_size" in hyperparameters:
         command.extend(
             [
-                "--rollout-episodes",
+                "--task-batch-size",
                 cli_value(
                     hyperparameters[
-                        "rollout_episodes"
+                        "task_batch_size"
                     ]
                 ),
             ]
         )
 
-    if "group_size" in hyperparameters:
+    if "rollout_group_size" in hyperparameters:
         command.extend(
             [
-                "--group-size",
+                "--rollout-group-size",
                 cli_value(
                     hyperparameters[
-                        "group_size"
+                        "rollout_group_size"
                     ]
                 ),
             ]
@@ -799,6 +835,11 @@ def write_result_row(
         "success_rate",
         "average_episode_return",
         "average_successful_path_efficiency",
+        "rollouts_per_task_requested",
+        "task_batch_size",
+        "rollout_group_size",
+        "task_selection_passes_requested",
+        "task_selection_passes_completed",
         "dataset_epochs_completed",
         "stopped_early",
         "checkpoint_path",
@@ -959,6 +1000,18 @@ def main() -> None:
         objective = best_validation[
             "mean_path_efficiency"
         ]
+        result_hyperparameters = {
+            **training_summary.get(
+                "hyperparameters",
+                {},
+            ),
+            "task_batch_size": training_summary.get(
+                "task_batch_size"
+            ),
+            "rollout_group_size": training_summary.get(
+                "rollout_group_size"
+            ),
+        }
         summarize_evaluation(
             evaluation_path
         )
@@ -979,6 +1032,30 @@ def main() -> None:
             "average_successful_path_efficiency": best_validation[
                 "average_successful_path_efficiency"
             ],
+            "rollouts_per_task_requested": (
+                training_summary.get(
+                    "rollouts_per_task_requested"
+                )
+            ),
+            "task_batch_size": training_summary.get(
+                "task_batch_size"
+            ),
+            "rollout_group_size": training_summary.get(
+                "rollout_group_size"
+            ),
+            "task_selection_passes_requested": (
+                training_summary.get(
+                    "task_selection_passes_requested"
+                )
+            ),
+            "task_selection_passes_completed": (
+                training_summary.get(
+                    "task_selection_passes_completed",
+                    training_summary[
+                        "dataset_epochs_completed"
+                    ],
+                )
+            ),
             "dataset_epochs_completed": (
                 training_summary[
                     "dataset_epochs_completed"
@@ -995,10 +1072,7 @@ def main() -> None:
             "evaluation_path": str(
                 evaluation_path
             ),
-            "hyperparameters": training_summary.get(
-                "hyperparameters",
-                hyperparameters,
-            ),
+            "hyperparameters": result_hyperparameters,
         }
 
         write_result_row(

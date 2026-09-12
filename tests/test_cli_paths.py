@@ -26,18 +26,18 @@ from scripts.open_tensorboard import (
 from scripts.train import (
     HierarchicalTaskSampler,
     configure_reproducibility,
-    group_size_for_algorithm,
     log_tensorboard_episode,
     log_tensorboard_epoch,
     log_tensorboard_optimization_epoch,
     log_tensorboard_training_round,
     neural_hyperparameters_from_args,
     optimization_epochs_for_round,
-    rollout_episodes_for_algorithm,
+    rollout_group_size_for_algorithm,
     should_validate_epoch,
     should_stop_early,
+    task_batch_size_for_algorithm,
+    task_selection_passes_for_budget,
     tensorboard_default_enabled,
-    training_epoch_budget_for_algorithm,
     validate_neural_hyperparameters,
 )
 
@@ -458,53 +458,63 @@ def test_optimization_epoch_counts_match_algorithm_meaning():
     ) == 4
 
 
-def test_grpo_dataset_epochs_convert_to_optimization_budget():
-    assert group_size_for_algorithm(
+def test_rollouts_per_task_converts_to_task_selection_passes():
+    assert rollout_group_size_for_algorithm(
         "grpo",
         None,
     ) == 8
-    assert training_epoch_budget_for_algorithm(
-        "grpo",
-        dataset_epochs=100,
-        group_size=8,
-    ) == 13
-    assert training_epoch_budget_for_algorithm(
+    assert rollout_group_size_for_algorithm(
         "ppo",
-        dataset_epochs=100,
-        group_size=0,
+        None,
+    ) == 1
+    assert task_selection_passes_for_budget(
+        rollouts_per_task=100,
+        rollout_group_size=8,
+    ) == 13
+    assert task_selection_passes_for_budget(
+        rollouts_per_task=100,
+        rollout_group_size=1,
     ) == 100
 
 
-def test_group_size_rejects_non_grpo_agents():
+def test_rollout_group_size_rejects_non_positive_values():
     with pytest.raises(
         ValueError,
-        match="GRPO",
+        match="positive",
     ):
-        group_size_for_algorithm(
+        rollout_group_size_for_algorithm(
             "ppo",
-            8,
+            0,
         )
 
 
-def test_rollout_episodes_can_override_policy_defaults():
-    assert rollout_episodes_for_algorithm(
+def test_task_batch_size_can_override_dnn_defaults():
+    assert task_batch_size_for_algorithm(
         "ppo",
         None,
     ) == 64
-    assert rollout_episodes_for_algorithm(
-        "ppo",
+    assert task_batch_size_for_algorithm(
+        "grpo",
+        None,
+    ) == 16
+    assert task_batch_size_for_algorithm(
+        "dqn",
+        None,
+    ) == 1
+    assert task_batch_size_for_algorithm(
+        "grpo",
         32,
     ) == 32
 
 
-def test_rollout_episodes_rejects_non_policy_agents():
+def test_task_batch_size_rejects_non_positive_values():
     with pytest.raises(
         ValueError,
-        match="policy-gradient",
+        match="positive",
     ):
-        rollout_episodes_for_algorithm(
+        task_batch_size_for_algorithm(
             "dqn",
-            32,
+            0,
         )
 
 
