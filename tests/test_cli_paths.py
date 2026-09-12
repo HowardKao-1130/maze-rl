@@ -2,10 +2,19 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
 
 import torch
 
 from maze_rl.training.metrics import EpisodeMetrics
+from maze_rl.training.plots import plot_validation_metrics
+from scripts.generate_dataset import (
+    main as generate_dataset_main,
+    parse_args as parse_dataset_args,
+)
 from scripts.evaluate import default_checkpoint_path
 from scripts.open_q_video import q_video_path
 from scripts.open_tensorboard import (
@@ -17,12 +26,19 @@ from scripts.open_tensorboard import (
 from scripts.train import (
     HierarchicalTaskSampler,
     configure_reproducibility,
+    group_size_for_algorithm,
     log_tensorboard_episode,
     log_tensorboard_epoch,
     log_tensorboard_optimization_epoch,
     log_tensorboard_training_round,
+    neural_hyperparameters_from_args,
     optimization_epochs_for_round,
+    rollout_episodes_for_algorithm,
+    should_validate_epoch,
+    should_stop_early,
     tensorboard_default_enabled,
+    training_epoch_budget_for_algorithm,
+    validate_neural_hyperparameters,
 )
 
 
@@ -88,6 +104,147 @@ def test_default_checkpoint_path_uses_algorithm_specific_suffix():
     assert default_checkpoint_path(
         "dqn"
     ) == Path("runs/dqn/checkpoint.pt")
+
+
+def test_dataset_split_aliases_name_layout_counts(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "generate_dataset.py",
+            "--train-mazes",
+            "3",
+            "--validation-mazes",
+            "2",
+            "--test-mazes",
+            "1",
+            "--tasks-per-maze",
+            "4",
+        ],
+    )
+
+    args = parse_dataset_args()
+
+    assert args.train_mazes == 3
+    assert args.validation_mazes == 2
+    assert args.test_mazes == 1
+    assert args.tasks_per_maze == 4
+
+
+def test_legacy_dataset_split_flags_still_parse(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "generate_dataset.py",
+            "--train",
+            "3",
+            "--validation",
+            "2",
+            "--test",
+            "1",
+        ],
+    )
+
+    args = parse_dataset_args()
+
+    assert args.train_mazes == 3
+    assert args.validation_mazes == 2
+    assert args.test_mazes == 1
+
+
+def test_same_layout_dataset_matches_validation_size(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "generate_dataset.py",
+            "--train-mazes",
+            "3",
+            "--validation-mazes",
+            "2",
+            "--test-mazes",
+            "1",
+            "--tasks-per-maze",
+            "1",
+            "--height",
+            "5",
+            "--width",
+            "5",
+            "--min-path-length",
+            "2",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+
+    generate_dataset_main()
+
+    with np.load(
+        tmp_path / "validation.npz"
+    ) as validation_data, np.load(
+        tmp_path / "same_layout_new_goals.npz"
+    ) as same_layout_data:
+        assert validation_data[
+            "layouts"
+        ].shape == same_layout_data[
+            "layouts"
+        ].shape
+        assert len(
+            validation_data["starts"]
+        ) == len(
+            same_layout_data["starts"]
+        )
+
+
+def test_neural_hyperparameters_filter_unset_values():
+    args = SimpleNamespace(
+        batch_size=32,
+        clip_epsilon=None,
+        entropy_coefficient=None,
+        entropy_coefficient_decay=None,
+        entropy_coefficient_min=None,
+        epsilon_decay=None,
+        epsilon_min=None,
+        epsilon_start=None,
+        gae_lambda=None,
+        gamma=0.97,
+        learning_rate=0.0001,
+        min_replay_size=None,
+        minibatch_size=None,
+        replay_capacity=None,
+        target_update_interval=None,
+        train_frequency=None,
+        update_epochs=None,
+        value_coefficient=None,
+    )
+
+    assert neural_hyperparameters_from_args(
+        args
+    ) == {
+        "batch_size": 32,
+        "gamma": 0.97,
+        "learning_rate": 0.0001,
+    }
+
+
+def test_neural_hyperparameters_reject_tabular_agents():
+    with pytest.raises(
+        ValueError,
+        match="only supported for DNN agents",
+    ):
+        validate_neural_hyperparameters(
+            "q_learning",
+            {
+                "learning_rate": 0.001,
+            },
+        )
+
+
+def test_dqn_accepts_train_frequency_hyperparameter():
+    validate_neural_hyperparameters(
+        "dqn",
+        {
+            "train_frequency": 64,
+        },
+    )
 
 
 def test_configure_reproducibility_enables_deterministic_torch():
@@ -299,6 +456,125 @@ def test_optimization_epoch_counts_match_algorithm_meaning():
         object(),
         metrics,
     ) == 4
+
+
+def test_grpo_dataset_epochs_convert_to_optimization_budget():
+    assert group_size_for_algorithm(
+        "grpo",
+        None,
+    ) == 8
+    assert training_epoch_budget_for_algorithm(
+        "grpo",
+        dataset_epochs=100,
+        group_size=8,
+    ) == 13
+    assert training_epoch_budget_for_algorithm(
+        "ppo",
+        dataset_epochs=100,
+        group_size=0,
+    ) == 100
+
+
+def test_group_size_rejects_non_grpo_agents():
+    with pytest.raises(
+        ValueError,
+        match="GRPO",
+    ):
+        group_size_for_algorithm(
+            "ppo",
+            8,
+        )
+
+
+def test_rollout_episodes_can_override_policy_defaults():
+    assert rollout_episodes_for_algorithm(
+        "ppo",
+        None,
+    ) == 64
+    assert rollout_episodes_for_algorithm(
+        "ppo",
+        32,
+    ) == 32
+
+
+def test_rollout_episodes_rejects_non_policy_agents():
+    with pytest.raises(
+        ValueError,
+        match="policy-gradient",
+    ):
+        rollout_episodes_for_algorithm(
+            "dqn",
+            32,
+        )
+
+
+def test_validation_schedule_includes_interval_and_final_epoch():
+    assert should_validate_epoch(
+        epoch=4,
+        final_epoch=10,
+        validation_interval=2,
+    )
+    assert should_validate_epoch(
+        epoch=10,
+        final_epoch=10,
+        validation_interval=3,
+    )
+    assert not should_validate_epoch(
+        epoch=5,
+        final_epoch=10,
+        validation_interval=2,
+    )
+
+
+def test_early_stopping_ignores_all_zero_startup_plateau():
+    assert not should_stop_early(
+        patience=4,
+        checks_without_improvement=4,
+        has_positive_validation_score=False,
+    )
+    assert not should_stop_early(
+        patience=4,
+        checks_without_improvement=5,
+        has_positive_validation_score=False,
+    )
+
+
+def test_early_stopping_still_applies_after_positive_validation():
+    assert should_stop_early(
+        patience=4,
+        checks_without_improvement=4,
+        has_positive_validation_score=True,
+    )
+    assert not should_stop_early(
+        patience=4,
+        checks_without_improvement=3,
+        has_positive_validation_score=True,
+    )
+    assert not should_stop_early(
+        patience=None,
+        checks_without_improvement=4,
+        has_positive_validation_score=True,
+    )
+
+
+def test_plot_validation_metrics_writes_split_curve(tmp_path):
+    metrics_path = tmp_path / "validation_metrics.csv"
+    metrics_path.write_text(
+        "split,dataset_epoch,episodes,success_rate,"
+        "average_episode_return,mean_path_efficiency,"
+        "average_successful_path_efficiency\n"
+        "validation,1,2,0.5,1.0,0.4,0.8\n"
+        "same_layout,1,2,1.0,2.0,0.9,0.9\n"
+    )
+    output_path = tmp_path / "validation_metrics.png"
+
+    plot_validation_metrics(
+        metrics_path=metrics_path,
+        output_path=output_path,
+    )
+
+    assert output_path.exists()
+    assert output_path.stat().st_size > 0
 
 
 def test_hierarchical_sampler_deduplicates_tasks_within_dataset_epoch():

@@ -6,14 +6,16 @@ practice project for RL
 Generate datasets with multiple tasks per layout:
 
 ```bash
-python scripts/generate_dataset.py --train 1000 --validation 200 --test 200 --tasks-per-maze 5
+python scripts/generate_dataset.py --train-mazes 1000 --validation-mazes 200 --test-mazes 200 --tasks-per-maze 5
 ```
 
-The split sizes control the number of unique layouts. Each layout gets
-`--tasks-per-maze` valid start/goal tasks.
+The split sizes control the number of unique layouts. `--train`,
+`--validation`, and `--test` remain accepted aliases for those maze counts.
+Each layout gets `--tasks-per-maze` valid start/goal tasks.
 
 - `data/train.npz`: seen tasks for training and memorization evaluation.
-- `data/same_layout_new_goals.npz`: held-out start/goal tasks on training layouts.
+- `data/same_layout_new_goals.npz`: validation-sized held-out start/goal tasks
+  on training layouts.
 - `data/validation.npz`: held-out validation layouts.
 - `data/test.npz`: held-out test layouts.
 
@@ -70,6 +72,16 @@ Use `--no-tensorboard` to disable neural-agent event logs, `--tensorboard` to
 enable them for a tabular run, or `--tensorboard-dir` to choose another log
 directory.
 
+Neural-agent hyperparameters can be passed directly to training, for example:
+
+```bash
+python scripts/train.py --algorithm dqn --dataset-epochs 20 --learning-rate 0.0001 --batch-size 64 --epsilon-decay 0.999
+```
+
+For policy-gradient agents, `--rollout-episodes` controls how many rollouts are
+collected before each training update. Defaults remain 16 for `reinforce` and
+`a2c`, and 64 for `ppo`.
+
 TensorBoard logs include aggregate rollout metrics plus update diagnostics when
 the algorithm provides them. Neural policy methods log total loss, policy loss,
 value loss, entropy, return targets, advantages, and value predictions; `ppo`
@@ -114,7 +126,63 @@ runs.
 
 `dqn` also uses a minibatch size of 64, a neural learning rate of `3e-4`, and a
 replay buffer sized to about 64 max-length episodes. It starts updates after a
-1,000-transition replay warmup rather than waiting for the buffer to fill.
+1,000-transition replay warmup rather than waiting for the buffer to fill. By
+default, DQN trains once per `batch_size` observed environment transitions, so
+the replay samples processed per environment step roughly match one-pass
+policy-gradient minibatching. Pass `--train-frequency 4` for a more standard
+Atari-style DQN cadence or `--train-frequency 1` to restore one replay update
+per observed transition.
+
+## DNN Hyperparameter Tuning
+
+Tune neural agents with randomized search over standard RL knobs such as
+learning rate, discount factor, entropy regularization, PPO clipping, PPO
+optimization epochs per training round, policy rollout collection size, DQN
+replay warmup, minibatch size, and target-network update cadence. The tuner
+optimizes validation mean path efficiency across all evaluated tasks.
+
+Generate datasets first:
+
+```bash
+python scripts/generate_dataset.py --train-mazes 200 --validation-mazes 50 --test-mazes 50 --tasks-per-maze 5
+```
+
+Then tune against the pre-generated train and validation sets:
+
+```bash
+python scripts/tune_dnn.py --algorithm ppo
+```
+
+By default, the tuner reads `data/train.npz`, `data/validation.npz`, and
+`data/same_layout_new_goals.npz`, runs 60 trials with a 200 dataset-epoch
+maximum budget per trial, trains each trial under `runs/tuning/trials`,
+evaluates every validation task, writes TensorBoard logs, appends
+`runs/tuning/tuning_results.csv`, and writes the current best trial to
+`runs/tuning/best_config.json`. Pass
+`--search-space path/to/search_space.json` to override the default search space.
+
+Keep `--dataset-epochs` as the training budget for comparable trials. Increasing
+it usually improves final performance but also changes compute cost, so it is
+best treated as a generous fixed maximum budget for the sweep. The tuner asks
+training to evaluate validation mean path efficiency every
+`--validation-interval` dataset epochs, also evaluates
+`--same-layout-dataset` when provided, saves each trial's `best_checkpoint.pt`,
+and uses the best validation-layout checkpoint for trial selection. The
+ordinary `checkpoint.pt` remains the final training state.
+
+Training writes `validation_metrics.png` beside `validation_metrics.csv`; the
+plot overlays validation-layout performance with same-layout new-task
+performance when both splits are available. Tuning and training progress logs
+show trial percentages and dataset-epoch percentages at validation checks.
+
+Early stopping defaults to `--early-stopping-patience 35` with
+`--early-stopping-min-delta 0.0`, and the same stopping rule applies to every
+trial. Because patience and maximum budget can interact with learning rate and
+other dynamics, inspect `validation_metrics.csv` and
+`training_summary.json` after a sweep to check whether the selected trial was
+limited by the stopping rule or by the maximum budget. Use
+`--evaluate-best-on-test` only after tuning to score the best
+validation-selected checkpoint on `--test-dataset`.
 
 Neural checkpoints for `dqn`, `a2c`, and `ppo` include model snapshots using the
 same epoch schedule as tabular Q-table snapshots. Evaluation renders `dqn`

@@ -105,6 +105,7 @@ def parse_args():
             "reinforce",
             "a2c",
             "ppo",
+            "grpo",
         ],
         help=(
             "Algorithm run to open when --logdir is not provided."

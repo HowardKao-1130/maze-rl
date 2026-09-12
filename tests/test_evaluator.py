@@ -103,3 +103,43 @@ def test_evaluate_task_indices_override_random_sampling():
 
     assert task_indices(results) == [4, 2, 0]
     assert summary["episodes"] == 3
+
+
+class MixedEfficiencyEnv(OneStepEnv):
+    def step(self, action):
+        success = self.task_index != 0
+        efficiency = 1.0 if success else 0.0
+
+        return (
+            np.zeros((1,), dtype=np.float32),
+            1.0,
+            True,
+            False,
+            {
+                "task_index": self.task_index,
+                "layout_index": self.layout_index,
+                "success": success,
+                "steps": 1,
+                "wall_collisions": 0,
+                "optimal_path_length": 1,
+                "path_efficiency": efficiency,
+            },
+        )
+
+
+def test_evaluate_reports_mean_path_efficiency_over_all_tasks():
+    _, summary = evaluate(
+        algorithm="q_learning",
+        agent=GreedyAgent(),
+        env=MixedEfficiencyEnv(),
+        episodes=99,
+        task_indices=[0, 1],
+    )
+
+    assert summary["average_path_efficiency"] == 0.5
+    assert (
+        summary[
+            "average_successful_path_efficiency"
+        ]
+        == 1.0
+    )

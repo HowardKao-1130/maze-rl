@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from collections import defaultdict
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import pickle
@@ -20,21 +22,25 @@ import torch
 from maze_rl.agents.a2c import A2CAgent
 from maze_rl.agents.dqn import DQNAgent
 from maze_rl.agents.dyna_q import DynaQAgent
+from maze_rl.agents.grpo import GRPOAgent
 from maze_rl.agents.monte_carlo import MonteCarloAgent
 from maze_rl.agents.ppo import PPOAgent
 from maze_rl.agents.q_learning import QLearningAgent
 from maze_rl.agents.reinforce import ReinforceAgent
 from maze_rl.agents.sarsa import SarsaAgent
 from maze_rl.envs.maze_env import MazeEnv
+from maze_rl.evaluation.evaluator import evaluate
 from maze_rl.training.metrics import append_metrics_csv
 from maze_rl.training.plots import (
     plot_task_training_metrics,
     plot_training_metrics,
+    plot_validation_metrics,
     write_task_training_metrics_html,
 )
 from maze_rl.training.trainers import (
     train_a2c_round,
     train_dqn_episode,
+    train_grpo_round,
     train_monte_carlo_episode,
     train_ppo_round,
     train_q_learning_episode,
@@ -50,16 +56,88 @@ TABULAR_ALGORITHMS = {
     "dyna_q",
 }
 
+NEURAL_ALGORITHMS = {
+    "dqn",
+    "reinforce",
+    "a2c",
+    "ppo",
+    "grpo",
+}
+
 NEURAL_SNAPSHOT_ALGORITHMS = {
     "dqn",
     "a2c",
     "ppo",
 }
 
+NEURAL_HYPERPARAMETERS = {
+    "dqn": {
+        "gamma",
+        "learning_rate",
+        "epsilon_start",
+        "epsilon_min",
+        "epsilon_decay",
+        "replay_capacity",
+        "min_replay_size",
+        "batch_size",
+        "train_frequency",
+        "target_update_interval",
+    },
+    "reinforce": {
+        "gamma",
+        "learning_rate",
+        "entropy_coefficient",
+        "entropy_coefficient_min",
+        "entropy_coefficient_decay",
+        "minibatch_size",
+    },
+    "a2c": {
+        "gamma",
+        "gae_lambda",
+        "learning_rate",
+        "value_coefficient",
+        "entropy_coefficient",
+        "entropy_coefficient_min",
+        "entropy_coefficient_decay",
+        "minibatch_size",
+    },
+    "ppo": {
+        "gamma",
+        "gae_lambda",
+        "learning_rate",
+        "clip_epsilon",
+        "value_coefficient",
+        "entropy_coefficient",
+        "update_epochs",
+        "minibatch_size",
+    },
+    "grpo": {
+        "gamma",
+        "learning_rate",
+        "clip_epsilon",
+        "entropy_coefficient",
+        "entropy_coefficient_min",
+        "entropy_coefficient_decay",
+        "minibatch_size",
+    },
+}
+
+NEURAL_HYPERPARAMETER_DESTS = sorted(
+    {
+        name
+        for names in NEURAL_HYPERPARAMETERS.values()
+        for name in names
+    }
+)
+
 POLICY_ROLLOUT_EPISODES = {
     "reinforce": 16,
     "a2c": 16,
     "ppo": 64,
+}
+
+GROUPED_POLICY_ALGORITHMS = {
+    "grpo",
 }
 
 
@@ -223,6 +301,7 @@ def parse_args():
             "reinforce",
             "a2c",
             "ppo",
+            "grpo",
         ],
     )
 
@@ -350,7 +429,299 @@ def parse_args():
         ),
     )
 
+    parser.add_argument(
+        "--rollout-episodes",
+        type=int,
+        default=None,
+        help=(
+            "Rollouts collected per policy-gradient training "
+            "round. Defaults to the algorithm-specific value."
+        ),
+    )
+
+    parser.add_argument(
+        "--validation-dataset",
+        type=Path,
+        default=None,
+        help=(
+            "Optional validation dataset for periodic neural-agent "
+            "selection."
+        ),
+    )
+    parser.add_argument(
+        "--same-layout-dataset",
+        type=Path,
+        default=None,
+        help=(
+            "Optional same-layout new-task dataset to evaluate "
+            "alongside validation during periodic neural-agent "
+            "selection."
+        ),
+    )
+    parser.add_argument(
+        "--validation-interval",
+        type=int,
+        default=0,
+        help=(
+            "Dataset-epoch interval for validation. Use 0 to "
+            "disable periodic validation."
+        ),
+    )
+    parser.add_argument(
+        "--validation-episodes",
+        type=int,
+        default=200,
+    )
+    parser.add_argument(
+        "--validation-all-tasks",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Evaluate every validation task. Use "
+            "--no-validation-all-tasks with --validation-episodes "
+            "for sampling."
+        ),
+    )
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=None,
+        help=(
+            "Stop after this many validation checks without "
+            "sufficient improvement. Requires --validation-dataset."
+        ),
+    )
+    parser.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=0.0,
+        help=(
+            "Minimum validation mean path-efficiency improvement "
+            "required to reset early-stopping patience."
+        ),
+    )
+
+    neural_group = parser.add_argument_group(
+        "neural agent hyperparameters"
+    )
+
+    neural_group.add_argument(
+        "--learning-rate",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--gamma",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="DQN replay minibatch size.",
+    )
+    neural_group.add_argument(
+        "--train-frequency",
+        type=int,
+        default=None,
+        help=(
+            "DQN environment transitions between replay updates. "
+            "Defaults to the effective DQN batch size."
+        ),
+    )
+    neural_group.add_argument(
+        "--minibatch-size",
+        type=int,
+        default=None,
+        help="Policy-gradient optimization minibatch size.",
+    )
+    neural_group.add_argument(
+        "--epsilon-start",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--epsilon-min",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--epsilon-decay",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--replay-capacity",
+        type=int,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--min-replay-size",
+        type=int,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--target-update-interval",
+        type=int,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--gae-lambda",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--value-coefficient",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--entropy-coefficient",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--entropy-coefficient-min",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--entropy-coefficient-decay",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--clip-epsilon",
+        type=float,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--update-epochs",
+        type=int,
+        default=None,
+    )
+    neural_group.add_argument(
+        "--group-size",
+        type=int,
+        default=None,
+        help=(
+            "GRPO rollouts per grouped update. GRPO runs "
+            "ceil(dataset_epochs / group_size) optimization "
+            "epochs."
+        ),
+    )
+
     return parser.parse_args()
+
+
+def neural_hyperparameters_from_args(
+    args,
+) -> dict[str, float | int]:
+    return {
+        name: getattr(args, name)
+        for name in NEURAL_HYPERPARAMETER_DESTS
+        if getattr(args, name) is not None
+    }
+
+
+def validate_neural_hyperparameters(
+    algorithm: str,
+    hyperparameters: dict[str, float | int],
+) -> None:
+    if not hyperparameters:
+        return
+
+    if algorithm not in NEURAL_ALGORITHMS:
+        names = ", ".join(
+            sorted(hyperparameters)
+        )
+        raise ValueError(
+            "Neural hyperparameters are only supported for "
+            f"DNN agents, but got {algorithm}: {names}"
+        )
+
+    unsupported = sorted(
+        set(hyperparameters)
+        - NEURAL_HYPERPARAMETERS[algorithm]
+    )
+
+    if unsupported:
+        names = ", ".join(unsupported)
+        raise ValueError(
+            f"{algorithm} does not use these hyperparameters: "
+            f"{names}"
+        )
+
+
+def rollout_episodes_for_algorithm(
+    algorithm: str,
+    rollout_episodes: int | None,
+) -> int:
+    if rollout_episodes is None:
+        return POLICY_ROLLOUT_EPISODES[
+            algorithm
+        ]
+
+    if algorithm not in POLICY_ROLLOUT_EPISODES:
+        raise ValueError(
+            "--rollout-episodes is only supported for "
+            "policy-gradient agents."
+        )
+
+    if rollout_episodes <= 0:
+        raise ValueError(
+            "--rollout-episodes must be positive."
+        )
+
+    return rollout_episodes
+
+
+def group_size_for_algorithm(
+    algorithm: str,
+    group_size: int | None,
+) -> int:
+    if group_size is None:
+        if algorithm in GROUPED_POLICY_ALGORITHMS:
+            return 8
+
+        return 0
+
+    if algorithm not in GROUPED_POLICY_ALGORITHMS:
+        raise ValueError(
+            "--group-size is only supported for GRPO."
+        )
+
+    if group_size < 2:
+        raise ValueError(
+            "--group-size must be at least 2."
+        )
+
+    return group_size
+
+
+def training_epoch_budget_for_algorithm(
+    algorithm: str,
+    dataset_epochs: int,
+    group_size: int,
+) -> int:
+    if dataset_epochs <= 0:
+        raise ValueError(
+            "--dataset-epochs must be positive."
+        )
+
+    if algorithm in GROUPED_POLICY_ALGORITHMS:
+        return max(
+            1,
+            (
+                dataset_epochs
+                + group_size
+                - 1
+            )
+            // group_size,
+        )
+
+    return dataset_epochs
 
 
 def create_agent(
@@ -358,7 +729,16 @@ def create_agent(
     env,
     device,
     seed,
+    hyperparameters=None,
 ):
+    hyperparameters = dict(
+        hyperparameters or {}
+    )
+    validate_neural_hyperparameters(
+        algorithm,
+        hyperparameters,
+    )
+
     kwargs = {
         "action_count": env.action_space.n,
     }
@@ -395,27 +775,43 @@ def create_agent(
     }
 
     if algorithm == "dqn":
-        return DQNAgent(
-            **neural_kwargs,
-            seed=seed,
-            replay_capacity=(
+        dqn_kwargs = {
+            "seed": seed,
+            "replay_capacity": (
                 64 * env.max_steps
             ),
+        }
+        dqn_kwargs.update(
+            hyperparameters
+        )
+
+        return DQNAgent(
+            **neural_kwargs,
+            **dqn_kwargs,
         )
 
     if algorithm == "reinforce":
         return ReinforceAgent(
             **neural_kwargs,
+            **hyperparameters,
         )
 
     if algorithm == "a2c":
         return A2CAgent(
             **neural_kwargs,
+            **hyperparameters,
         )
 
     if algorithm == "ppo":
         return PPOAgent(
             **neural_kwargs,
+            **hyperparameters,
+        )
+
+    if algorithm == "grpo":
+        return GRPOAgent(
+            **neural_kwargs,
+            **hyperparameters,
         )
 
     raise ValueError(algorithm)
@@ -427,6 +823,7 @@ def save_checkpoint(
     agent,
     q_snapshots=None,
     model_snapshots=None,
+    hyperparameters=None,
 ):
     path.parent.mkdir(
         parents=True,
@@ -451,7 +848,10 @@ def save_checkpoint(
             agent.online_network.state_dict()
         )
 
-    elif algorithm == "reinforce":
+    elif algorithm in {
+        "reinforce",
+        "grpo",
+    }:
         state_dict = (
             agent.policy.state_dict()
         )
@@ -466,25 +866,152 @@ def save_checkpoint(
             "algorithm": algorithm,
             "model_state_dict": state_dict,
             "model_snapshots": model_snapshots or [],
+            "hyperparameters": hyperparameters or {},
         },
         path,
     )
+
+
+def current_neural_state_dict(
+    algorithm,
+    agent,
+):
+    if algorithm == "dqn":
+        state_dict = (
+            agent.online_network.state_dict()
+        )
+
+    elif algorithm in {
+        "reinforce",
+        "grpo",
+    }:
+        state_dict = (
+            agent.policy.state_dict()
+        )
+
+    else:
+        state_dict = (
+            agent.network.state_dict()
+        )
+
+    return {
+        key: value.detach().cpu().clone()
+        for key, value in state_dict.items()
+    }
 
 
 def model_snapshot_state_dict(
     algorithm,
     agent,
 ):
-    network = (
-        agent.online_network
-        if algorithm == "dqn"
-        else agent.network
+    return current_neural_state_dict(
+        algorithm,
+        agent,
     )
 
-    return {
-        key: value.detach().cpu().clone()
-        for key, value in network.state_dict().items()
-    }
+
+def save_neural_checkpoint_state(
+    path: Path,
+    algorithm: str,
+    model_state_dict,
+    model_snapshots=None,
+    hyperparameters=None,
+    validation_metadata=None,
+) -> None:
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    torch.save(
+        {
+            "algorithm": algorithm,
+            "model_state_dict": model_state_dict,
+            "model_snapshots": model_snapshots or [],
+            "hyperparameters": hyperparameters or {},
+            "validation": validation_metadata or {},
+        },
+        path,
+    )
+
+
+def should_validate_epoch(
+    epoch: int,
+    final_epoch: int,
+    validation_interval: int,
+) -> bool:
+    return (
+        validation_interval > 0
+        and (
+            epoch % validation_interval == 0
+            or epoch == final_epoch
+        )
+    )
+
+
+def should_stop_early(
+    patience: int | None,
+    checks_without_improvement: int,
+    has_positive_validation_score: bool,
+) -> bool:
+    return (
+        patience is not None
+        and has_positive_validation_score
+        and checks_without_improvement >= patience
+    )
+
+
+def append_validation_csv(
+    path: Path,
+    row: dict,
+) -> None:
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    fieldnames = [
+        "split",
+        "dataset_epoch",
+        "episodes",
+        "success_rate",
+        "average_episode_return",
+        "mean_path_efficiency",
+        "average_successful_path_efficiency",
+    ]
+    write_header = not path.exists()
+
+    with path.open(
+        "a",
+        newline="",
+    ) as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=fieldnames,
+        )
+
+        if write_header:
+            writer.writeheader()
+
+        writer.writerow(row)
+
+
+def write_training_summary(
+    path: Path,
+    summary: dict,
+) -> None:
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    with path.open("w") as file:
+        json.dump(
+            summary,
+            file,
+            indent=2,
+            sort_keys=True,
+        )
 
 
 def format_progress_message(
@@ -1029,6 +1556,7 @@ def optimization_epochs_for_round(
     if algorithm in {
         "reinforce",
         "a2c",
+        "grpo",
     }:
         return 1
 
@@ -1055,12 +1583,36 @@ def main():
         fixed_index=args.fixed_index,
     )
 
+    agent_hyperparameters = (
+        neural_hyperparameters_from_args(
+            args
+        )
+    )
+    group_size = group_size_for_algorithm(
+        args.algorithm,
+        args.group_size,
+    )
+    training_epoch_budget = (
+        training_epoch_budget_for_algorithm(
+            args.algorithm,
+            args.dataset_epochs,
+            group_size,
+        )
+    )
+
     agent = create_agent(
         algorithm=args.algorithm,
         env=env,
         device=device,
         seed=args.seed,
+        hyperparameters=agent_hyperparameters,
     )
+
+    if args.algorithm == "dqn":
+        agent_hyperparameters.setdefault(
+            "train_frequency",
+            agent.train_frequency,
+        )
 
     run_dir = (
         args.output_dir
@@ -1075,9 +1627,73 @@ def main():
     metrics_path = (
         run_dir / "metrics.csv"
     )
+    validation_metrics_path = (
+        run_dir / "validation_metrics.csv"
+    )
+    best_checkpoint_path = (
+        run_dir / "best_checkpoint.pt"
+    )
+    training_summary_path = (
+        run_dir / "training_summary.json"
+    )
 
     if metrics_path.exists() and not args.resume:
         metrics_path.unlink()
+
+    if (
+        validation_metrics_path.exists()
+        and not args.resume
+    ):
+        validation_metrics_path.unlink()
+
+    validation_envs = {}
+
+    if args.validation_dataset is not None:
+        if args.algorithm not in NEURAL_ALGORITHMS:
+            raise ValueError(
+                "Periodic validation checkpoints are only "
+                "supported for DNN agents."
+            )
+
+        if args.validation_interval <= 0:
+            raise ValueError(
+                "--validation-interval must be positive when "
+                "--validation-dataset is provided."
+            )
+
+        if (
+            args.early_stopping_patience is not None
+            and args.early_stopping_patience < 0
+        ):
+            raise ValueError(
+                "--early-stopping-patience cannot be negative."
+            )
+
+        if args.early_stopping_min_delta < 0.0:
+            raise ValueError(
+                "--early-stopping-min-delta cannot be negative."
+            )
+
+        validation_env = MazeEnv(
+            dataset_path=args.validation_dataset,
+            max_steps=args.max_steps,
+        )
+        validation_envs[
+            "validation"
+        ] = validation_env
+
+        if args.same_layout_dataset is not None:
+            validation_envs[
+                "same_layout"
+            ] = MazeEnv(
+                dataset_path=args.same_layout_dataset,
+                max_steps=args.max_steps,
+            )
+
+    elif args.same_layout_dataset is not None:
+        raise ValueError(
+            "--same-layout-dataset requires --validation-dataset."
+        )
 
     task_indices = (
         [args.fixed_index]
@@ -1091,6 +1707,12 @@ def main():
     optimization_epoch = 0
     q_snapshots = []
     model_snapshots = []
+    best_validation = None
+    latest_validation_by_split = {}
+    validation_checks_without_improvement = 0
+    validation_has_positive_score = False
+    stopped_early = False
+    stopped_epoch = None
     q_snapshot_count = max(
         0,
         args.q_snapshot_count,
@@ -1100,8 +1722,11 @@ def main():
         for epoch in np.unique(
             np.linspace(
                 1,
-                args.dataset_epochs,
-                num=min(q_snapshot_count, args.dataset_epochs),
+                training_epoch_budget,
+                num=min(
+                    q_snapshot_count,
+                    training_epoch_budget,
+                ),
                 dtype=np.int64,
             )
         )
@@ -1148,6 +1773,13 @@ def main():
         dataset_epoch,
         epoch_metrics,
     ):
+        nonlocal best_validation
+        nonlocal latest_validation_by_split
+        nonlocal stopped_early
+        nonlocal stopped_epoch
+        nonlocal validation_has_positive_score
+        nonlocal validation_checks_without_improvement
+
         if dataset_epoch % 100 == 0:
             for metrics in sorted(
                 epoch_metrics,
@@ -1206,6 +1838,117 @@ def main():
                 }
             )
 
+        if validation_envs and should_validate_epoch(
+            dataset_epoch,
+            training_epoch_budget,
+            args.validation_interval,
+        ):
+            for split, validation_env in validation_envs.items():
+                validation_task_indices = (
+                    list(
+                        range(
+                            validation_env.num_tasks
+                        )
+                    )
+                    if args.validation_all_tasks
+                    else None
+                )
+                _, validation_summary = evaluate(
+                    algorithm=args.algorithm,
+                    agent=agent,
+                    env=validation_env,
+                    episodes=args.validation_episodes,
+                    seed=args.seed,
+                    task_indices=validation_task_indices,
+                )
+                validation_score = validation_summary[
+                    "average_path_efficiency"
+                ]
+                validation_row = {
+                    "split": split,
+                    "dataset_epoch": dataset_epoch,
+                    "episodes": validation_summary[
+                        "episodes"
+                    ],
+                    "success_rate": validation_summary[
+                        "success_rate"
+                    ],
+                    "average_episode_return": validation_summary[
+                        "average_episode_return"
+                    ],
+                    "mean_path_efficiency": validation_score,
+                    "average_successful_path_efficiency": (
+                        validation_summary[
+                            "average_successful_path_efficiency"
+                        ]
+                    ),
+                }
+
+                append_validation_csv(
+                    validation_metrics_path,
+                    validation_row,
+                )
+                latest_validation_by_split[
+                    split
+                ] = validation_row
+
+                if split != "validation":
+                    print(
+                        f"{split} dataset_epoch="
+                        f"{dataset_epoch:5d}/{training_epoch_budget} "
+                        f"({dataset_epoch / training_epoch_budget:.0%}) "
+                        f"mean_path_efficiency={validation_score:.3f}"
+                    )
+                    continue
+
+                if validation_score > 0.0:
+                    validation_has_positive_score = True
+
+                improved = (
+                    best_validation is None
+                    or validation_score
+                    > best_validation[
+                        "mean_path_efficiency"
+                    ]
+                    + args.early_stopping_min_delta
+                )
+
+                if improved:
+                    validation_checks_without_improvement = 0
+                    best_validation = validation_row
+                    save_neural_checkpoint_state(
+                        best_checkpoint_path,
+                        args.algorithm,
+                        current_neural_state_dict(
+                            args.algorithm,
+                            agent,
+                        ),
+                        model_snapshots=model_snapshots,
+                        hyperparameters=agent_hyperparameters,
+                        validation_metadata=validation_row,
+                    )
+                else:
+                    validation_checks_without_improvement += 1
+
+                print(
+                    f"validation dataset_epoch="
+                    f"{dataset_epoch:5d}/{training_epoch_budget} "
+                    f"({dataset_epoch / training_epoch_budget:.0%}) "
+                    f"mean_path_efficiency={validation_score:.3f} "
+                    f"best="
+                    f"{best_validation['mean_path_efficiency']:.3f}"
+                )
+
+            if (
+                should_stop_early(
+                    args.early_stopping_patience,
+                    validation_checks_without_improvement,
+                    validation_has_positive_score,
+                )
+            ):
+                stopped_early = True
+                stopped_epoch = dataset_epoch
+
     def record_training_round(round_metrics):
         nonlocal training_round
         nonlocal optimization_epoch
@@ -1250,6 +1993,7 @@ def main():
             < sampler.current_dataset_epoch
             and next_epoch_to_log
             in epoch_metrics_by_epoch
+            and not stopped_early
         ):
             finish_dataset_epoch(
                 next_epoch_to_log,
@@ -1262,18 +2006,21 @@ def main():
         return next_epoch_to_log
 
     if args.algorithm in POLICY_ROLLOUT_EPISODES:
+        rollout_episodes = rollout_episodes_for_algorithm(
+            args.algorithm,
+            args.rollout_episodes,
+        )
         epoch_metrics_by_epoch = {}
         next_epoch_to_log = 1
 
         while (
             sampler.completed_dataset_epochs
-            < args.dataset_epochs
+            < training_epoch_budget
+            and not stopped_early
         ):
             rollout_specs = sampler.sample_collection(
-                collection_size=POLICY_ROLLOUT_EPISODES[
-                    args.algorithm
-                ],
-                target_dataset_epochs=args.dataset_epochs,
+                collection_size=rollout_episodes,
+                target_dataset_epochs=training_epoch_budget,
             )
             episode_specs = [
                 (
@@ -1327,17 +2074,93 @@ def main():
                 )
             )
 
+    elif args.algorithm in GROUPED_POLICY_ALGORITHMS:
+        if args.rollout_episodes is not None:
+            rollout_episodes_for_algorithm(
+                args.algorithm,
+                args.rollout_episodes,
+            )
+
+        epoch_metrics_by_epoch = {}
+        next_epoch_to_log = 1
+        grpo_rollout = 0
+
+        print(
+            "grpo optimization_epochs="
+            f"{training_epoch_budget} from dataset_epochs="
+            f"{args.dataset_epochs} and group_size={group_size}",
+            flush=True,
+        )
+
+        while (
+            sampler.completed_dataset_epochs
+            < training_epoch_budget
+            and not stopped_early
+        ):
+            rollout_specs = sampler.sample_collection(
+                collection_size=1,
+                target_dataset_epochs=training_epoch_budget,
+            )
+
+            if not rollout_specs:
+                break
+
+            spec = rollout_specs[0]
+            episode_specs = []
+
+            for _ in range(group_size):
+                grpo_rollout += 1
+                episode_specs.append(
+                    (
+                        grpo_rollout,
+                        spec.dataset_epoch,
+                        spec.task_index,
+                    )
+                )
+
+            round_metrics = train_grpo_round(
+                env,
+                agent,
+                episode_specs,
+            )
+
+            for metrics in round_metrics:
+                epoch_metrics_by_epoch.setdefault(
+                    metrics.epoch,
+                    [],
+                ).append(metrics)
+
+                record_episode_metrics(metrics)
+
+            record_training_round(
+                round_metrics
+            )
+
+            next_epoch_to_log = (
+                maybe_finish_dataset_epochs(
+                    epoch_metrics_by_epoch,
+                    next_epoch_to_log,
+                )
+            )
+
     else:
+        if args.rollout_episodes is not None:
+            rollout_episodes_for_algorithm(
+                args.algorithm,
+                args.rollout_episodes,
+            )
+
         epoch_metrics_by_epoch = {}
         next_epoch_to_log = 1
 
         while (
             sampler.completed_dataset_epochs
-            < args.dataset_epochs
+            < training_epoch_budget
+            and not stopped_early
         ):
             rollout_specs = sampler.sample_collection(
                 collection_size=1,
-                target_dataset_epochs=args.dataset_epochs,
+                target_dataset_epochs=training_epoch_budget,
             )
 
             if not rollout_specs:
@@ -1422,6 +2245,48 @@ def main():
         agent,
         q_snapshots=q_snapshots,
         model_snapshots=model_snapshots,
+        hyperparameters=agent_hyperparameters,
+    )
+
+    summary = {
+        "algorithm": args.algorithm,
+        "dataset_epochs_requested": args.dataset_epochs,
+        "dataset_epochs_completed": (
+            stopped_epoch
+            if stopped_early
+            else sampler.completed_dataset_epochs
+        ),
+        "optimization_epochs_requested": training_epoch_budget,
+        "group_size": (
+            group_size
+            if args.algorithm
+            in GROUPED_POLICY_ALGORITHMS
+            else None
+        ),
+        "stopped_early": stopped_early,
+        "stopped_epoch": stopped_epoch,
+        "checkpoint_path": str(
+            checkpoint_path
+        ),
+        "hyperparameters": agent_hyperparameters,
+    }
+
+    if best_validation is not None:
+        summary["best_validation"] = (
+            best_validation
+        )
+        summary["best_checkpoint_path"] = str(
+            best_checkpoint_path
+        )
+
+    if latest_validation_by_split:
+        summary["latest_validation_by_split"] = (
+            latest_validation_by_split
+        )
+
+    write_training_summary(
+        training_summary_path,
+        summary,
     )
 
     print(
@@ -1432,6 +2297,21 @@ def main():
     print(
         f"Saved checkpoint to "
         f"{checkpoint_path}"
+    )
+
+    if best_validation is not None:
+        print(
+            "Saved best validation checkpoint to "
+            f"{best_checkpoint_path}"
+        )
+        print(
+            "Saved validation metrics to "
+            f"{validation_metrics_path}"
+        )
+
+    print(
+        "Saved training summary to "
+        f"{training_summary_path}"
     )
 
     if not args.no_plot:
@@ -1482,6 +2362,19 @@ def main():
         print(
             f"Saved interactive task training plot to "
             f"{task_html_path}"
+        )
+
+    if validation_metrics_path.exists():
+        validation_plot_path = (
+            run_dir / "validation_metrics.png"
+        )
+        plot_validation_metrics(
+            metrics_path=validation_metrics_path,
+            output_path=validation_plot_path,
+        )
+        print(
+            f"Saved validation plot to "
+            f"{validation_plot_path}"
         )
 
     if tensorboard_writer is not None:

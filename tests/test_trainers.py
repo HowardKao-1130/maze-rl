@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from maze_rl.agents.a2c import A2CAgent
+from maze_rl.agents.dqn import DQNAgent
+from maze_rl.agents.dqn import Transition
 from maze_rl.agents.reinforce import ReinforceAgent
 from maze_rl.agents.sarsa import SarsaAgent
+from maze_rl.training.trainers import train_grpo_round
 from maze_rl.training.trainers import train_sarsa_episode
 from maze_rl.training.trainers import train_reinforce_round
 from scripts.train import HierarchicalTaskSampler
@@ -143,6 +147,118 @@ def test_reinforce_round_batches_metric_accounting():
         None,
         7.0,
     ]
+
+
+def test_dqn_train_frequency_throttles_optimizer_updates():
+    agent = DQNAgent(
+        height=1,
+        width=1,
+        action_count=2,
+        device=torch.device("cpu"),
+        batch_size=2,
+        min_replay_size=2,
+        train_frequency=3,
+        epsilon_decay=0.9,
+        seed=123,
+    )
+    observation = np.zeros(
+        (3, 1, 1),
+        dtype=np.float32,
+    )
+
+    update_results = []
+
+    for _ in range(6):
+        agent.store_transition(
+            Transition(
+                state=observation,
+                action=0,
+                reward=0.0,
+                next_state=observation,
+                terminated=False,
+            )
+        )
+        update_results.append(
+            agent.train_step() is not None
+        )
+
+    assert update_results == [
+        False,
+        False,
+        True,
+        False,
+        False,
+        True,
+    ]
+    assert agent.training_steps == 2
+    assert agent.environment_steps == 6
+    assert agent.epsilon == pytest.approx(
+        0.9**5
+    )
+
+
+class FakeGRPOAgent:
+    minibatch_size = 2
+    gamma = 1.0
+
+    def __init__(self) -> None:
+        self.received_advantages = None
+
+    def choose_action(self, observation):
+        return 0, -0.5
+
+    def compute_episode_return(
+        self,
+        rewards,
+    ):
+        return rewards[0]
+
+    def update(
+        self,
+        observations,
+        actions,
+        old_log_probabilities,
+        advantages,
+    ):
+        self.received_advantages = advantages
+
+        return {
+            "loss": 3.0,
+            "policy_loss": 2.0,
+            "entropy": 0.1,
+            "mean_advantage": float(
+                np.mean(advantages)
+            ),
+        }
+
+
+def test_grpo_round_uses_group_relative_advantages():
+    agent = FakeGRPOAgent()
+
+    metrics = train_grpo_round(
+        env=OneStepArrayEnv(),
+        agent=agent,
+        episode_specs=[
+            (1, 1, 0),
+            (2, 1, 0),
+            (3, 1, 0),
+        ],
+    )
+
+    assert agent.received_advantages == [
+        0.0,
+        0.0,
+        0.0,
+    ]
+    assert [
+        metric.internal_updates
+        for metric in metrics
+    ] == [
+        None,
+        None,
+        2,
+    ]
+    assert metrics[-1].loss == 3.0
 
 
 def test_hierarchical_sampler_allows_collection_to_span_dataset_epochs():

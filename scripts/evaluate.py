@@ -12,6 +12,7 @@ import torch
 from maze_rl.agents.a2c import A2CAgent
 from maze_rl.agents.dqn import DQNAgent
 from maze_rl.agents.dyna_q import DynaQAgent
+from maze_rl.agents.grpo import GRPOAgent
 from maze_rl.agents.monte_carlo import MonteCarloAgent
 from maze_rl.agents.ppo import PPOAgent
 from maze_rl.agents.q_learning import QLearningAgent
@@ -74,6 +75,12 @@ def parse_args():
     parser.add_argument(
         "--dataset",
         default="data/test.npz",
+    )
+
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=200,
     )
 
     parser.add_argument(
@@ -202,6 +209,16 @@ def parse_args():
         ),
     )
 
+    parser.add_argument(
+        "--evaluation-output",
+        type=Path,
+        default=None,
+        help=(
+            "Evaluation CSV path. Defaults to "
+            "runs/<algorithm>/evaluation.csv."
+        ),
+    )
+
     args = parser.parse_args()
 
     if args.checkpoint is None:
@@ -274,6 +291,11 @@ def create_agent(
             **neural_kwargs
         )
 
+    if algorithm == "grpo":
+        return GRPOAgent(
+            **neural_kwargs
+        )
+
     raise ValueError(
         algorithm
     )
@@ -313,7 +335,10 @@ def load_checkpoint(
             state_dict
         )
 
-    elif algorithm == "reinforce":
+    elif algorithm in {
+        "reinforce",
+        "grpo",
+    }:
         agent.policy.load_state_dict(
             state_dict
         )
@@ -352,6 +377,7 @@ def main():
 
     env = MazeEnv(
         dataset_path=args.dataset,
+        max_steps=args.max_steps,
         fixed_index=args.fixed_index,
     )
 
@@ -384,11 +410,14 @@ def main():
         task_indices=task_indices,
     )
 
-    # Evaluation output is always stored under runs/<algorithm>.
     evaluation_path = (
-        Path("runs")
-        / args.algorithm
-        / "evaluation.csv"
+        args.evaluation_output
+        if args.evaluation_output is not None
+        else (
+            Path("runs")
+            / args.algorithm
+            / "evaluation.csv"
+        )
     )
 
     evaluation_path.parent.mkdir(
@@ -416,6 +445,11 @@ def main():
     print(
         "Average episode return: "
         f"{summary['average_episode_return']:.3f}"
+    )
+
+    print(
+        "Average path efficiency: "
+        f"{summary['average_path_efficiency']:.3f}"
     )
 
     print(
