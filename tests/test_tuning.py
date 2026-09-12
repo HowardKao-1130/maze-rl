@@ -10,6 +10,7 @@ from scripts.tune_dnn import (
     build_evaluation_command,
     build_training_command,
     load_search_space,
+    parse_args,
     sample_hyperparameters,
     summarize_evaluation,
 )
@@ -48,6 +49,26 @@ def test_sample_hyperparameters_uses_space_distributions():
     assert 2 <= sample[
         "update_epochs"
     ] <= 4
+
+
+def test_parse_args_uses_tuning_run_defaults(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "tune_dnn.py",
+            "--algorithm",
+            "ppo",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.trials == 60
+    assert args.dataset_epochs == 200
+    assert args.eval_all_tasks is True
+    assert args.eval_episodes == 200
+    assert args.early_stopping_patience == 35
+    assert args.tensorboard is True
 
 
 def test_training_command_includes_trial_hyperparameters(tmp_path):
@@ -231,6 +252,53 @@ def test_load_search_space_rejects_unsupported_parameters(tmp_path):
         )
 
 
+def test_load_search_space_allows_dqn_train_frequency(tmp_path):
+    path = tmp_path / "space.json"
+    path.write_text(
+        '{"learning_rate": {"type": "uniform", "low": 0.1, "high": 0.2}, '
+        '"train_frequency": {"type": "choice", "values": [64]}}'
+    )
+
+    search_space = load_search_space(
+        "dqn",
+        path,
+    )
+
+    assert "train_frequency" in search_space
+
+
+def test_load_search_space_allows_policy_rollout_episodes(tmp_path):
+    path = tmp_path / "space.json"
+    path.write_text(
+        '{"learning_rate": {"type": "uniform", "low": 0.1, "high": 0.2}, '
+        '"rollout_episodes": {"type": "choice", "values": [64]}}'
+    )
+
+    search_space = load_search_space(
+        "ppo",
+        path,
+    )
+
+    assert "rollout_episodes" in search_space
+
+
+def test_load_search_space_rejects_policy_group_size(tmp_path):
+    path = tmp_path / "space.json"
+    path.write_text(
+        '{"learning_rate": {"type": "uniform", "low": 0.1, "high": 0.2}, '
+        '"group_size": {"type": "choice", "values": [8]}}'
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="unsupported.*group_size",
+    ):
+        load_search_space(
+            "ppo",
+            path,
+        )
+
+
 def test_load_search_space_allows_grpo_group_size(tmp_path):
     path = tmp_path / "space.json"
     path.write_text(
@@ -244,3 +312,20 @@ def test_load_search_space_allows_grpo_group_size(tmp_path):
     )
 
     assert "group_size" in search_space
+
+
+def test_load_search_space_rejects_grpo_rollout_episodes(tmp_path):
+    path = tmp_path / "space.json"
+    path.write_text(
+        '{"learning_rate": {"type": "uniform", "low": 0.1, "high": 0.2}, '
+        '"rollout_episodes": {"type": "choice", "values": [64]}}'
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="unsupported.*rollout_episodes",
+    ):
+        load_search_space(
+            "grpo",
+            path,
+        )

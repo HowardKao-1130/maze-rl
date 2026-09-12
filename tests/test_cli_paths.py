@@ -211,6 +211,7 @@ def test_neural_hyperparameters_filter_unset_values():
         minibatch_size=None,
         replay_capacity=None,
         target_update_interval=None,
+        train_frequency=None,
         update_epochs=None,
         value_coefficient=None,
     )
@@ -235,6 +236,15 @@ def test_neural_hyperparameters_reject_tabular_agents():
                 "learning_rate": 0.001,
             },
         )
+
+
+def test_dqn_accepts_train_frequency_hyperparameter():
+    validate_neural_hyperparameters(
+        "dqn",
+        {
+            "train_frequency": 64,
+        },
+    )
 
 
 def test_configure_reproducibility_enables_deterministic_torch():

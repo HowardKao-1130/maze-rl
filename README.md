@@ -126,7 +126,12 @@ runs.
 
 `dqn` also uses a minibatch size of 64, a neural learning rate of `3e-4`, and a
 replay buffer sized to about 64 max-length episodes. It starts updates after a
-1,000-transition replay warmup rather than waiting for the buffer to fill.
+1,000-transition replay warmup rather than waiting for the buffer to fill. By
+default, DQN trains once per `batch_size` observed environment transitions, so
+the replay samples processed per environment step roughly match one-pass
+policy-gradient minibatching. Pass `--train-frequency 4` for a more standard
+Atari-style DQN cadence or `--train-frequency 1` to restore one replay update
+per observed transition.
 
 ## DNN Hyperparameter Tuning
 
@@ -145,13 +150,15 @@ python scripts/generate_dataset.py --train-mazes 200 --validation-mazes 50 --tes
 Then tune against the pre-generated train and validation sets:
 
 ```bash
-python scripts/tune_dnn.py --algorithm ppo --trials 20 --dataset-epochs 20 --train-dataset data/train.npz --validation-dataset data/validation.npz --same-layout-dataset data/same_layout_new_goals.npz
+python scripts/tune_dnn.py --algorithm ppo
 ```
 
 By default, the tuner reads `data/train.npz`, `data/validation.npz`, and
-`data/same_layout_new_goals.npz`, trains each trial under `runs/tuning/trials`,
-evaluates every validation task, appends `runs/tuning/tuning_results.csv`, and
-writes the current best trial to `runs/tuning/best_config.json`. Pass
+`data/same_layout_new_goals.npz`, runs 60 trials with a 200 dataset-epoch
+maximum budget per trial, trains each trial under `runs/tuning/trials`,
+evaluates every validation task, writes TensorBoard logs, appends
+`runs/tuning/tuning_results.csv`, and writes the current best trial to
+`runs/tuning/best_config.json`. Pass
 `--search-space path/to/search_space.json` to override the default search space.
 
 Keep `--dataset-epochs` as the training budget for comparable trials. Increasing
@@ -168,10 +175,10 @@ plot overlays validation-layout performance with same-layout new-task
 performance when both splits are available. Tuning and training progress logs
 show trial percentages and dataset-epoch percentages at validation checks.
 
-Early stopping is optional through `--early-stopping-patience` and
-`--early-stopping-min-delta`. When enabled, the same stopping rule applies to
-every trial. Because patience and maximum budget can interact with learning
-rate and other dynamics, inspect `validation_metrics.csv` and
+Early stopping defaults to `--early-stopping-patience 35` with
+`--early-stopping-min-delta 0.0`, and the same stopping rule applies to every
+trial. Because patience and maximum budget can interact with learning rate and
+other dynamics, inspect `validation_metrics.csv` and
 `training_summary.json` after a sweep to check whether the selected trial was
 limited by the stopping rule or by the maximum budget. Use
 `--evaluate-best-on-test` only after tuning to score the best

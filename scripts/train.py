@@ -80,6 +80,7 @@ NEURAL_HYPERPARAMETERS = {
         "replay_capacity",
         "min_replay_size",
         "batch_size",
+        "train_frequency",
         "target_update_interval",
     },
     "reinforce": {
@@ -519,6 +520,15 @@ def parse_args():
         type=int,
         default=None,
         help="DQN replay minibatch size.",
+    )
+    neural_group.add_argument(
+        "--train-frequency",
+        type=int,
+        default=None,
+        help=(
+            "DQN environment transitions between replay updates. "
+            "Defaults to the effective DQN batch size."
+        ),
     )
     neural_group.add_argument(
         "--minibatch-size",
@@ -1597,6 +1607,12 @@ def main():
         seed=args.seed,
         hyperparameters=agent_hyperparameters,
     )
+
+    if args.algorithm == "dqn":
+        agent_hyperparameters.setdefault(
+            "train_frequency",
+            agent.train_frequency,
+        )
 
     run_dir = (
         args.output_dir

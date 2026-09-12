@@ -73,6 +73,7 @@ class DQNAgent:
         replay_capacity: int = 12_800,
         min_replay_size: int = 1_000,
         batch_size: int = 64,
+        train_frequency: int | None = None,
         target_update_interval: int = 500,
         seed: int = 42,
     ) -> None:
@@ -86,11 +87,22 @@ class DQNAgent:
 
         self.batch_size = batch_size
         self.min_replay_size = min_replay_size
+        self.train_frequency = (
+            batch_size
+            if train_frequency is None
+            else train_frequency
+        )
+
+        if self.train_frequency <= 0:
+            raise ValueError(
+                "train_frequency must be positive."
+            )
 
         self.target_update_interval = (
             target_update_interval
         )
 
+        self.environment_steps = 0
         self.training_steps = 0
 
         self.rng = np.random.default_rng(seed)
@@ -171,12 +183,27 @@ class DQNAgent:
     def train_step(
         self,
     ) -> dict | None:
+        self.environment_steps += 1
+
         if (
             len(self.replay_buffer)
             < max(
                 self.batch_size,
                 self.min_replay_size,
             )
+        ):
+            return None
+
+        self.epsilon = max(
+            self.epsilon_min,
+            self.epsilon
+            * self.epsilon_decay,
+        )
+
+        if (
+            self.environment_steps
+            % self.train_frequency
+            != 0
         ):
             return None
 
@@ -274,12 +301,6 @@ class DQNAgent:
         self.optimizer.step()
 
         self.training_steps += 1
-
-        self.epsilon = max(
-            self.epsilon_min,
-            self.epsilon
-            * self.epsilon_decay,
-        )
 
         if (
             self.training_steps

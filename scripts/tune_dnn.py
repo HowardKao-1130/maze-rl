@@ -257,12 +257,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--trials",
         type=int,
-        default=20,
+        default=60,
     )
     parser.add_argument(
         "--dataset-epochs",
         type=int,
-        default=20,
+        default=200,
         help=(
             "Generous maximum training budget for every trial."
         ),
@@ -361,10 +361,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--early-stopping-patience",
         type=int,
-        default=None,
+        default=35,
         help=(
-            "Optional shared patience for stopping trials after "
-            "validation stalls."
+            "Shared patience for stopping trials after validation "
+            "stalls."
         ),
     )
     parser.add_argument(
@@ -375,7 +375,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tensorboard",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
     )
     parser.add_argument(
         "--keep-plots",
@@ -474,13 +474,11 @@ def load_search_space(
         NEURAL_HYPERPARAMETERS[algorithm]
     )
 
-    if (
-        algorithm in POLICY_ROLLOUT_EPISODES
-        or algorithm in GROUPED_POLICY_ALGORITHMS
-    ):
-        valid_parameters |= (
-            TRAINING_LOOP_PARAMETERS
-        )
+    if algorithm in POLICY_ROLLOUT_EPISODES:
+        valid_parameters.add("rollout_episodes")
+
+    if algorithm in GROUPED_POLICY_ALGORITHMS:
+        valid_parameters.add("group_size")
 
     unsupported = sorted(
         set(data) - valid_parameters
@@ -997,7 +995,10 @@ def main() -> None:
             "evaluation_path": str(
                 evaluation_path
             ),
-            "hyperparameters": hyperparameters,
+            "hyperparameters": training_summary.get(
+                "hyperparameters",
+                hyperparameters,
+            ),
         }
 
         write_result_row(

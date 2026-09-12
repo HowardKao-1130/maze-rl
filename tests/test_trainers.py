@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from maze_rl.agents.a2c import A2CAgent
+from maze_rl.agents.dqn import DQNAgent
+from maze_rl.agents.dqn import Transition
 from maze_rl.agents.reinforce import ReinforceAgent
 from maze_rl.agents.sarsa import SarsaAgent
 from maze_rl.training.trainers import train_grpo_round
@@ -144,6 +147,54 @@ def test_reinforce_round_batches_metric_accounting():
         None,
         7.0,
     ]
+
+
+def test_dqn_train_frequency_throttles_optimizer_updates():
+    agent = DQNAgent(
+        height=1,
+        width=1,
+        action_count=2,
+        device=torch.device("cpu"),
+        batch_size=2,
+        min_replay_size=2,
+        train_frequency=3,
+        epsilon_decay=0.9,
+        seed=123,
+    )
+    observation = np.zeros(
+        (3, 1, 1),
+        dtype=np.float32,
+    )
+
+    update_results = []
+
+    for _ in range(6):
+        agent.store_transition(
+            Transition(
+                state=observation,
+                action=0,
+                reward=0.0,
+                next_state=observation,
+                terminated=False,
+            )
+        )
+        update_results.append(
+            agent.train_step() is not None
+        )
+
+    assert update_results == [
+        False,
+        False,
+        True,
+        False,
+        False,
+        True,
+    ]
+    assert agent.training_steps == 2
+    assert agent.environment_steps == 6
+    assert agent.epsilon == pytest.approx(
+        0.9**5
+    )
 
 
 class FakeGRPOAgent:
