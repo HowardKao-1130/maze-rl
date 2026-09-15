@@ -225,6 +225,9 @@ looks for a sibling `same_layout_new_goals.npz` split and renders rollout videos
 for both validation views when MP4 support is installed. Use `--best-trial` to
 evaluate the best checkpoint recorded in `runs/tuning/tuning_results.csv`, or
 `--no-rollout-animations` to skip rollout videos.
+Legacy sampling flags remain accepted: use `--episodes N` to sample random
+tasks, `--fixed-index I` to repeat one task, or `--all-tasks` to request the
+default all-task pass explicitly.
 
 By default this writes `runs/q_learning/training_metrics.png`,
 `runs/q_learning/task_training_metrics.png`, and

@@ -265,12 +265,41 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--episodes",
+        type=int,
+        default=None,
+        help=(
+            "Sample this many random tasks for evaluation. "
+            "Omitting this flag evaluates every dataset task once."
+        ),
+    )
+
+    parser.add_argument(
+        "--fixed-index",
+        type=int,
+        default=None,
+        help=(
+            "Evaluate one fixed task index. Defaults to the "
+            "legacy 200 episodes unless --episodes is provided."
+        ),
+    )
+
+    parser.add_argument(
+        "--all-tasks",
+        action="store_true",
+        help=(
+            "Evaluate every task in the dataset once. This is the "
+            "default and remains accepted for compatibility."
+        ),
+    )
+
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
         help=(
-            "Seed used for reproducibility before evaluating every "
-            "dataset task once."
+            "Seed used for reproducible task sampling and "
+            "deterministic tie-breaking."
         ),
     )
 
@@ -402,6 +431,22 @@ def parse_args():
     )
 
     args = parser.parse_args()
+
+    if (
+        args.episodes is not None
+        and args.episodes <= 0
+    ):
+        parser.error(
+            "--episodes must be positive."
+        )
+
+    if (
+        args.all_tasks
+        and args.fixed_index is not None
+    ):
+        parser.error(
+            "--all-tasks cannot be combined with --fixed-index."
+        )
 
     if (
         args.best_trial
@@ -558,6 +603,35 @@ def load_checkpoint(
     return checkpoint
 
 
+def evaluation_episode_plan(
+    env,
+    *,
+    episodes: int | None,
+    fixed_index: int | None,
+    all_tasks: bool,
+) -> tuple[int, list[int] | None]:
+    if fixed_index is not None:
+        episode_count = (
+            episodes
+            if episodes is not None
+            else 200
+        )
+        return episode_count, [
+            fixed_index
+        ] * episode_count
+
+    if (
+        all_tasks
+        or episodes is None
+    ):
+        task_indices = list(
+            range(env.num_tasks)
+        )
+        return len(task_indices), task_indices
+
+    return episodes, None
+
+
 def evaluate_dataset(
     *,
     algorithm,
@@ -565,6 +639,9 @@ def evaluate_dataset(
     dataset_path: Path,
     max_steps: int,
     seed: int,
+    episodes: int | None,
+    fixed_index: int | None,
+    all_tasks: bool,
     capture_rollouts: bool,
     progress_label: str,
 ):
@@ -572,18 +649,28 @@ def evaluate_dataset(
         dataset_path=dataset_path,
         max_steps=max_steps,
     )
-    task_indices = list(range(env.num_tasks))
+    episode_count, task_indices = evaluation_episode_plan(
+        env,
+        episodes=episodes,
+        fixed_index=fixed_index,
+        all_tasks=all_tasks,
+    )
+    progress_total = (
+        len(task_indices)
+        if task_indices is not None
+        else episode_count
+    )
 
     progress_line(
         progress_label,
         0,
-        len(task_indices),
+        progress_total,
     )
     results, summary = evaluate(
         algorithm=algorithm,
         agent=agent,
         env=env,
-        episodes=len(task_indices),
+        episodes=episode_count,
         seed=seed,
         task_indices=task_indices,
         capture_rollouts=capture_rollouts,
@@ -639,6 +726,9 @@ def main():
         dataset_path=args.dataset,
         max_steps=args.max_steps,
         seed=args.seed,
+        episodes=args.episodes,
+        fixed_index=args.fixed_index,
+        all_tasks=args.all_tasks,
         capture_rollouts=not args.no_rollout_animations,
         progress_label=f"Evaluate {args.dataset_label}",
     )
@@ -729,6 +819,9 @@ def main():
                 dataset_path=same_layout_dataset,
                 max_steps=args.max_steps,
                 seed=args.seed,
+                episodes=args.episodes,
+                fixed_index=args.fixed_index,
+                all_tasks=args.all_tasks,
                 capture_rollouts=True,
                 progress_label="Evaluate val_with_same_layout",
             )

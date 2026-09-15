@@ -20,6 +20,7 @@ from scripts.evaluate import (
     best_trial_checkpoint_path,
     default_rollout_animation_output_dir,
     default_tuning_results_path,
+    evaluation_episode_plan,
     evaluation_csv_rows,
     infer_dataset_label,
     parse_args as parse_evaluate_args,
@@ -172,34 +173,111 @@ def test_evaluate_rollout_animation_cli_overrides(monkeypatch, tmp_path):
     assert args.no_rollout_animations
 
 
-@pytest.mark.parametrize(
-    "removed_flag",
-    [
-        "--all-tasks",
-        "--episodes",
-        "--fixed-index",
-    ],
-)
-def test_evaluate_rejects_sampling_mode_flags(
-    monkeypatch,
-    removed_flag,
-):
-    argv = [
-        "evaluate.py",
-        "--algorithm",
-        "a2c",
-        removed_flag,
-    ]
-
-    if removed_flag in {
-        "--episodes",
-        "--fixed-index",
-    }:
-        argv.append("1")
-
+def test_evaluate_accepts_legacy_sampling_flags(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
-        argv,
+        [
+            "evaluate.py",
+            "--algorithm",
+            "a2c",
+            "--episodes",
+            "7",
+            "--fixed-index",
+            "2",
+        ],
+    )
+
+    args = parse_evaluate_args()
+
+    assert args.episodes == 7
+    assert args.fixed_index == 2
+    assert not args.all_tasks
+
+
+def test_evaluate_accepts_legacy_all_tasks_flag(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "evaluate.py",
+            "--algorithm",
+            "a2c",
+            "--all-tasks",
+        ],
+    )
+
+    args = parse_evaluate_args()
+
+    assert args.all_tasks
+    assert args.episodes is None
+    assert args.fixed_index is None
+
+
+def test_evaluate_rejects_all_tasks_with_fixed_index(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "evaluate.py",
+            "--algorithm",
+            "a2c",
+            "--all-tasks",
+            "--fixed-index",
+            "1",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        parse_evaluate_args()
+
+
+def test_evaluation_episode_plan_defaults_to_every_task_once():
+    env = SimpleNamespace(num_tasks=4)
+
+    episode_count, task_indices = evaluation_episode_plan(
+        env,
+        episodes=None,
+        fixed_index=None,
+        all_tasks=False,
+    )
+
+    assert episode_count == 4
+    assert task_indices == [0, 1, 2, 3]
+
+
+def test_evaluation_episode_plan_supports_legacy_sampling_modes():
+    env = SimpleNamespace(num_tasks=4)
+
+    assert evaluation_episode_plan(
+        env,
+        episodes=3,
+        fixed_index=None,
+        all_tasks=False,
+    ) == (3, None)
+    assert evaluation_episode_plan(
+        env,
+        episodes=3,
+        fixed_index=2,
+        all_tasks=False,
+    ) == (3, [2, 2, 2])
+    assert evaluation_episode_plan(
+        env,
+        episodes=None,
+        fixed_index=2,
+        all_tasks=False,
+    ) == (200, [2] * 200)
+
+
+def test_evaluate_rejects_nonpositive_episodes(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "evaluate.py",
+            "--algorithm",
+            "a2c",
+            "--episodes",
+            "0",
+        ],
     )
 
     with pytest.raises(SystemExit):
