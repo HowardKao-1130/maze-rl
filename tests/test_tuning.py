@@ -247,6 +247,7 @@ def test_evaluation_command_defaults_to_all_validation_tasks(tmp_path):
     assert "--episodes" not in command
     assert "--evaluation-output" in command
     assert "--no-plot" in command
+    assert "--no-rollout-animations" in command
 
 
 def test_summarize_evaluation_uses_mean_path_efficiency(tmp_path):

@@ -707,6 +707,7 @@ def build_evaluation_command(
         str(evaluation_path),
         "--no-q-plots",
         "--no-q-videos",
+        "--no-rollout-animations",
     ]
 
     if not args.keep_plots:
