@@ -250,6 +250,30 @@ def test_evaluation_command_defaults_to_all_validation_tasks(tmp_path):
     assert "--no-rollout-animations" in command
 
 
+def test_evaluation_command_passes_sampled_episode_count(tmp_path):
+    args = SimpleNamespace(
+        algorithm="ppo",
+        max_steps=9,
+        eval_all_tasks=False,
+        eval_episodes=5,
+        keep_plots=False,
+    )
+
+    command = build_evaluation_command(
+        args=args,
+        checkpoint_path=tmp_path / "checkpoint.pt",
+        validation_dataset=tmp_path / "validation.npz",
+        evaluation_path=tmp_path / "evaluation.csv",
+        trial_seed=17,
+    )
+
+    assert "--all-tasks" not in command
+    assert command[
+        command.index("--episodes") + 1
+    ] == "5"
+    assert "--no-rollout-animations" in command
+
+
 def test_summarize_evaluation_uses_mean_path_efficiency(tmp_path):
     path = tmp_path / "evaluation.csv"
 
