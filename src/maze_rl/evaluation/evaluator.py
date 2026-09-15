@@ -62,6 +62,15 @@ def choose_greedy_action(
         )
 
 
+def current_agent_position(
+    env,
+) -> list[int]:
+    return [
+        int(coord)
+        for coord in env.agent_position
+    ]
+
+
 def evaluate(
     algorithm,
     agent,
@@ -69,6 +78,8 @@ def evaluate(
     episodes: int,
     seed: int | None = None,
     task_indices: Sequence[int] | None = None,
+    capture_rollouts: bool = False,
+    progress_callback=None,
 ):
     results = []
     episode_task_indices = (
@@ -96,6 +107,17 @@ def evaluate(
         )
 
         episode_return = 0.0
+        rollout_trace = (
+            {
+                "positions": [
+                    current_agent_position(env)
+                ],
+                "actions": [],
+                "rewards": [],
+            }
+            if capture_rollouts
+            else None
+        )
 
         while True:
             action = choose_greedy_action(
@@ -115,28 +137,54 @@ def evaluate(
 
             episode_return += reward
 
+            if rollout_trace is not None:
+                rollout_trace["actions"].append(
+                    int(action)
+                )
+                rollout_trace["rewards"].append(
+                    float(reward)
+                )
+                rollout_trace["positions"].append(
+                    current_agent_position(env)
+                )
+
             if terminated or truncated:
                 break
 
-        results.append(
-            {
-                "episode": episode,
-                "task_index": info["task_index"],
-                "layout_index": info["layout_index"],
-                "episode_return": episode_return,
-                "success": info["success"],
-                "steps": info["steps"],
-                "wall_collisions": info[
-                    "wall_collisions"
-                ],
-                "optimal_path_length": info[
-                    "optimal_path_length"
-                ],
-                "path_efficiency": info[
-                    "path_efficiency"
-                ],
-            }
-        )
+        result = {
+            "episode": episode,
+            "task_index": info["task_index"],
+            "layout_index": info["layout_index"],
+            "episode_return": episode_return,
+            "success": info["success"],
+            "steps": info["steps"],
+            "wall_collisions": info[
+                "wall_collisions"
+            ],
+            "optimal_path_length": info[
+                "optimal_path_length"
+            ],
+            "path_efficiency": info[
+                "path_efficiency"
+            ],
+        }
+
+        if rollout_trace is not None:
+            rollout_trace["terminated"] = bool(
+                terminated
+            )
+            rollout_trace["truncated"] = bool(
+                truncated
+            )
+            result["rollout_trace"] = rollout_trace
+
+        results.append(result)
+
+        if progress_callback is not None:
+            progress_callback(
+                episode,
+                len(episode_task_indices),
+            )
 
     success_rate = np.mean(
         [

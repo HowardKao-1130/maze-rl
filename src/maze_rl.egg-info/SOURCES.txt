@@ -22,6 +22,7 @@ src/maze_rl/envs/maze_env.py
 src/maze_rl/evaluation/__init__.py
 src/maze_rl/evaluation/evaluator.py
 src/maze_rl/evaluation/q_plots.py
+src/maze_rl/evaluation/rollout_animations.py
 src/maze_rl/maze/__init__.py
 src/maze_rl/maze/dataset.py
 src/maze_rl/maze/generator.py

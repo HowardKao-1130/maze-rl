@@ -16,6 +16,15 @@ from scripts.generate_dataset import (
     parse_args as parse_dataset_args,
 )
 from scripts.evaluate import default_checkpoint_path
+from scripts.evaluate import (
+    best_trial_checkpoint_path,
+    default_rollout_animation_output_dir,
+    default_tuning_results_path,
+    evaluation_csv_rows,
+    infer_dataset_label,
+    parse_args as parse_evaluate_args,
+    same_layout_dataset_for,
+)
 from scripts.open_q_video import q_video_path
 from scripts.open_tensorboard import (
     build_tensorboard_command,
@@ -104,6 +113,249 @@ def test_default_checkpoint_path_uses_algorithm_specific_suffix():
     assert default_checkpoint_path(
         "dqn"
     ) == Path("runs/dqn/checkpoint.pt")
+
+
+def test_evaluate_rollout_animation_defaults(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "evaluate.py",
+            "--algorithm",
+            "q_learning",
+            "--dataset",
+            "data/validation.npz",
+        ],
+    )
+
+    args = parse_evaluate_args()
+
+    assert args.checkpoint == Path(
+        "runs/q_learning/checkpoint.pkl"
+    )
+    assert args.dataset_label == "val"
+    assert not args.no_rollout_animations
+    assert args.rollout_animation_fps == 8.0
+    assert args.rollout_animation_output_dir is None
+    assert default_rollout_animation_output_dir(
+        args.checkpoint
+    ) == Path(
+        "runs/q_learning/rollout_animations"
+    )
+
+
+def test_evaluate_rollout_animation_cli_overrides(monkeypatch, tmp_path):
+    output_dir = tmp_path / "animations"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "evaluate.py",
+            "--algorithm",
+            "dqn",
+            "--dataset",
+            "data/same_layout_new_goals.npz",
+            "--dataset-label",
+            "heldout_goals",
+            "--rollout-animation-output-dir",
+            str(output_dir),
+            "--rollout-animation-fps",
+            "12",
+            "--no-rollout-animations",
+        ],
+    )
+
+    args = parse_evaluate_args()
+
+    assert args.dataset_label == "heldout_goals"
+    assert args.rollout_animation_output_dir == output_dir
+    assert args.rollout_animation_fps == 12.0
+    assert args.no_rollout_animations
+
+
+@pytest.mark.parametrize(
+    "removed_flag",
+    [
+        "--all-tasks",
+        "--episodes",
+        "--fixed-index",
+    ],
+)
+def test_evaluate_rejects_sampling_mode_flags(
+    monkeypatch,
+    removed_flag,
+):
+    argv = [
+        "evaluate.py",
+        "--algorithm",
+        "a2c",
+        removed_flag,
+    ]
+
+    if removed_flag in {
+        "--episodes",
+        "--fixed-index",
+    }:
+        argv.append("1")
+
+    monkeypatch.setattr(
+        "sys.argv",
+        argv,
+    )
+
+    with pytest.raises(SystemExit):
+        parse_evaluate_args()
+
+
+def test_best_trial_checkpoint_path_selects_algorithm_best(tmp_path):
+    tuning_results_path = (
+        tmp_path / "tuning_results.csv"
+    )
+    tuning_results_path.write_text(
+        "trial,algorithm,objective,checkpoint_path\n"
+        "1,a2c,0.3,runs/tuning/trials/trial_001/a2c/best_checkpoint.pt\n"
+        "2,dqn,0.8,runs/tuning/trials/trial_002/dqn/best_checkpoint.pt\n"
+        "3,a2c,0.5,runs/tuning/trials/trial_003/a2c/best_checkpoint.pt\n"
+    )
+
+    assert best_trial_checkpoint_path(
+        "a2c",
+        tuning_results_path,
+    ) == Path(
+        "runs/tuning/trials/trial_003/a2c/best_checkpoint.pt"
+    )
+
+
+def test_best_trial_checkpoint_path_rejects_missing_algorithm(tmp_path):
+    tuning_results_path = (
+        tmp_path / "tuning_results.csv"
+    )
+    tuning_results_path.write_text(
+        "trial,algorithm,objective,checkpoint_path\n"
+        "1,dqn,0.8,runs/tuning/trials/trial_001/dqn/best_checkpoint.pt\n"
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="No tuning_results.csv rows",
+    ):
+        best_trial_checkpoint_path(
+            "a2c",
+            tuning_results_path,
+        )
+
+
+def test_evaluate_best_trial_uses_tuning_results_csv(
+    monkeypatch,
+    tmp_path,
+):
+    tuning_results_path = (
+        tmp_path / "tuning_results.csv"
+    )
+    tuning_results_path.write_text(
+        "trial,algorithm,objective,checkpoint_path\n"
+        "1,a2c,0.2,runs/tuning/trials/trial_001/a2c/best_checkpoint.pt\n"
+        "2,a2c,0.7,runs/tuning/trials/trial_002/a2c/best_checkpoint.pt\n"
+    )
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "evaluate.py",
+            "--algorithm",
+            "a2c",
+            "--best-trial",
+            "--tuning-results",
+            str(tuning_results_path),
+        ],
+    )
+
+    args = parse_evaluate_args()
+
+    assert args.best_trial
+    assert args.tuning_results == tuning_results_path
+    assert args.checkpoint == Path(
+        "runs/tuning/trials/trial_002/a2c/best_checkpoint.pt"
+    )
+
+
+def test_evaluate_best_trial_rejects_explicit_checkpoint(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "evaluate.py",
+            "--algorithm",
+            "a2c",
+            "--best-trial",
+            "--checkpoint",
+            "runs/a2c/checkpoint.pt",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        parse_evaluate_args()
+
+
+def test_default_tuning_results_path_uses_tuning_run_csv():
+    assert default_tuning_results_path() == Path(
+        "runs/tuning/tuning_results.csv"
+    )
+
+
+def test_infer_dataset_label_recognizes_validation_splits():
+    assert infer_dataset_label(
+        Path("data/validation.npz")
+    ) == "val"
+    assert infer_dataset_label(
+        Path("data/same_layout_new_goals.npz")
+    ) == "val_with_same_layout"
+    assert infer_dataset_label(
+        Path("data/test.npz")
+    ) == "test"
+
+
+def test_same_layout_dataset_for_validation_sibling(tmp_path):
+    validation_path = tmp_path / "validation.npz"
+    same_layout_path = (
+        tmp_path / "same_layout_new_goals.npz"
+    )
+    validation_path.write_bytes(b"")
+    same_layout_path.write_bytes(b"")
+
+    assert same_layout_dataset_for(
+        validation_path
+    ) == same_layout_path
+
+
+def test_same_layout_dataset_for_non_validation_dataset(tmp_path):
+    test_path = tmp_path / "test.npz"
+    test_path.write_bytes(b"")
+
+    assert same_layout_dataset_for(test_path) is None
+
+
+def test_evaluation_csv_rows_strip_rollout_trace():
+    rows = evaluation_csv_rows(
+        [
+            {
+                "episode": 1,
+                "task_index": 2,
+                "rollout_trace": {
+                    "positions": [
+                        [0, 0],
+                    ],
+                },
+            }
+        ]
+    )
+
+    assert rows == [
+        {
+            "episode": 1,
+            "task_index": 2,
+        }
+    ]
 
 
 def test_dataset_split_aliases_name_layout_counts(monkeypatch):

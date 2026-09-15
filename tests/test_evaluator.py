@@ -29,9 +29,18 @@ class OneStepEnv:
             )
 
         self.layout_index = self.task_index
+        self.agent_position = (
+            self.task_index,
+            0,
+        )
         return np.zeros((1,), dtype=np.float32), {}
 
     def step(self, action):
+        self.agent_position = (
+            self.task_index,
+            1,
+        )
+
         return (
             np.zeros((1,), dtype=np.float32),
             float(self.task_index),
@@ -103,6 +112,41 @@ def test_evaluate_task_indices_override_random_sampling():
 
     assert task_indices(results) == [4, 2, 0]
     assert summary["episodes"] == 3
+
+
+def test_evaluate_can_capture_rollout_positions_and_actions():
+    results, summary = evaluate(
+        algorithm="q_learning",
+        agent=GreedyAgent(),
+        env=OneStepEnv(),
+        episodes=99,
+        task_indices=[3],
+        capture_rollouts=True,
+    )
+
+    assert summary["episodes"] == 1
+    assert results[0]["rollout_trace"] == {
+        "positions": [
+            [3, 0],
+            [3, 1],
+        ],
+        "actions": [0],
+        "rewards": [3.0],
+        "terminated": True,
+        "truncated": False,
+    }
+
+
+def test_evaluate_omits_rollout_trace_by_default():
+    results, _ = evaluate(
+        algorithm="q_learning",
+        agent=GreedyAgent(),
+        env=OneStepEnv(),
+        episodes=99,
+        task_indices=[3],
+    )
+
+    assert "rollout_trace" not in results[0]
 
 
 class MixedEfficiencyEnv(OneStepEnv):

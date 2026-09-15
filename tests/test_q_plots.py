@@ -4,10 +4,16 @@ import numpy as np
 import torch
 
 from maze_rl.evaluation import q_plots
+from maze_rl.evaluation import rollout_animations
 from maze_rl.evaluation.q_plots import (
     draw_goal_cell,
     draw_q_values,
     pad_frame_to_even_dimensions,
+)
+from maze_rl.evaluation.rollout_animations import (
+    plot_rollout_animations,
+    rollout_animation_path,
+    select_rollout_traces,
 )
 
 
@@ -145,6 +151,333 @@ class FakeNeuralPlotEnv:
     )
     starts = np.array([[0, 0]])
     goals = np.array([[0, 0]])
+
+
+class FakeRolloutAnimationEnv:
+    height = 3
+    width = 3
+    num_tasks = 2
+    layout_indices = np.array([0, 0])
+    layouts = np.array(
+        [
+            [
+                [0, 1, 0],
+                [0, 0, 0],
+                [0, 1, 0],
+            ]
+        ],
+        dtype=np.int64,
+    )
+    starts = np.array(
+        [
+            [0, 0],
+            [2, 0],
+        ]
+    )
+    goals = np.array(
+        [
+            [1, 2],
+            [2, 2],
+        ]
+    )
+
+
+def rollout_result(
+    episode: int,
+    task_index: int,
+) -> dict:
+    return {
+        "episode": episode,
+        "task_index": task_index,
+        "layout_index": 0,
+        "rollout_trace": {
+            "positions": [
+                [0, 0],
+                [1, 0],
+                [1, 1],
+            ],
+            "actions": [
+                1,
+                3,
+            ],
+        },
+    }
+
+
+def test_select_rollout_traces_defaults_to_each_task_once():
+    results = [
+        rollout_result(
+            episode=1,
+            task_index=0,
+        ),
+        rollout_result(
+            episode=2,
+            task_index=1,
+        ),
+    ]
+
+    assert select_rollout_traces(results) == [
+        results[0],
+        results[1],
+    ]
+
+
+def test_select_rollout_traces_keeps_first_rollout_per_task():
+    results = [
+        rollout_result(
+            episode=1,
+            task_index=0,
+        ),
+        rollout_result(
+            episode=2,
+            task_index=0,
+        ),
+        rollout_result(
+            episode=3,
+            task_index=1,
+        ),
+    ]
+
+    assert select_rollout_traces(results) == [
+        results[0],
+        results[2],
+    ]
+
+
+def test_plot_rollout_animations_writes_labeled_mp4s(
+    tmp_path,
+    monkeypatch,
+):
+    written_paths = []
+
+    def fake_write_rollout_animation(
+        env,
+        results,
+        split_label,
+        output_path,
+        fps,
+        progress_callback=None,
+        algorithm=None,
+        agent=None,
+        q_table=None,
+    ):
+        output_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        output_path.write_bytes(b"video")
+        written_paths.append(
+            (
+                split_label,
+                output_path,
+                fps,
+                [
+                    result["task_index"]
+                    for result in results
+                ],
+                algorithm,
+                q_table,
+            )
+        )
+
+    monkeypatch.setattr(
+        rollout_animations,
+        "write_rollout_animation",
+        fake_write_rollout_animation,
+    )
+
+    result = plot_rollout_animations(
+        env=FakeRolloutAnimationEnv(),
+        results=[
+            rollout_result(
+                episode=1,
+                task_index=0,
+            ),
+            rollout_result(
+                episode=2,
+                task_index=1,
+            ),
+        ],
+        output_dir=tmp_path,
+        split_label="val_with_same_layout",
+        fps=12.0,
+        algorithm="q_learning",
+        q_table={
+            (
+                0,
+                0,
+                0,
+                1,
+                2,
+            ): np.array(
+                [1.0, 0.0, 0.0, 0.0]
+            ).tolist()
+        },
+    )
+
+    expected_path = (
+        tmp_path
+        / "val_with_same_layout_rollouts.mp4"
+    )
+
+    assert result.animation_count == 1
+    assert result.skipped_animation_reason is None
+    assert written_paths == [
+        (
+            "val_with_same_layout",
+            expected_path,
+            12.0,
+            [0, 1],
+            "q_learning",
+            {
+                (
+                    0,
+                    0,
+                    0,
+                    1,
+                    2,
+                ): np.array(
+                    [1.0, 0.0, 0.0, 0.0]
+                ).tolist()
+            },
+        ),
+    ]
+    assert expected_path.exists()
+
+
+def test_plot_rollout_animations_reports_skipped_video_reason(
+    tmp_path,
+    monkeypatch,
+):
+    def fake_write_rollout_animation(
+        env,
+        results,
+        split_label,
+        output_path,
+        fps,
+        progress_callback=None,
+        algorithm=None,
+        agent=None,
+        q_table=None,
+    ):
+        raise RuntimeError(
+            "Matplotlib ffmpeg writer is not available"
+        )
+
+    monkeypatch.setattr(
+        rollout_animations,
+        "write_rollout_animation",
+        fake_write_rollout_animation,
+    )
+
+    result = plot_rollout_animations(
+        env=FakeRolloutAnimationEnv(),
+        results=[
+            rollout_result(
+                episode=1,
+                task_index=0,
+            )
+        ],
+        output_dir=tmp_path,
+        split_label="val",
+    )
+
+    assert result.animation_count == 0
+    assert (
+        result.skipped_animation_reason
+        == "Matplotlib ffmpeg writer is not available"
+    )
+
+
+def test_rollout_animation_path_uses_split_video_name(tmp_path):
+    assert rollout_animation_path(
+        output_dir=tmp_path,
+        split_label="val",
+    ) == (
+        tmp_path
+        / "val_rollouts.mp4"
+    )
+
+
+def test_write_rollout_animation_reports_task_progress(
+    tmp_path,
+    monkeypatch,
+):
+    progress_updates = []
+    saved_callback = None
+
+    class FakeAnimation:
+        def __init__(
+            self,
+            figure,
+            update,
+            frames,
+            interval,
+            blit,
+            repeat,
+        ):
+            self.frames = frames
+
+        def save(
+            self,
+            output_path,
+            writer,
+            fps,
+            dpi,
+            progress_callback=None,
+        ):
+            nonlocal saved_callback
+            saved_callback = progress_callback
+
+            for frame_index in range(self.frames):
+                progress_callback(
+                    frame_index,
+                    self.frames,
+                )
+
+            output_path.write_bytes(b"video")
+
+    monkeypatch.setattr(
+        rollout_animations.animation,
+        "FuncAnimation",
+        FakeAnimation,
+    )
+    monkeypatch.setattr(
+        rollout_animations.animation.writers,
+        "is_available",
+        lambda writer: True,
+    )
+
+    rollout_animations.write_rollout_animation(
+        env=FakeRolloutAnimationEnv(),
+        results=[
+            rollout_result(
+                episode=1,
+                task_index=0,
+            ),
+            rollout_result(
+                episode=2,
+                task_index=1,
+            ),
+        ],
+        split_label="val",
+        output_path=tmp_path / "val_rollouts.mp4",
+        fps=8.0,
+        progress_callback=lambda current, total: progress_updates.append(
+            (
+                current,
+                total,
+            )
+        ),
+    )
+
+    assert saved_callback is not None
+    assert progress_updates[0] == (0, 2)
+    assert progress_updates[-1] == (2, 2)
+    assert {
+        total
+        for _, total in progress_updates
+    } == {2}
 
 
 class FakeDQNPlotAgent:

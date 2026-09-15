@@ -5,6 +5,16 @@ import csv
 from pathlib import Path
 import pickle
 import random
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = REPO_ROOT / "src"
+
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(
+        0,
+        str(SRC_ROOT),
+    )
 
 import numpy as np
 import torch
@@ -22,6 +32,9 @@ from maze_rl.envs.maze_env import MazeEnv
 from maze_rl.evaluation.evaluator import evaluate
 from maze_rl.evaluation.q_plots import plot_q_snapshots
 from maze_rl.evaluation.q_plots import plot_neural_snapshots
+from maze_rl.evaluation.rollout_animations import (
+    plot_rollout_animations,
+)
 from maze_rl.training.plots import (
     plot_task_training_metrics,
     plot_training_metrics,
@@ -53,6 +66,144 @@ def default_checkpoint_path(
     )
 
 
+def default_rollout_animation_output_dir(
+    checkpoint_path: Path,
+) -> Path:
+    return checkpoint_path.parent / "rollout_animations"
+
+
+def default_tuning_results_path() -> Path:
+    return Path("runs") / "tuning" / "tuning_results.csv"
+
+
+def infer_dataset_label(
+    dataset_path: str | Path,
+) -> str:
+    filename = Path(dataset_path).name
+
+    if filename == "validation.npz":
+        return "val"
+
+    if filename == "same_layout_new_goals.npz":
+        return "val_with_same_layout"
+
+    return Path(dataset_path).stem
+
+
+def evaluation_csv_rows(
+    results: list[dict],
+) -> list[dict]:
+    return [
+        {
+            key: value
+            for key, value in result.items()
+            if key != "rollout_trace"
+        }
+        for result in results
+    ]
+
+
+def same_layout_dataset_for(
+    dataset_path: Path,
+) -> Path | None:
+    if dataset_path.name != "validation.npz":
+        return None
+
+    same_layout_path = (
+        dataset_path.parent / "same_layout_new_goals.npz"
+    )
+
+    if not same_layout_path.exists():
+        return None
+
+    return same_layout_path
+
+
+def progress_line(
+    label: str,
+    current: int,
+    total: int,
+) -> None:
+    display_current = max(
+        0,
+        min(
+            current,
+            total,
+        ),
+    )
+    percent = (
+        100
+        if total <= 0
+        else int(
+            round(
+                100 * display_current / total
+            )
+        )
+    )
+    percent = max(
+        0,
+        min(
+            100,
+            percent,
+        ),
+    )
+    sys.stdout.write(
+        f"\r{label} [{percent:3d}%] ({display_current}/{total})"
+    )
+    sys.stdout.flush()
+
+
+def finish_progress_line(
+    label: str,
+) -> None:
+    sys.stdout.write(
+        f"\r{label} step done{' ' * 20}\n"
+    )
+    sys.stdout.flush()
+
+
+def best_trial_checkpoint_path(
+    algorithm: str,
+    tuning_results_path: Path,
+) -> Path:
+    with tuning_results_path.open(
+        newline="",
+    ) as file:
+        rows = [
+            row
+            for row in csv.DictReader(file)
+            if row.get("algorithm") == algorithm
+            and row.get("checkpoint_path")
+        ]
+
+    if not rows:
+        raise ValueError(
+            "No tuning_results.csv rows found for "
+            f"algorithm {algorithm!r} in {tuning_results_path}."
+        )
+
+    try:
+        best_row = max(
+            rows,
+            key=lambda row: float(
+                row["objective"]
+            ),
+        )
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise ValueError(
+            "Could not select a best trial because "
+            f"{tuning_results_path} has invalid objective values."
+        ) from error
+
+    return Path(
+        best_row["checkpoint_path"]
+    )
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
 
@@ -73,8 +224,38 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--best-trial",
+        action="store_true",
+        help=(
+            "Use tuning_results.csv to evaluate the best recorded "
+            "trial checkpoint for --algorithm."
+        ),
+    )
+
+    parser.add_argument(
+        "--tuning-results",
+        type=Path,
+        default=default_tuning_results_path(),
+        help=(
+            "CSV index used by --best-trial. Defaults to "
+            "runs/tuning/tuning_results.csv."
+        ),
+    )
+
+    parser.add_argument(
         "--dataset",
+        type=Path,
         default="data/test.npz",
+    )
+
+    parser.add_argument(
+        "--dataset-label",
+        default=None,
+        help=(
+            "Label used in rollout animations. Defaults to val "
+            "for validation.npz, val_with_same_layout for "
+            "same_layout_new_goals.npz, otherwise the dataset stem."
+        ),
     )
 
     parser.add_argument(
@@ -84,34 +265,12 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--episodes",
-        type=int,
-        default=200,
-    )
-
-    parser.add_argument(
-        "--fixed-index",
-        type=int,
-        default=None,
-        help="Evaluate one fixed task index.",
-    )
-
-    parser.add_argument(
-        "--all-tasks",
-        action="store_true",
-        help=(
-            "Evaluate every task in the dataset once instead of "
-            "sampling --episodes random tasks."
-        ),
-    )
-
-    parser.add_argument(
         "--seed",
         type=int,
         default=42,
         help=(
-            "Seed used for evaluation task sampling and stochastic "
-            "tie-breaking."
+            "Seed used for reproducibility before evaluating every "
+            "dataset task once."
         ),
     )
 
@@ -190,6 +349,29 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--rollout-animation-output-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for validation rollout MP4 animations. "
+            "Defaults to <checkpoint directory>/rollout_animations."
+        ),
+    )
+
+    parser.add_argument(
+        "--no-rollout-animations",
+        action="store_true",
+        help="Skip validation rollout MP4 animations.",
+    )
+
+    parser.add_argument(
+        "--rollout-animation-fps",
+        type=float,
+        default=8.0,
+        help="Frames per second for rollout MP4 animations.",
+    )
+
+    parser.add_argument(
         "--task-plot-output",
         type=Path,
         default=None,
@@ -221,9 +403,34 @@ def parse_args():
 
     args = parser.parse_args()
 
+    if (
+        args.best_trial
+        and args.checkpoint is not None
+    ):
+        parser.error(
+            "--best-trial cannot be combined with --checkpoint."
+        )
+
     if args.checkpoint is None:
-        args.checkpoint = default_checkpoint_path(
-            args.algorithm
+        if args.best_trial:
+            try:
+                args.checkpoint = best_trial_checkpoint_path(
+                    args.algorithm,
+                    args.tuning_results,
+                )
+            except (
+                FileNotFoundError,
+                ValueError,
+            ) as error:
+                parser.error(str(error))
+        else:
+            args.checkpoint = default_checkpoint_path(
+                args.algorithm
+            )
+
+    if args.dataset_label is None:
+        args.dataset_label = infer_dataset_label(
+            args.dataset
         )
 
     return args
@@ -351,16 +558,48 @@ def load_checkpoint(
     return checkpoint
 
 
+def evaluate_dataset(
+    *,
+    algorithm,
+    agent,
+    dataset_path: Path,
+    max_steps: int,
+    seed: int,
+    capture_rollouts: bool,
+    progress_label: str,
+):
+    env = MazeEnv(
+        dataset_path=dataset_path,
+        max_steps=max_steps,
+    )
+    task_indices = list(range(env.num_tasks))
+
+    progress_line(
+        progress_label,
+        0,
+        len(task_indices),
+    )
+    results, summary = evaluate(
+        algorithm=algorithm,
+        agent=agent,
+        env=env,
+        episodes=len(task_indices),
+        seed=seed,
+        task_indices=task_indices,
+        capture_rollouts=capture_rollouts,
+        progress_callback=lambda current, total: progress_line(
+            progress_label,
+            current,
+            total,
+        ),
+    )
+    finish_progress_line(progress_label)
+
+    return env, results, summary
+
+
 def main():
     args = parse_args()
-
-    if (
-        args.all_tasks
-        and args.fixed_index is not None
-    ):
-        raise SystemExit(
-            "--all-tasks cannot be combined with --fixed-index."
-        )
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -375,15 +614,14 @@ def main():
         else "cpu"
     )
 
-    env = MazeEnv(
+    agent_env = MazeEnv(
         dataset_path=args.dataset,
         max_steps=args.max_steps,
-        fixed_index=args.fixed_index,
     )
 
     agent = create_agent(
         args.algorithm,
-        env,
+        agent_env,
         device,
         args.seed,
     )
@@ -395,19 +633,14 @@ def main():
         device,
     )
 
-    task_indices = (
-        list(range(env.num_tasks))
-        if args.all_tasks
-        else None
-    )
-
-    results, summary = evaluate(
+    env, results, summary = evaluate_dataset(
         algorithm=args.algorithm,
         agent=agent,
-        env=env,
-        episodes=args.episodes,
+        dataset_path=args.dataset,
+        max_steps=args.max_steps,
         seed=args.seed,
-        task_indices=task_indices,
+        capture_rollouts=not args.no_rollout_animations,
+        progress_label=f"Evaluate {args.dataset_label}",
     )
 
     evaluation_path = (
@@ -425,17 +658,19 @@ def main():
         exist_ok=True,
     )
 
+    csv_rows = evaluation_csv_rows(results)
+
     with evaluation_path.open(
         "w",
         newline="",
     ) as file:
         writer = csv.DictWriter(
             file,
-            fieldnames=results[0].keys(),
+            fieldnames=csv_rows[0].keys(),
         )
 
         writer.writeheader()
-        writer.writerows(results)
+        writer.writerows(csv_rows)
 
     print(
         f"Success rate: "
@@ -462,6 +697,98 @@ def main():
         f"Saved evaluation to "
         f"{evaluation_path}"
     )
+
+    if not args.no_rollout_animations:
+        rollout_animation_dir = (
+            args.rollout_animation_output_dir
+            if args.rollout_animation_output_dir is not None
+            else default_rollout_animation_output_dir(
+                args.checkpoint
+            )
+        )
+
+        animation_inputs = [
+            (
+                env,
+                results,
+                args.dataset_label,
+            )
+        ]
+        same_layout_dataset = same_layout_dataset_for(
+            args.dataset
+        )
+
+        if same_layout_dataset is not None:
+            (
+                same_layout_env,
+                same_layout_results,
+                _,
+            ) = evaluate_dataset(
+                algorithm=args.algorithm,
+                agent=agent,
+                dataset_path=same_layout_dataset,
+                max_steps=args.max_steps,
+                seed=args.seed,
+                capture_rollouts=True,
+                progress_label="Evaluate val_with_same_layout",
+            )
+            animation_inputs.append(
+                (
+                    same_layout_env,
+                    same_layout_results,
+                    "val_with_same_layout",
+                )
+            )
+
+        saved_animation_count = 0
+        skipped_animation_reason = None
+
+        for animation_env, animation_results, split_label in animation_inputs:
+            progress_label = f"Animate {split_label}"
+
+            rollout_animation_result = plot_rollout_animations(
+                env=animation_env,
+                results=animation_results,
+                output_dir=rollout_animation_dir,
+                split_label=split_label,
+                fps=args.rollout_animation_fps,
+                progress_callback=lambda current, total, label=progress_label: progress_line(
+                    label,
+                    current,
+                    total,
+                ),
+                algorithm=args.algorithm,
+                agent=agent,
+                q_table=checkpoint.get("q"),
+            )
+
+            if rollout_animation_result.animation_count:
+                saved_animation_count += (
+                    rollout_animation_result.animation_count
+                )
+                finish_progress_line(progress_label)
+            elif rollout_animation_result.skipped_animation_reason:
+                skipped_animation_reason = (
+                    rollout_animation_result.skipped_animation_reason
+                )
+                sys.stdout.write(
+                    f"\r{progress_label} skipped{' ' * 20}\n"
+                )
+                sys.stdout.flush()
+                break
+
+        if saved_animation_count:
+            print(
+                f"Saved {saved_animation_count} "
+                "rollout animation videos to "
+                f"{rollout_animation_dir}"
+            )
+
+        elif skipped_animation_reason:
+            print(
+                "Skipped rollout animations: "
+                f"{skipped_animation_reason}"
+            )
 
     if (
         args.algorithm in TABULAR_ALGORITHMS
