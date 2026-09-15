@@ -219,10 +219,15 @@ Evaluation also writes the training plot automatically when it can find
 python scripts/evaluate.py --algorithm q_learning --dataset data/train.npz
 ```
 
-By default, evaluation samples `--episodes` tasks from the dataset with a fixed
-seed, so repeating the same command gives the same sampled tasks. Use `--seed`
-to choose a different reproducible sample, `--fixed-index` to evaluate one task,
-or `--all-tasks` to evaluate every task exactly once.
+By default, evaluation runs every task in the dataset exactly once with a fixed
+seed for deterministic tie-breaking. For `validation.npz`, evaluation also
+looks for a sibling `same_layout_new_goals.npz` split and renders rollout videos
+for both validation views when MP4 support is installed. Use `--best-trial` to
+evaluate the best checkpoint recorded in `runs/tuning/tuning_results.csv`, or
+`--no-rollout-animations` to skip rollout videos.
+Legacy sampling flags remain accepted: use `--episodes N` to sample random
+tasks, `--fixed-index I` to repeat one task, or `--all-tasks` to request the
+default all-task pass explicitly.
 
 By default this writes `runs/q_learning/training_metrics.png`,
 `runs/q_learning/task_training_metrics.png`, and
@@ -244,9 +249,8 @@ set. Evaluation saves Q-value plots under
 visited during evaluation, and writes
 `runs/q_learning/q_value_plots/task_XXXXX/task_XXXXX_q_values.mp4` beside the
 `frames` directory when MP4 support is installed. The plot title still shows the
-actual epoch. Use
-`--q-plot-all-tasks` to plot every task in the evaluation dataset,
-`--no-q-videos` to skip MP4s, or `--no-q-plots` to skip Q plots entirely.
+actual epoch. Use `--no-q-videos` to skip MP4s, or `--no-q-plots` to skip Q
+plots entirely.
 
 Open an existing task video with:
 

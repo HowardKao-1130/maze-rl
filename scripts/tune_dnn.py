@@ -390,6 +390,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--q-snapshot-count",
+        type=int,
+        default=11,
+        help=(
+            "Number of evenly spaced model snapshots to save in "
+            "each tuned checkpoint. Use 0 to disable snapshots."
+        ),
+    )
+    parser.add_argument(
         "--early-stopping-patience",
         type=int,
         default=35,
@@ -591,7 +600,7 @@ def build_training_command(
         "--output-dir",
         str(trial_dir),
         "--q-snapshot-count",
-        "0",
+        str(args.q_snapshot_count),
     ]
 
     if args.tensorboard:
@@ -698,20 +707,19 @@ def build_evaluation_command(
         str(evaluation_path),
         "--no-q-plots",
         "--no-q-videos",
+        "--no-rollout-animations",
     ]
 
-    if args.eval_all_tasks:
-        command.append("--all-tasks")
-    else:
+    if not args.keep_plots:
+        command.append("--no-plot")
+
+    if not args.eval_all_tasks:
         command.extend(
             [
                 "--episodes",
                 str(args.eval_episodes),
             ]
         )
-
-    if not args.keep_plots:
-        command.append("--no-plot")
 
     return command
 
@@ -884,6 +892,46 @@ def write_best_config(
         )
 
 
+def write_best_config_index(
+    path: Path,
+    algorithm: str,
+    best_result: dict[str, Any],
+) -> None:
+    if path.exists():
+        with path.open() as file:
+            existing = json.load(file)
+    else:
+        existing = {}
+
+    if (
+        isinstance(existing, dict)
+        and "algorithm" in existing
+    ):
+        existing = {
+            existing["algorithm"]: existing
+        }
+
+    if not isinstance(existing, dict):
+        existing = {}
+
+    existing[algorithm] = best_result
+
+    with path.open("w") as file:
+        json.dump(
+            existing,
+            file,
+            indent=2,
+            sort_keys=True,
+        )
+
+
+def best_config_path_for_algorithm(
+    output_dir: Path,
+    algorithm: str,
+) -> Path:
+    return output_dir / f"best_config_{algorithm}.json"
+
+
 def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(
@@ -920,6 +968,12 @@ def main() -> None:
     )
     best_config_path = (
         args.output_dir / "best_config.json"
+    )
+    algorithm_best_config_path = (
+        best_config_path_for_algorithm(
+            args.output_dir,
+            args.algorithm,
+        )
     )
     best_result = None
 
@@ -1087,7 +1141,12 @@ def main() -> None:
         ):
             best_result = result
             write_best_config(
+                algorithm_best_config_path,
+                best_result,
+            )
+            write_best_config_index(
                 best_config_path,
+                args.algorithm,
                 best_result,
             )
 
@@ -1108,7 +1167,12 @@ def main() -> None:
             f"Saved results to {results_path}"
         )
         print(
-            f"Saved best config to {best_config_path}"
+            "Saved algorithm best config to "
+            f"{algorithm_best_config_path}"
+        )
+        print(
+            "Saved indexed best configs to "
+            f"{best_config_path}"
         )
 
         if args.evaluate_best_on_test:

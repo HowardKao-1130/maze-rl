@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import csv
+import json
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from scripts.tune_dnn import (
+    best_config_path_for_algorithm,
     build_evaluation_command,
     build_training_command,
     load_search_space,
     parse_args,
     sample_hyperparameters,
     summarize_evaluation,
+    write_best_config_index,
 )
 
 
@@ -68,7 +71,44 @@ def test_parse_args_uses_tuning_run_defaults(monkeypatch):
     assert args.eval_all_tasks is True
     assert args.eval_episodes == 200
     assert args.early_stopping_patience == 35
+    assert args.q_snapshot_count == 11
     assert args.tensorboard is True
+
+
+def test_best_config_path_is_algorithm_specific(tmp_path):
+    assert best_config_path_for_algorithm(
+        tmp_path,
+        "a2c",
+    ) == tmp_path / "best_config_a2c.json"
+
+
+def test_write_best_config_index_preserves_other_algorithms(tmp_path):
+    path = tmp_path / "best_config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "algorithm": "dqn",
+                "trial": 3,
+                "objective": 0.4,
+            }
+        )
+    )
+
+    write_best_config_index(
+        path,
+        "a2c",
+        {
+            "algorithm": "a2c",
+            "trial": 2,
+            "objective": 0.5,
+        },
+    )
+
+    with path.open() as file:
+        configs = json.load(file)
+
+    assert configs["dqn"]["trial"] == 3
+    assert configs["a2c"]["trial"] == 2
 
 
 def test_training_command_includes_trial_hyperparameters(tmp_path):
@@ -84,6 +124,7 @@ def test_training_command_includes_trial_hyperparameters(tmp_path):
         eval_episodes=5,
         early_stopping_patience=4,
         early_stopping_min_delta=0.01,
+        q_snapshot_count=7,
         tensorboard=False,
         keep_plots=False,
     )
@@ -139,6 +180,9 @@ def test_training_command_includes_trial_hyperparameters(tmp_path):
     assert command[
         command.index("--rollout-group-size") + 1
     ] == "1"
+    assert command[
+        command.index("--q-snapshot-count") + 1
+    ] == "7"
 
 
 def test_training_command_passes_grpo_task_and_group_sizes(tmp_path):
@@ -154,6 +198,7 @@ def test_training_command_passes_grpo_task_and_group_sizes(tmp_path):
         eval_episodes=5,
         early_stopping_patience=None,
         early_stopping_min_delta=0.0,
+        q_snapshot_count=11,
         tensorboard=False,
         keep_plots=False,
     )
@@ -198,10 +243,35 @@ def test_evaluation_command_defaults_to_all_validation_tasks(tmp_path):
         trial_seed=17,
     )
 
-    assert "--all-tasks" in command
+    assert "--all-tasks" not in command
     assert "--episodes" not in command
     assert "--evaluation-output" in command
     assert "--no-plot" in command
+    assert "--no-rollout-animations" in command
+
+
+def test_evaluation_command_passes_sampled_episode_count(tmp_path):
+    args = SimpleNamespace(
+        algorithm="ppo",
+        max_steps=9,
+        eval_all_tasks=False,
+        eval_episodes=5,
+        keep_plots=False,
+    )
+
+    command = build_evaluation_command(
+        args=args,
+        checkpoint_path=tmp_path / "checkpoint.pt",
+        validation_dataset=tmp_path / "validation.npz",
+        evaluation_path=tmp_path / "evaluation.csv",
+        trial_seed=17,
+    )
+
+    assert "--all-tasks" not in command
+    assert command[
+        command.index("--episodes") + 1
+    ] == "5"
+    assert "--no-rollout-animations" in command
 
 
 def test_summarize_evaluation_uses_mean_path_efficiency(tmp_path):
