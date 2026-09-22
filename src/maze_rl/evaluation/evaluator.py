@@ -7,6 +7,36 @@ import torch
 from torch.distributions import Categorical
 
 
+def greedy_action_from_scores(
+    scores: torch.Tensor,
+    action_count: int,
+) -> int:
+    expected_shape = (1, action_count)
+
+    if tuple(scores.shape) != expected_shape:
+        raise ValueError(
+            "Expected neural policy scores with shape "
+            f"{expected_shape}, got {tuple(scores.shape)}."
+        )
+
+    if not torch.isfinite(scores).all():
+        raise ValueError(
+            "Neural policy produced non-finite action scores."
+        )
+
+    action_scores = (
+        scores.squeeze(0)
+        .detach()
+        .cpu()
+        .tolist()
+    )
+
+    return max(
+        range(action_count),
+        key=action_scores.__getitem__,
+    )
+
+
 def choose_greedy_action(
     algorithm,
     agent,
@@ -36,10 +66,9 @@ def choose_greedy_action(
                 observation_tensor
             )
 
-            return int(
-                values.argmax(
-                    dim=1
-                ).item()
+            return greedy_action_from_scores(
+                values,
+                env.action_space.n,
             )
 
         if algorithm in {
@@ -55,10 +84,9 @@ def choose_greedy_action(
                 observation_tensor
             )
 
-        return int(
-            logits.argmax(
-                dim=1
-            ).item()
+        return greedy_action_from_scores(
+            logits,
+            env.action_space.n,
         )
 
 

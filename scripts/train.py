@@ -385,6 +385,11 @@ def parse_args():
         action="store_true",
         help="Skip training plot generation.",
     )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Skip periodic per-rollout progress messages.",
+    )
 
     parser.add_argument(
         "--task-plot-output",
@@ -1085,6 +1090,26 @@ def format_progress_message(
             f" epsilon="
             f"{agent.epsilon:.3f}"
         )
+
+    return message
+
+
+def format_validation_progress_message(
+    split: str,
+    dataset_epoch: int,
+    task_selection_pass_budget: int,
+    validation_score: float,
+    best_score: float | None = None,
+) -> str:
+    message = (
+        f"{split} task_selection_pass="
+        f"{dataset_epoch:5d}/{task_selection_pass_budget} "
+        f"({dataset_epoch / task_selection_pass_budget:.0%}) "
+        f"mean_path_efficiency={validation_score:.3f}"
+    )
+
+    if best_score is not None:
+        message += f" (best={best_score:.3f})"
 
     return message
 
@@ -1863,7 +1888,10 @@ def main():
         nonlocal validation_has_positive_score
         nonlocal validation_checks_without_improvement
 
-        if dataset_epoch % 100 == 0:
+        if (
+            dataset_epoch % 100 == 0
+            and not args.no_progress
+        ):
             for metrics in sorted(
                 epoch_metrics,
                 key=lambda item: item.task_index,
@@ -1977,10 +2005,12 @@ def main():
 
                 if split != "validation":
                     print(
-                        f"{split} task_selection_pass="
-                        f"{dataset_epoch:5d}/{task_selection_pass_budget} "
-                        f"({dataset_epoch / task_selection_pass_budget:.0%}) "
-                        f"mean_path_efficiency={validation_score:.3f}"
+                        format_validation_progress_message(
+                            split,
+                            dataset_epoch,
+                            task_selection_pass_budget,
+                            validation_score,
+                        )
                     )
                     continue
 
@@ -2014,12 +2044,15 @@ def main():
                     validation_checks_without_improvement += 1
 
                 print(
-                    f"validation task_selection_pass="
-                    f"{dataset_epoch:5d}/{task_selection_pass_budget} "
-                    f"({dataset_epoch / task_selection_pass_budget:.0%}) "
-                    f"mean_path_efficiency={validation_score:.3f} "
-                    f"best="
-                    f"{best_validation['mean_path_efficiency']:.3f}"
+                    format_validation_progress_message(
+                        "validation",
+                        dataset_epoch,
+                        task_selection_pass_budget,
+                        validation_score,
+                        best_validation[
+                            "mean_path_efficiency"
+                        ],
+                    )
                 )
 
             if (
