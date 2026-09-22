@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
+import torch
 
-from maze_rl.evaluation.evaluator import evaluate
+from maze_rl.evaluation.evaluator import (
+    choose_greedy_action,
+    evaluate,
+    greedy_action_from_scores,
+)
 
 
 class OneStepEnv:
@@ -70,6 +76,28 @@ class GreedyAgent:
         explore=True,
     ):
         return 0
+
+
+class NeuralActionEnv(OneStepEnv):
+    class ActionSpace:
+        n = 4
+
+    action_space = ActionSpace()
+
+
+class DQNGreedyAgent:
+    device = "cpu"
+
+    class Network:
+        def __call__(self, observation):
+            del observation
+
+            return torch.tensor(
+                [[0.1, 0.4, 0.3, 0.2]],
+                dtype=torch.float32,
+            )
+
+    online_network = Network()
 
 
 def task_indices(results):
@@ -187,3 +215,36 @@ def test_evaluate_reports_mean_path_efficiency_over_all_tasks():
         ]
         == 1.0
     )
+
+
+def test_choose_greedy_action_returns_bounded_dqn_action():
+    action = choose_greedy_action(
+        "dqn",
+        DQNGreedyAgent(),
+        NeuralActionEnv(),
+        np.zeros((3, 1, 1), dtype=np.float32),
+    )
+
+    assert action == 1
+
+
+def test_greedy_action_from_scores_rejects_malformed_shape():
+    with pytest.raises(
+        ValueError,
+        match="Expected neural policy scores",
+    ):
+        greedy_action_from_scores(
+            torch.zeros((1, 4, 1)),
+            4,
+        )
+
+
+def test_greedy_action_from_scores_rejects_non_finite_scores():
+    with pytest.raises(
+        ValueError,
+        match="non-finite",
+    ):
+        greedy_action_from_scores(
+            torch.tensor([[0.0, float("nan")]]),
+            2,
+        )

@@ -36,12 +36,14 @@ from scripts.open_tensorboard import (
 from scripts.train import (
     HierarchicalTaskSampler,
     configure_reproducibility,
+    format_validation_progress_message,
     log_tensorboard_episode,
     log_tensorboard_epoch,
     log_tensorboard_optimization_epoch,
     log_tensorboard_training_round,
     neural_hyperparameters_from_args,
     optimization_epochs_for_round,
+    parse_args as parse_train_args,
     rollout_group_size_for_algorithm,
     should_validate_epoch,
     should_stop_early,
@@ -479,6 +481,51 @@ def test_legacy_dataset_split_flags_still_parse(monkeypatch):
     assert args.train_mazes == 3
     assert args.validation_mazes == 2
     assert args.test_mazes == 1
+
+
+def test_training_progress_messages_enabled_by_default(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "dqn",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.no_progress is False
+
+
+def test_training_accepts_no_progress(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "dqn",
+            "--no-progress",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.no_progress is True
+
+
+def test_validation_progress_formats_best_in_parentheses():
+    assert (
+        format_validation_progress_message(
+            "validation",
+            dataset_epoch=103,
+            task_selection_pass_budget=200,
+            validation_score=0.419,
+            best_score=0.439,
+        )
+        == "validation task_selection_pass=  103/200 "
+        "(52%) mean_path_efficiency=0.419 (best=0.439)"
+    )
 
 
 def test_same_layout_dataset_matches_validation_size(monkeypatch, tmp_path):

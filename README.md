@@ -54,6 +54,10 @@ Training writes `metrics.csv`, a `checkpoint.pkl` for tabular algorithms or
 `checkpoint.pt` for neural algorithms, and this plot automatically at the end of
 each run. Existing `metrics.csv` files are replaced by default; pass `--resume`
 to append to an existing metrics file.
+Training prints periodic per-rollout progress messages by default; pass
+`--no-progress` to hide those messages. Hyperparameter tuning passes
+`--no-progress` automatically so tuning output focuses on combination and
+validation summaries.
 
 Training enables deterministic Torch algorithms, disables cuDNN benchmarking and
 TF32, and configures cuBLAS workspace determinism before importing Torch. This
@@ -168,33 +172,61 @@ python scripts/tune_dnn.py --algorithm ppo
 ```
 
 By default, the tuner reads `data/train.npz`, `data/validation.npz`, and
-`data/same_layout_new_goals.npz`, runs 60 trials with a 200 rollouts-per-task
-maximum budget per trial, trains each trial under `runs/tuning/trials`,
-evaluates every validation task, writes TensorBoard logs, appends
-`runs/tuning/tuning_results.csv`, and writes the current best trial to
-`runs/tuning/best_config.json`. Pass
+`data/same_layout_new_goals.npz`, samples 100 hyperparameter combinations with
+a 200 rollouts-per-task maximum budget per combination, stores per-combination
+trial directories under `runs/tuning/trials`, evaluates every validation task,
+appends `runs/tuning/tuning_results.csv`, and writes the current best
+combination to `runs/tuning/best_config.json`. Pass `--tensorboard` to write
+per-combination TensorBoard event logs during tuning. It also writes
+`runs/tuning/tuning_configs/<algorithm>.json`, which records each algorithm's
+tuning arguments and effective search space for controlled resumes. Pass
+`--hyperparameter-combinations` to change the number of sampled combinations,
+or pass
 `--search-space path/to/search_space.json` to override the default search space.
+If a sweep is interrupted, rerun the same command with `--resume` to skip
+completed hyperparameter combinations recorded in `tuning_results.csv`, recover
+finished combination directories that were interrupted before their result row
+was appended, and rerun only incomplete combinations with the same sampled seed
+and hyperparameters. When `--resume` finds the algorithm's stored tuning config,
+it ignores new conflicting tuning arguments and continues with the stored
+arguments, including the combination count, rollout budget, datasets, seed,
+validation settings, and search space. If tuning history exists for that
+algorithm without a stored config, resume stops instead of guessing the old
+arguments.
 
-Keep `--rollouts-per-task` as the training budget for comparable trials.
+Keep `--rollouts-per-task` as the training budget for comparable combinations.
 Increasing it usually improves final performance but also changes compute cost,
 so it is best treated as a generous fixed maximum budget for the sweep. The
 tuner asks training to evaluate validation mean path efficiency every
 `--validation-interval` internal task-selection passes, also evaluates
-`--same-layout-dataset` when provided, saves each trial's `best_checkpoint.pt`,
-and uses the best validation-layout checkpoint for trial selection. The ordinary
-`checkpoint.pt` remains the final training state.
+`--same-layout-dataset` when provided, saves each combination's
+`best_checkpoint.pt`, and uses the best validation-layout checkpoint for
+combination selection. The ordinary `checkpoint.pt` remains the final training
+state.
 
 Training writes `validation_metrics.png` beside `validation_metrics.csv`; the
 plot overlays validation-layout performance with same-layout new-task
 performance when both splits are available. Tuning and training progress logs
-show trial percentages and task-selection-pass percentages at validation checks.
+show combination percentages and task-selection-pass percentages at validation
+checks.
+
+Summarize completed DNN sweeps across agents with:
+
+```bash
+python scripts/tune_dnn.py summarize --output-dir runs/tuning
+```
+
+The command writes `runs/tuning/summary_plots/mean_path_efficiency_heatmap.png`
+for best validation and same-layout performance across trials, plus one
+`<algorithm>_validation_metrics_trials.png` grid per neural agent containing
+that agent's per-trial `validation_metrics.png` plots.
 
 Early stopping defaults to `--early-stopping-patience 35` with
 `--early-stopping-min-delta 0.0`, and the same stopping rule applies to every
-trial. Because patience and maximum budget can interact with learning rate and
-other dynamics, inspect `validation_metrics.csv` and
-`training_summary.json` after a sweep to check whether the selected trial was
-limited by the stopping rule or by the maximum budget. Use
+combination. Because patience and maximum budget can interact with learning
+rate and other dynamics, inspect `validation_metrics.csv` and
+`training_summary.json` after a sweep to check whether the selected combination
+was limited by the stopping rule or by the maximum budget. Use
 `--evaluate-best-on-test` only after tuning to score the best
 validation-selected checkpoint on `--test-dataset`.
 
