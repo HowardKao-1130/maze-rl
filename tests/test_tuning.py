@@ -1676,6 +1676,77 @@ def test_build_result_from_artifacts_treats_empty_evaluation_as_incomplete(
     assert result is None
 
 
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        "dataset_epochs_completed",
+        "stopped_early",
+    ],
+)
+def test_build_result_from_artifacts_treats_partial_summary_as_incomplete(
+    tmp_path,
+    missing_field,
+):
+    run_dir = tmp_path / "trial_001" / "ppo"
+    run_dir.mkdir(
+        parents=True,
+    )
+    checkpoint_path = run_dir / "checkpoint.pt"
+    best_checkpoint_path = run_dir / "best_checkpoint.pt"
+    training_summary_path = (
+        run_dir / "training_summary.json"
+    )
+    evaluation_path = (
+        run_dir / "validation_evaluation.csv"
+    )
+    checkpoint_path.write_bytes(b"checkpoint")
+    best_checkpoint_path.write_bytes(
+        b"best checkpoint"
+    )
+    training_summary = {
+        "algorithm": "ppo",
+        "task_batch_size": 4,
+        "rollout_group_size": 1,
+        "dataset_epochs_completed": 2,
+        "stopped_early": False,
+        "best_validation": {
+            "mean_path_efficiency": 0.75,
+            "success_rate": 1.0,
+            "average_episode_return": 2.0,
+            "average_successful_path_efficiency": 0.75,
+        },
+    }
+    training_summary.pop(
+        missing_field,
+    )
+    training_summary_path.write_text(
+        json.dumps(
+            training_summary,
+        )
+    )
+    evaluation_path.write_text(
+        (
+            "episode_return,success,path_efficiency\n"
+            "2.0,True,0.75\n"
+        )
+    )
+    args = SimpleNamespace(
+        algorithm="ppo",
+    )
+
+    result = build_result_from_artifacts(
+        args=args,
+        trial=1,
+        trial_seed=11,
+        checkpoint_path=checkpoint_path,
+        best_checkpoint_path=best_checkpoint_path,
+        training_summary_path=training_summary_path,
+        evaluation_path=evaluation_path,
+    )
+
+    assert result is None
+
+
 def test_build_result_from_artifacts_rejects_stale_completion_marker(tmp_path):
     run_dir = tmp_path / "trial_001" / "dqn"
     run_dir.mkdir(

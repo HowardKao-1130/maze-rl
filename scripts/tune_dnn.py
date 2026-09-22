@@ -1759,7 +1759,10 @@ def build_result_from_artifacts(
     except (OSError, json.JSONDecodeError):
         return None
 
-    if "best_validation" not in training_summary:
+    if not isinstance(
+        training_summary,
+        dict,
+    ) or "best_validation" not in training_summary:
         return None
 
     try:
@@ -1774,42 +1777,72 @@ def build_result_from_artifacts(
         ValueError,
     ):
         return None
-    best_validation = training_summary[
-        "best_validation"
-    ]
-    objective = best_validation[
-        "mean_path_efficiency"
-    ]
-    result_hyperparameters = {
-        **training_summary.get(
+
+    try:
+        best_validation = training_summary[
+            "best_validation"
+        ]
+        if not isinstance(
+            best_validation,
+            dict,
+        ):
+            return None
+        objective = best_validation[
+            "mean_path_efficiency"
+        ]
+        success_rate = best_validation[
+            "success_rate"
+        ]
+        average_episode_return = best_validation[
+            "average_episode_return"
+        ]
+        average_successful_path_efficiency = (
+            best_validation[
+                "average_successful_path_efficiency"
+            ]
+        )
+        dataset_epochs_completed = training_summary[
+            "dataset_epochs_completed"
+        ]
+        stopped_early = training_summary[
+            "stopped_early"
+        ]
+        task_selection_passes_completed = (
+            training_summary.get(
+                "task_selection_passes_completed",
+                dataset_epochs_completed,
+            )
+        )
+        hyperparameters = training_summary.get(
             "hyperparameters",
             {},
-        ),
-        "task_batch_size": training_summary.get(
-            "task_batch_size"
-        ),
-        "rollout_group_size": training_summary.get(
-            "rollout_group_size"
-        ),
-    }
+        )
+        result_hyperparameters = {
+            **hyperparameters,
+            "task_batch_size": training_summary.get(
+                "task_batch_size"
+            ),
+            "rollout_group_size": training_summary.get(
+                "rollout_group_size"
+            ),
+        }
+    except (
+        KeyError,
+        TypeError,
+    ):
+        return None
 
     return {
         "trial": trial,
         "algorithm": args.algorithm,
         "seed": trial_seed,
         "objective": objective,
-        "mean_path_efficiency": best_validation[
-            "mean_path_efficiency"
-        ],
-        "success_rate": best_validation[
-            "success_rate"
-        ],
-        "average_episode_return": best_validation[
-            "average_episode_return"
-        ],
-        "average_successful_path_efficiency": best_validation[
-            "average_successful_path_efficiency"
-        ],
+        "mean_path_efficiency": objective,
+        "success_rate": success_rate,
+        "average_episode_return": average_episode_return,
+        "average_successful_path_efficiency": (
+            average_successful_path_efficiency
+        ),
         "rollouts_per_task_requested": (
             training_summary.get(
                 "rollouts_per_task_requested"
@@ -1827,21 +1860,12 @@ def build_result_from_artifacts(
             )
         ),
         "task_selection_passes_completed": (
-            training_summary.get(
-                "task_selection_passes_completed",
-                training_summary[
-                    "dataset_epochs_completed"
-                ],
-            )
+            task_selection_passes_completed
         ),
         "dataset_epochs_completed": (
-            training_summary[
-                "dataset_epochs_completed"
-            ]
+            dataset_epochs_completed
         ),
-        "stopped_early": training_summary[
-            "stopped_early"
-        ],
+        "stopped_early": stopped_early,
         "checkpoint_path": str(
             selected_checkpoint_path
         ),
