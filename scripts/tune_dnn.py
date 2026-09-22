@@ -1752,16 +1752,28 @@ def build_result_from_artifacts(
     ):
         return None
 
-    training_summary = read_training_summary(
-        training_summary_path
-    )
+    try:
+        training_summary = read_training_summary(
+            training_summary_path
+        )
+    except (OSError, json.JSONDecodeError):
+        return None
 
     if "best_validation" not in training_summary:
         return None
 
-    summarize_evaluation(
-        evaluation_path
-    )
+    try:
+        summarize_evaluation(
+            evaluation_path
+        )
+    except (
+        OSError,
+        RuntimeError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        return None
     best_validation = training_summary[
         "best_validation"
     ]

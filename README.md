@@ -175,8 +175,9 @@ By default, the tuner reads `data/train.npz`, `data/validation.npz`, and
 `data/same_layout_new_goals.npz`, samples 100 hyperparameter combinations with
 a 200 rollouts-per-task maximum budget per combination, stores per-combination
 trial directories under `runs/tuning/trials`, evaluates every validation task,
-writes TensorBoard logs, appends `runs/tuning/tuning_results.csv`, and writes
-the current best combination to `runs/tuning/best_config.json`. It also writes
+appends `runs/tuning/tuning_results.csv`, and writes the current best
+combination to `runs/tuning/best_config.json`. Pass `--tensorboard` to write
+per-combination TensorBoard event logs during tuning. It also writes
 `runs/tuning/tuning_configs/<algorithm>.json`, which records each algorithm's
 tuning arguments and effective search space for controlled resumes. Pass
 `--hyperparameter-combinations` to change the number of sampled combinations,
