@@ -14,17 +14,22 @@ from scripts.tune_dnn import (
     DEFAULT_SEARCH_SPACES,
     REPO_ROOT,
     _terminate_child_process,
+    aligned_training_metric_series,
     apply_tuning_config,
+    artifact_title_score_text,
+    best_performing_trials,
     best_config_path_for_algorithm,
     build_evaluation_command,
     build_result_from_artifacts,
     build_training_command,
     collect_heatmap_cells,
+    collect_parallel_coordinate_trials,
     discover_validation_metric_artifacts,
     load_search_space,
     main,
     ordered_search_space,
     parse_args,
+    plot_validation_metric_montage,
     read_completed_results,
     result_matches_trial,
     run_command,
@@ -1125,6 +1130,11 @@ def write_fake_validation_artifacts(
     *,
     validation_score,
     same_layout_score,
+    training_score=None,
+    hyperparameters=None,
+    task_batch_size=4,
+    rollout_group_size=2,
+    write_training_plot=True,
 ):
     run_dir.mkdir(
         parents=True,
@@ -1167,8 +1177,62 @@ def write_fake_validation_artifacts(
     )
     plt.close(figure)
 
+    if hyperparameters is not None:
+        (
+            run_dir / "training_summary.json"
+        ).write_text(
+            json.dumps(
+                {
+                    "hyperparameters": hyperparameters,
+                    "task_batch_size": task_batch_size,
+                    "rollout_group_size": rollout_group_size,
+                }
+            )
+        )
 
-def test_summarize_tuning_writes_heatmap_and_trial_grids(tmp_path):
+    if training_score is None:
+        return
+
+    (
+        run_dir / "metrics.csv"
+    ).write_text(
+        (
+            "episode,epoch,task_index,layout_index,"
+            "episode_return,steps,internal_updates,success,"
+            "wall_collisions,optimal_path_length,"
+            "path_efficiency\n"
+            "1,1,0,0,1.0,4,,True,0,4,"
+            f"{training_score - 0.1}\n"
+            "2,1,1,0,1.0,4,,True,0,4,"
+            f"{training_score}\n"
+            "3,2,0,0,1.0,4,,True,0,4,"
+            f"{training_score - 0.2}\n"
+        )
+    )
+
+    if not write_training_plot:
+        return
+
+    figure, axis = plt.subplots(
+        figsize=(1.0, 1.0)
+    )
+    axis.plot(
+        [0, 1],
+        [
+            0,
+            training_score,
+        ],
+    )
+    axis.axis("off")
+    figure.savefig(
+        run_dir / "training_metrics.png"
+    )
+    plt.close(figure)
+
+
+def test_summarize_tuning_writes_heatmap_trial_grids_and_parallel_coordinates(
+    tmp_path,
+):
     output_dir = tmp_path / "tuning"
     write_fake_validation_artifacts(
         output_dir
@@ -1177,6 +1241,13 @@ def test_summarize_tuning_writes_heatmap_and_trial_grids(tmp_path):
         / "dqn",
         validation_score=0.25,
         same_layout_score=0.2,
+        training_score=0.45,
+        hyperparameters={
+            "learning_rate": 0.001,
+            "gamma": 0.95,
+            "batch_size": 32,
+        },
+        write_training_plot=False,
     )
     write_fake_validation_artifacts(
         output_dir
@@ -1185,6 +1256,11 @@ def test_summarize_tuning_writes_heatmap_and_trial_grids(tmp_path):
         / "dqn",
         validation_score=0.5,
         same_layout_score=0.4,
+        hyperparameters={
+            "learning_rate": 0.0001,
+            "gamma": 0.99,
+            "batch_size": 64,
+        },
     )
     write_fake_validation_artifacts(
         output_dir
@@ -1193,6 +1269,11 @@ def test_summarize_tuning_writes_heatmap_and_trial_grids(tmp_path):
         / "ppo",
         validation_score=0.75,
         same_layout_score=0.7,
+        hyperparameters={
+            "learning_rate": 0.0003,
+            "gamma": 0.98,
+            "clip_ratio": 0.2,
+        },
     )
     summary_output_dir = (
         tmp_path / "summary"
@@ -1217,6 +1298,21 @@ def test_summarize_tuning_writes_heatmap_and_trial_grids(tmp_path):
     assert (
         summary_output_dir
         / "ppo_validation_metrics_trials.png"
+    ).exists()
+    assert (
+        summary_output_dir
+        / "dqn_mean_path_efficiency_parallel_coordinates.png"
+    ).exists()
+    assert (
+        summary_output_dir
+        / "ppo_mean_path_efficiency_parallel_coordinates.png"
+    ).exists()
+    assert not (
+        output_dir
+        / "trials"
+        / "trial_001"
+        / "dqn"
+        / "training_metrics.png"
     ).exists()
 
     artifacts = discover_validation_metric_artifacts(
@@ -1273,6 +1369,398 @@ def test_summarize_tuning_writes_heatmap_and_trial_grids(tmp_path):
             0.7,
         ),
     }
+
+    dqn_trial = next(
+        artifact
+        for artifact in artifacts
+        if artifact["algorithm"] == "dqn"
+        and artifact["trial"] == 1
+    )
+
+    assert artifact_title_score_text(
+        dqn_trial,
+        metric="mean_path_efficiency",
+    ) == "v 0.25  s 0.20  t 0.40"
+
+    parallel_trials = collect_parallel_coordinate_trials(
+        artifacts,
+        metric="mean_path_efficiency",
+    )
+
+    assert {
+        (
+            trial["algorithm"],
+            trial["trial"],
+            trial["score"],
+            trial["hyperparameters"][
+                "task_batch_size"
+            ],
+            trial["hyperparameters"][
+                "rollout_group_size"
+            ],
+        )
+        for trial in parallel_trials
+    } == {
+        (
+            "dqn",
+            1,
+            0.25,
+            4.0,
+            2.0,
+        ),
+        (
+            "dqn",
+            2,
+            0.5,
+            4.0,
+            2.0,
+        ),
+        (
+            "ppo",
+            1,
+            0.75,
+            4.0,
+            2.0,
+        ),
+    }
+
+
+def test_aligned_training_metric_series_uses_validation_epochs(tmp_path):
+    run_dir = (
+        tmp_path
+        / "tuning"
+        / "trials"
+        / "trial_001"
+        / "dqn"
+    )
+    write_fake_validation_artifacts(
+        run_dir,
+        validation_score=0.25,
+        same_layout_score=0.2,
+        training_score=0.45,
+        write_training_plot=False,
+    )
+
+    assert aligned_training_metric_series(
+        run_dir / "metrics.csv",
+        metric="mean_path_efficiency",
+        aligned_epochs={1},
+    ) == [
+        (
+            1,
+            0.4,
+        )
+    ]
+
+
+def test_best_performing_trials_marks_validation_metric_ties(tmp_path):
+    output_dir = tmp_path / "tuning"
+    write_fake_validation_artifacts(
+        output_dir
+        / "trials"
+        / "trial_001"
+        / "dqn",
+        validation_score=0.5,
+        same_layout_score=0.9,
+    )
+    write_fake_validation_artifacts(
+        output_dir
+        / "trials"
+        / "trial_002"
+        / "dqn",
+        validation_score=0.7,
+        same_layout_score=0.6,
+    )
+    write_fake_validation_artifacts(
+        output_dir
+        / "trials"
+        / "trial_003"
+        / "dqn",
+        validation_score=0.7,
+        same_layout_score=0.4,
+    )
+
+    artifacts = [
+        artifact
+        for artifact in discover_validation_metric_artifacts(
+            output_dir
+        )
+        if artifact["algorithm"] == "dqn"
+    ]
+
+    assert best_performing_trials(
+        artifacts,
+        metric="mean_path_efficiency",
+    ) == {
+        2,
+        3,
+    }
+
+
+def test_summarize_tuning_removes_stale_paginated_trial_grids(tmp_path):
+    output_dir = tmp_path / "tuning"
+
+    for trial_number in range(1, 6):
+        write_fake_validation_artifacts(
+            output_dir
+            / "trials"
+            / f"trial_{trial_number:03d}"
+            / "ppo",
+            validation_score=trial_number / 10,
+            same_layout_score=trial_number / 20,
+        )
+
+    summary_output_dir = (
+        tmp_path / "summary"
+    )
+    summary_output_dir.mkdir()
+    (
+        summary_output_dir
+        / "ppo_validation_metrics_trials_page_02.png"
+    ).write_bytes(b"stale")
+
+    summarize_tuning(
+        SimpleNamespace(
+            output_dir=output_dir,
+            summary_output_dir=summary_output_dir,
+            metric="mean_path_efficiency",
+        )
+    )
+
+    assert (
+        summary_output_dir
+        / "ppo_validation_metrics_trials.png"
+    ).exists()
+    assert not (
+        summary_output_dir
+        / "ppo_validation_metrics_trials_page_02.png"
+    ).exists()
+
+
+def test_validation_metric_montage_uses_single_5_by_4_sheet_for_twenty_trials(
+    tmp_path,
+    monkeypatch,
+):
+    output_dir = tmp_path / "tuning"
+
+    for trial_number in range(1, 21):
+        write_fake_validation_artifacts(
+            output_dir
+            / "trials"
+            / f"trial_{trial_number:03d}"
+            / "ppo",
+            validation_score=trial_number / 100,
+            same_layout_score=trial_number / 200,
+        )
+
+    artifacts = discover_validation_metric_artifacts(
+        output_dir
+    )
+    output_path = (
+        tmp_path
+        / "summary"
+        / "ppo_validation_metrics_trials.png"
+    )
+    saved_figures = []
+
+    import matplotlib.figure
+
+    def fake_savefig(
+        self,
+        path,
+        *args,
+        **kwargs,
+    ):
+        saved_figures.append(
+            {
+                "path": path,
+                "size_inches": tuple(
+                    self.get_size_inches()
+                ),
+                "dpi": kwargs.get("dpi"),
+                "axis_count": len(self.axes),
+            }
+        )
+
+    monkeypatch.setattr(
+        matplotlib.figure.Figure,
+        "savefig",
+        fake_savefig,
+    )
+
+    assert plot_validation_metric_montage(
+        artifacts,
+        algorithm="ppo",
+        metric="mean_path_efficiency",
+        output_path=output_path,
+    ) == 20
+
+    assert saved_figures == [
+        {
+            "path": output_path,
+            "size_inches": pytest.approx(
+                (
+                    35.0,
+                    25.6,
+                )
+            ),
+            "dpi": 240,
+            "axis_count": 20,
+        }
+    ]
+
+
+def test_validation_metric_montage_reports_filled_trial_slots(
+    tmp_path,
+    monkeypatch,
+):
+    output_dir = tmp_path / "tuning"
+
+    for trial_number in range(1, 4):
+        write_fake_validation_artifacts(
+            output_dir
+            / "trials"
+            / f"trial_{trial_number:03d}"
+            / "ppo",
+            validation_score=trial_number / 100,
+            same_layout_score=trial_number / 200,
+        )
+
+    artifacts = discover_validation_metric_artifacts(
+        output_dir
+    )
+    saved_figures = []
+
+    import matplotlib.figure
+
+    def fake_savefig(
+        self,
+        path,
+        *args,
+        **kwargs,
+    ):
+        saved_figures.append(
+            {
+                "axis_count": len(self.axes),
+                "visible_axes": sum(
+                    axis.axison
+                    for axis in self.axes
+                ),
+            }
+        )
+
+    monkeypatch.setattr(
+        matplotlib.figure.Figure,
+        "savefig",
+        fake_savefig,
+    )
+
+    assert plot_validation_metric_montage(
+        artifacts,
+        algorithm="ppo",
+        metric="mean_path_efficiency",
+        output_path=(
+            tmp_path
+            / "summary"
+            / "ppo_validation_metrics_trials.png"
+        ),
+    ) == 3
+
+    assert saved_figures == [
+        {
+            "axis_count": 20,
+            "visible_axes": 20,
+        }
+    ]
+
+
+def test_validation_metric_montage_expands_low_bounded_trial_scale(
+    tmp_path,
+    monkeypatch,
+):
+    output_dir = tmp_path / "tuning"
+    write_fake_validation_artifacts(
+        output_dir
+        / "trials"
+        / "trial_001"
+        / "ppo",
+        validation_score=0.02,
+        same_layout_score=0.03,
+        training_score=0.04,
+    )
+
+    artifacts = discover_validation_metric_artifacts(
+        output_dir
+    )
+    saved_figures = []
+
+    import matplotlib.figure
+
+    def fake_savefig(
+        self,
+        path,
+        *args,
+        **kwargs,
+    ):
+        saved_figures.append(
+            {
+                "first_ylim": self.axes[0].get_ylim(),
+            }
+        )
+
+    monkeypatch.setattr(
+        matplotlib.figure.Figure,
+        "savefig",
+        fake_savefig,
+    )
+
+    assert plot_validation_metric_montage(
+        artifacts,
+        algorithm="ppo",
+        metric="mean_path_efficiency",
+        output_path=(
+            tmp_path
+            / "summary"
+            / "ppo_validation_metrics_trials.png"
+        ),
+    ) == 1
+
+    assert saved_figures[0]["first_ylim"][1] < 0.2
+
+
+def test_validation_metric_montage_rejects_more_than_twenty_trials(
+    tmp_path,
+):
+    output_dir = tmp_path / "tuning"
+
+    for trial_number in range(1, 22):
+        write_fake_validation_artifacts(
+            output_dir
+            / "trials"
+            / f"trial_{trial_number:03d}"
+            / "ppo",
+            validation_score=trial_number / 100,
+            same_layout_score=trial_number / 200,
+        )
+
+    artifacts = discover_validation_metric_artifacts(
+        output_dir
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="at most 20 trials",
+    ):
+        plot_validation_metric_montage(
+            artifacts,
+            algorithm="ppo",
+            metric="mean_path_efficiency",
+            output_path=(
+                tmp_path
+                / "summary"
+                / "ppo_validation_metrics_trials.png"
+            ),
+        )
 
 
 def test_read_completed_results_requires_artifacts(tmp_path):
@@ -1507,6 +1995,110 @@ def test_read_completed_results_rejects_stale_completion_marker(tmp_path):
     )
 
     assert completed == {}
+
+
+def test_read_completed_results_ignores_newer_derived_artifacts(tmp_path):
+    results_path = tmp_path / "tuning_results.csv"
+    run_dir = tmp_path / "trial_001" / "dqn"
+    tensorboard_dir = run_dir / "tensorboard"
+    tensorboard_dir.mkdir(
+        parents=True,
+    )
+    checkpoint_path = run_dir / "checkpoint.pt"
+    evaluation_path = (
+        run_dir / "validation_evaluation.csv"
+    )
+    training_summary_path = (
+        run_dir / "training_summary.json"
+    )
+    metrics_path = run_dir / "metrics.csv"
+    training_plot_path = (
+        run_dir / "training_metrics.png"
+    )
+    validation_plot_path = (
+        run_dir / "validation_metrics.png"
+    )
+    tensorboard_path = (
+        tensorboard_dir / "events.out.tfevents.test"
+    )
+    checkpoint_path.write_bytes(b"checkpoint")
+    evaluation_path.write_text("episode_return,success,path_efficiency\n")
+    training_summary_path.write_text(
+        (
+            '{"hyperparameters": {"learning_rate": 0.001},'
+            '"task_batch_size": 1,'
+            '"rollout_group_size": 1,'
+            '"best_validation": {'
+            '"mean_path_efficiency": 0.5'
+            "}}"
+        )
+    )
+    metrics_path.write_text("episode_return\n")
+    training_plot_path.write_bytes(b"plot")
+    validation_plot_path.write_bytes(b"plot")
+    tensorboard_path.write_text("event")
+    os.utime(
+        checkpoint_path,
+        ns=(1_000, 1_000),
+    )
+    os.utime(
+        metrics_path,
+        ns=(2_000, 2_000),
+    )
+    os.utime(
+        training_summary_path,
+        ns=(3_000, 3_000),
+    )
+    os.utime(
+        evaluation_path,
+        ns=(4_000, 4_000),
+    )
+    os.utime(
+        training_plot_path,
+        ns=(5_000, 5_000),
+    )
+    os.utime(
+        validation_plot_path,
+        ns=(5_000, 5_000),
+    )
+    os.utime(
+        tensorboard_path,
+        ns=(5_000, 5_000),
+    )
+    write_result_row(
+        results_path,
+        {
+            "trial": 1,
+            "algorithm": "dqn",
+            "seed": 11,
+            "objective": 0.5,
+            "mean_path_efficiency": 0.5,
+            "success_rate": 1.0,
+            "average_episode_return": 2.0,
+            "average_successful_path_efficiency": 0.5,
+            "rollouts_per_task_requested": 3,
+            "task_batch_size": 1,
+            "rollout_group_size": 1,
+            "task_selection_passes_requested": 3,
+            "task_selection_passes_completed": 3,
+            "dataset_epochs_completed": 3,
+            "stopped_early": False,
+            "checkpoint_path": str(checkpoint_path),
+            "evaluation_path": str(evaluation_path),
+            "hyperparameters": {
+                "learning_rate": 0.001,
+                "task_batch_size": 1,
+                "rollout_group_size": 1,
+            },
+        },
+    )
+
+    completed = read_completed_results(
+        results_path,
+        "dqn",
+    )
+
+    assert list(completed) == [1]
 
 
 def test_build_result_from_artifacts_recovers_trial(tmp_path):

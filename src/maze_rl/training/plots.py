@@ -477,6 +477,13 @@ def metric_specs(
             "is_success": True,
         },
         {
+            "name": "path_efficiency",
+            "legacy_name": None,
+            "ylabel": "Path efficiency",
+            "label": "mean path efficiency",
+            "is_success": False,
+        },
+        {
             "name": "steps",
             "legacy_name": None,
             "ylabel": "Env steps per episode",

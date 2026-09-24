@@ -219,7 +219,17 @@ python scripts/tune_dnn.py summarize --output-dir runs/tuning
 The command writes `runs/tuning/summary_plots/mean_path_efficiency_heatmap.png`
 for best validation and same-layout performance across trials, plus one
 `<algorithm>_validation_metrics_trials.png` grid per neural agent containing
-that agent's per-trial `validation_metrics.png` plots.
+per-trial validation and same-layout validation curves overlaid with the
+matching epoch-aligned training curve when `metrics.csv` is available. Trial
+subplot titles show the best performance for the plotted curves, and the best
+validation score for that agent is highlighted, including ties. DNN summary
+grids use a single 5x4 sheet with extra row height so 20-trial sweeps fit in
+one readable overview, and bounded metrics use per-subplot y scales so
+low-scoring trials remain legible. It also writes
+`<algorithm>_mean_path_efficiency_parallel_coordinates.png` plots that place
+each trial's numeric hyperparameters and validation score on shared parallel
+axes, with better scores drawn in brighter colors and the best trial(s)
+emphasized.
 
 Early stopping defaults to `--early-stopping-patience 35` with
 `--early-stopping-min-delta 0.0`, and the same stopping rule applies to every
