@@ -98,7 +98,40 @@ SUMMARY_BOUNDED_METRICS = {
 SUMMARY_MONTAGE_COLUMNS = 5
 SUMMARY_MONTAGE_ROWS = 4
 SUMMARY_MONTAGE_AXIS_WIDTH = 7.0
-SUMMARY_MONTAGE_AXIS_HEIGHT = 6.4
+SUMMARY_MONTAGE_AXIS_HEIGHT = 7.2
+SUMMARY_MONTAGE_DPI = 160
+
+
+def rewrite_png_without_alpha(
+    path: Path,
+) -> None:
+    if not path.exists():
+        return
+
+    import imageio.v2 as imageio
+
+    image = imageio.imread(path)
+
+    if (
+        image.ndim != 3
+        or image.shape[-1] != 4
+        or image.dtype != np.uint8
+    ):
+        return
+
+    rgb = image[..., :3].astype(np.uint16)
+    alpha = image[..., 3:4].astype(np.uint16)
+    white = np.uint16(255)
+    composited = (
+        rgb * alpha
+        + white * (white - alpha)
+        + np.uint16(127)
+    ) // white
+    imageio.imwrite(
+        path,
+        composited.astype(np.uint8),
+    )
+
 
 DEFAULT_SEARCH_SPACES: dict[
     str,
@@ -3459,15 +3492,22 @@ def plot_validation_metric_montage(
             frameon=False,
             fontsize=22,
         )
-    figure.tight_layout(
-        rect=(0, 0, 1, 0.92),
-        h_pad=2.8,
-        w_pad=0.8,
+    figure.subplots_adjust(
+        left=0.045,
+        right=0.99,
+        bottom=0.04,
+        top=0.91,
+        hspace=0.22,
+        wspace=0.14,
     )
     figure.savefig(
         output_path,
-        dpi=240,
+        dpi=SUMMARY_MONTAGE_DPI,
+        facecolor="white",
+        edgecolor="white",
+        transparent=False,
     )
+    rewrite_png_without_alpha(output_path)
     plt.close(figure)
 
     return plot_count

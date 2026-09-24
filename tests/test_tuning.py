@@ -1299,6 +1299,12 @@ def test_summarize_tuning_writes_heatmap_trial_grids_and_parallel_coordinates(
         summary_output_dir
         / "ppo_validation_metrics_trials.png"
     ).exists()
+    import imageio.v2 as imageio
+
+    assert imageio.imread(
+        summary_output_dir
+        / "ppo_validation_metrics_trials.png"
+    ).shape[-1] == 3
     assert (
         summary_output_dir
         / "dqn_mean_path_efficiency_parallel_coordinates.png"
@@ -1578,6 +1584,13 @@ def test_validation_metric_montage_uses_single_5_by_4_sheet_for_twenty_trials(
                     self.get_size_inches()
                 ),
                 "dpi": kwargs.get("dpi"),
+                "pixel_size": tuple(
+                    round(
+                        size_in_inches
+                        * kwargs.get("dpi")
+                    )
+                    for size_in_inches in self.get_size_inches()
+                ),
                 "axis_count": len(self.axes),
             }
         )
@@ -1601,10 +1614,14 @@ def test_validation_metric_montage_uses_single_5_by_4_sheet_for_twenty_trials(
             "size_inches": pytest.approx(
                 (
                     35.0,
-                    25.6,
+                    28.8,
                 )
             ),
-            "dpi": 240,
+            "dpi": 160,
+            "pixel_size": (
+                5600,
+                4608,
+            ),
             "axis_count": 20,
         }
     ]
