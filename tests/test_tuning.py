@@ -1691,7 +1691,7 @@ def test_validation_metric_montage_reports_filled_trial_slots(
     ]
 
 
-def test_validation_metric_montage_expands_low_bounded_trial_scale(
+def test_validation_metric_montage_uses_fixed_bounded_trial_scale(
     tmp_path,
     monkeypatch,
 ):
@@ -1742,7 +1742,10 @@ def test_validation_metric_montage_expands_low_bounded_trial_scale(
         ),
     ) == 1
 
-    assert saved_figures[0]["first_ylim"][1] < 0.2
+    assert saved_figures[0]["first_ylim"] == (
+        0.0,
+        1.0,
+    )
 
 
 def test_validation_metric_montage_rejects_more_than_twenty_trials(

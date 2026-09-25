@@ -224,8 +224,8 @@ matching epoch-aligned training curve when `metrics.csv` is available. Trial
 subplot titles show the best performance for the plotted curves, and the best
 validation score for that agent is highlighted, including ties. DNN summary
 grids use a single 5x4 sheet with display-safe dimensions and extra row height
-so 20-trial sweeps fit in one readable overview, and bounded metrics use
-per-subplot y scales so low-scoring trials remain legible. It also writes
+so 20-trial sweeps fit in one readable overview, and bounded metrics use a
+fixed 0-to-1 y scale so trials remain directly comparable. It also writes
 `<algorithm>_mean_path_efficiency_parallel_coordinates.png` plots that place
 each trial's numeric hyperparameters and validation score on shared parallel
 axes, with better scores drawn in brighter colors and the best trial(s)

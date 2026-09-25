@@ -3259,46 +3259,9 @@ def set_summary_axis_y_limits(
     if metric not in SUMMARY_BOUNDED_METRICS:
         return
 
-    values = []
-
-    for line in axis.lines:
-        values.extend(
-            float(value)
-            for value in line.get_ydata()
-            if np.isfinite(value)
-        )
-
-    if not values:
-        axis.set_ylim(-0.05, 1.05)
-        return
-
-    minimum = min(values)
-    maximum = max(values)
-    upper = max(
-        0.1,
-        min(
-            1.05,
-            maximum * 1.12 + 0.02,
-        ),
-    )
-    lower = max(
-        -0.05,
-        min(
-            0.0,
-            minimum - (upper - minimum) * 0.05,
-        ),
-    )
-    if math.isclose(
-        lower,
-        upper,
-        rel_tol=1e-12,
-        abs_tol=1e-15,
-    ):
-        upper = lower + 0.1
-
     axis.set_ylim(
-        lower,
-        upper,
+        0.0,
+        1.0,
     )
 
 
