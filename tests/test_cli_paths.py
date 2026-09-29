@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import random
 from types import SimpleNamespace
 
 import numpy as np
@@ -41,6 +42,7 @@ from scripts.train import (
     format_training_epoch_progress_message,
     format_validation_progress_message,
     load_agent_training_state,
+    load_runtime_rng_state,
     load_training_state,
     log_tensorboard_episode,
     log_tensorboard_epoch,
@@ -1185,6 +1187,18 @@ def test_training_state_saves_atomically_and_loads(
     assert not path.with_suffix(
         ".pt.tmp"
     ).exists()
+
+
+def test_runtime_rng_restore_accepts_non_cpu_byte_tensor():
+    state = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state().to(
+            dtype=torch.int16
+        ),
+    }
+
+    load_runtime_rng_state(state)
 
 
 def test_training_state_metadata_rejects_changed_hyperparameters(

@@ -1212,19 +1212,51 @@ def runtime_rng_state_dict() -> dict:
     return state
 
 
+def torch_rng_state_tensor(
+    state,
+) -> torch.Tensor:
+    if isinstance(
+        state,
+        torch.Tensor,
+    ):
+        return (
+            state.detach()
+            .cpu()
+            .to(dtype=torch.uint8)
+            .contiguous()
+        )
+
+    return torch.as_tensor(
+        state,
+        dtype=torch.uint8,
+        device="cpu",
+    ).contiguous()
+
+
 def load_runtime_rng_state(
     state: dict,
 ) -> None:
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
-    torch.set_rng_state(state["torch"])
+    torch.set_rng_state(
+        torch_rng_state_tensor(
+            state["torch"]
+        )
+    )
 
     if (
         torch.cuda.is_available()
         and "torch_cuda" in state
     ):
         torch.cuda.set_rng_state_all(
-            state["torch_cuda"]
+            [
+                torch_rng_state_tensor(
+                    cuda_state
+                )
+                for cuda_state in state[
+                    "torch_cuda"
+                ]
+            ]
         )
 
 
