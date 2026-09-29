@@ -1231,12 +1231,16 @@ def load_runtime_rng_state(
 def training_state_metadata(
     *,
     args,
+    agent_hyperparameters: dict[str, float | int],
     task_selection_pass_budget: int,
     task_batch_size: int,
     rollout_group_size: int,
 ) -> dict:
     return {
         "algorithm": args.algorithm,
+        "agent_hyperparameters": dict(
+            agent_hyperparameters
+        ),
         "dataset": str(args.dataset),
         "fixed_index": args.fixed_index,
         "max_steps": args.max_steps,
@@ -2213,6 +2217,7 @@ def main():
     expected_training_state_metadata = (
         training_state_metadata(
             args=args,
+            agent_hyperparameters=agent_hyperparameters,
             task_selection_pass_budget=task_selection_pass_budget,
             task_batch_size=task_batch_size,
             rollout_group_size=rollout_group_size,

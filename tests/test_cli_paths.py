@@ -55,6 +55,8 @@ from scripts.train import (
     task_batch_size_for_algorithm,
     task_selection_passes_for_budget,
     tensorboard_default_enabled,
+    training_state_metadata,
+    validate_training_state_metadata,
     validate_neural_hyperparameters,
 )
 
@@ -1158,3 +1160,59 @@ def test_training_state_saves_atomically_and_loads(
     assert not path.with_suffix(
         ".pt.tmp"
     ).exists()
+
+
+def test_training_state_metadata_rejects_changed_hyperparameters(
+    tmp_path,
+):
+    args = SimpleNamespace(
+        algorithm="dqn",
+        dataset=tmp_path / "train.npz",
+        fixed_index=None,
+        max_steps=20,
+        seed=42,
+        rollouts_per_task=10,
+        validation_dataset=tmp_path / "validation.npz",
+        same_layout_dataset=None,
+        validation_interval=5,
+        validation_episodes=1,
+        validation_all_tasks=False,
+        early_stopping_patience=None,
+        early_stopping_min_delta=0.0,
+    )
+    metadata = training_state_metadata(
+        args=args,
+        agent_hyperparameters={
+            "learning_rate": 0.001,
+            "gamma": 0.95,
+            "batch_size": 32,
+        },
+        task_selection_pass_budget=10,
+        task_batch_size=1,
+        rollout_group_size=1,
+    )
+    changed_metadata = training_state_metadata(
+        args=args,
+        agent_hyperparameters={
+            "learning_rate": 0.001,
+            "gamma": 0.99,
+            "batch_size": 32,
+        },
+        task_selection_pass_budget=10,
+        task_batch_size=1,
+        rollout_group_size=1,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "Stored training state does not match the "
+            "requested training configuration"
+        ),
+    ):
+        validate_training_state_metadata(
+            {
+                "metadata": metadata,
+            },
+            changed_metadata,
+        )
