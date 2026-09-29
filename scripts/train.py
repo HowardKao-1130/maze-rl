@@ -1456,6 +1456,7 @@ def format_validation_progress_message(
     dataset_epoch: int,
     task_selection_pass_budget: int,
     validation_score: float,
+    success_rate: float | None = None,
     best_score: float | None = None,
 ) -> str:
     message = (
@@ -1465,10 +1466,62 @@ def format_validation_progress_message(
         f"mean_path_efficiency={validation_score:.3f}"
     )
 
+    if success_rate is not None:
+        message += f" success_rate={success_rate:.3f}"
+
     if best_score is not None:
         message += f" (best={best_score:.3f})"
 
     return message
+
+
+def format_training_epoch_progress_message(
+    dataset_epoch: int,
+    task_selection_pass_budget: int,
+    epoch_metrics,
+) -> str:
+    success_rate = float(
+        np.mean(
+            [
+                metrics.success
+                for metrics in epoch_metrics
+            ]
+        )
+    )
+    mean_path_efficiency = float(
+        np.mean(
+            [
+                metrics.path_efficiency
+                for metrics in epoch_metrics
+            ]
+        )
+    )
+    mean_return = float(
+        np.mean(
+            [
+                metrics.episode_return
+                for metrics in epoch_metrics
+            ]
+        )
+    )
+    mean_steps = float(
+        np.mean(
+            [
+                metrics.steps
+                for metrics in epoch_metrics
+            ]
+        )
+    )
+
+    return (
+        "train task_selection_pass="
+        f"{dataset_epoch:5d}/{task_selection_pass_budget} "
+        f"({dataset_epoch / task_selection_pass_budget:.0%}) "
+        f"mean_path_efficiency={mean_path_efficiency:.3f} "
+        f"success_rate={success_rate:.3f} "
+        f"mean_return={mean_return:.3f} "
+        f"mean_steps={mean_steps:.1f}"
+    )
 
 
 def create_tensorboard_writer(
@@ -2451,21 +2504,14 @@ def main():
         nonlocal validation_has_positive_score
         nonlocal validation_checks_without_improvement
 
-        if (
-            dataset_epoch % 100 == 0
-            and not args.no_progress
-        ):
-            for metrics in sorted(
-                epoch_metrics,
-                key=lambda item: item.task_index,
-            ):
-                print(
-                    format_progress_message(
-                        args.algorithm,
-                        metrics,
-                        agent,
-                    )
+        if not args.no_progress and epoch_metrics:
+            print(
+                format_training_epoch_progress_message(
+                    dataset_epoch,
+                    task_selection_pass_budget,
+                    epoch_metrics,
                 )
+            )
 
         log_tensorboard_epoch(
             tensorboard_writer,
@@ -2573,6 +2619,9 @@ def main():
                             dataset_epoch,
                             task_selection_pass_budget,
                             validation_score,
+                            success_rate=validation_row[
+                                "success_rate"
+                            ],
                         )
                     )
                     continue
@@ -2612,7 +2661,10 @@ def main():
                         dataset_epoch,
                         task_selection_pass_budget,
                         validation_score,
-                        best_validation[
+                        success_rate=validation_row[
+                            "success_rate"
+                        ],
+                        best_score=best_validation[
                             "mean_path_efficiency"
                         ],
                     )

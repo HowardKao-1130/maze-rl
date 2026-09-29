@@ -38,6 +38,7 @@ from scripts.train import (
     HierarchicalTaskSampler,
     agent_training_state_dict,
     configure_reproducibility,
+    format_training_epoch_progress_message,
     format_validation_progress_message,
     load_agent_training_state,
     load_training_state,
@@ -547,10 +548,34 @@ def test_validation_progress_formats_best_in_parentheses():
             dataset_epoch=103,
             task_selection_pass_budget=200,
             validation_score=0.419,
+            success_rate=0.625,
             best_score=0.439,
         )
         == "validation task_selection_pass=  103/200 "
-        "(52%) mean_path_efficiency=0.419 (best=0.439)"
+        "(52%) mean_path_efficiency=0.419 "
+        "success_rate=0.625 (best=0.439)"
+    )
+
+
+def test_training_epoch_progress_includes_success_and_efficiency():
+    assert (
+        format_training_epoch_progress_message(
+            dataset_epoch=2,
+            task_selection_pass_budget=4,
+            epoch_metrics=[
+                make_metrics(
+                    episode=1,
+                    epoch=2,
+                ),
+                make_metrics(
+                    episode=2,
+                    epoch=2,
+                ),
+            ],
+        )
+        == "train task_selection_pass=    2/4 (50%) "
+        "mean_path_efficiency=0.714 success_rate=1.000 "
+        "mean_return=1.500 mean_steps=7.0"
     )
 
 
