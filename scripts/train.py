@@ -1460,7 +1460,7 @@ def format_validation_progress_message(
     best_score: float | None = None,
 ) -> str:
     message = (
-        f"{split} task_selection_pass="
+        f"  {split} task_selection_pass="
         f"{dataset_epoch:5d}/{task_selection_pass_budget} "
         f"({dataset_epoch / task_selection_pass_budget:.0%}) "
         f"mean_path_efficiency={validation_score:.3f}"

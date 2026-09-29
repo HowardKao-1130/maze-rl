@@ -551,7 +551,7 @@ def test_validation_progress_formats_best_in_parentheses():
             success_rate=0.625,
             best_score=0.439,
         )
-        == "validation task_selection_pass=  103/200 "
+        == "  validation task_selection_pass=  103/200 "
         "(52%) mean_path_efficiency=0.419 "
         "success_rate=0.625 (best=0.439)"
     )
