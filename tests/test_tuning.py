@@ -22,6 +22,7 @@ from scripts.tune_dnn import (
     collect_heatmap_cells,
     discover_validation_metric_artifacts,
     load_search_space,
+    metric_series_by_split,
     main,
     ordered_search_space,
     parse_args,
@@ -658,6 +659,10 @@ def test_resume_keeps_completed_result_on_sample_mismatch(
             '{"hyperparameters": {"learning_rate": 0.002},'
             '"task_batch_size": 64,'
             '"rollout_group_size": 1,'
+            '"task_selection_passes_requested": 3,'
+            '"task_selection_passes_completed": 3,'
+            '"dataset_epochs_completed": 3,'
+            '"stopped_early": false,'
             '"best_validation": {'
             '"mean_path_efficiency": 0.5'
             "}}"
@@ -1210,7 +1215,13 @@ def write_fake_validation_artifacts(
             "validation,1,2,1.0,2.0,"
             f"{validation_score},"
             f"{validation_score}\n"
+            "validation,200,2,1.0,2.0,"
+            f"{validation_score},"
+            f"{validation_score}\n"
             "same_layout,1,2,1.0,2.0,"
+            f"{same_layout_score},"
+            f"{same_layout_score}\n"
+            "same_layout,200,2,1.0,2.0,"
             f"{same_layout_score},"
             f"{same_layout_score}\n"
         )
@@ -1345,6 +1356,29 @@ def test_summarize_tuning_writes_heatmap_and_trial_grids(tmp_path):
     }
 
 
+def test_metric_series_by_split_reads_epoch_points(tmp_path):
+    run_dir = tmp_path / "trial_001" / "ppo"
+    write_fake_validation_artifacts(
+        run_dir,
+        validation_score=0.5,
+        same_layout_score=0.25,
+    )
+
+    series = metric_series_by_split(
+        run_dir / "validation_metrics.csv",
+        "mean_path_efficiency",
+    )
+
+    assert series["validation"] == [
+        (1, 0.5),
+        (200, 0.5),
+    ]
+    assert series["same_layout"] == [
+        (1, 0.25),
+        (200, 0.25),
+    ]
+
+
 def test_read_completed_results_requires_artifacts(tmp_path):
     results_path = tmp_path / "tuning_results.csv"
     run_dir = tmp_path / "trial_001" / "ppo"
@@ -1363,6 +1397,10 @@ def test_read_completed_results_requires_artifacts(tmp_path):
             '{"hyperparameters": {"learning_rate": 0.001},'
             '"task_batch_size": 4,'
             '"rollout_group_size": 1,'
+            '"task_selection_passes_requested": 3,'
+            '"task_selection_passes_completed": 3,'
+            '"dataset_epochs_completed": 3,'
+            '"stopped_early": false,'
             '"best_validation": {'
             '"mean_path_efficiency": 0.5'
             "}}"
@@ -1452,6 +1490,10 @@ def test_read_completed_results_rejects_mismatched_artifacts(tmp_path):
             '{"hyperparameters": {"learning_rate": 0.002},'
             '"task_batch_size": 4,'
             '"rollout_group_size": 1,'
+            '"task_selection_passes_requested": 3,'
+            '"task_selection_passes_completed": 3,'
+            '"dataset_epochs_completed": 3,'
+            '"stopped_early": false,'
             '"best_validation": {'
             '"mean_path_efficiency": 0.5'
             "}}"
@@ -1474,6 +1516,67 @@ def test_read_completed_results_rejects_mismatched_artifacts(tmp_path):
             "task_selection_passes_requested": 3,
             "task_selection_passes_completed": 3,
             "dataset_epochs_completed": 3,
+            "stopped_early": False,
+            "checkpoint_path": str(checkpoint_path),
+            "evaluation_path": str(evaluation_path),
+            "hyperparameters": {
+                "learning_rate": 0.001,
+            },
+        },
+    )
+
+    completed = read_completed_results(
+        results_path,
+        "ppo",
+    )
+
+    assert completed == {}
+
+
+def test_read_completed_results_rejects_unfinished_artifacts(tmp_path):
+    results_path = tmp_path / "tuning_results.csv"
+    run_dir = tmp_path / "trial_001" / "ppo"
+    run_dir.mkdir(
+        parents=True,
+    )
+    checkpoint_path = run_dir / "checkpoint.pt"
+    evaluation_path = run_dir / "evaluation.csv"
+    training_summary_path = (
+        run_dir / "training_summary.json"
+    )
+    checkpoint_path.write_bytes(b"checkpoint")
+    evaluation_path.write_text("episode_return,success,path_efficiency\n")
+    training_summary_path.write_text(
+        (
+            '{"hyperparameters": {"learning_rate": 0.001},'
+            '"task_batch_size": 4,'
+            '"rollout_group_size": 1,'
+            '"task_selection_passes_requested": 3,'
+            '"task_selection_passes_completed": 2,'
+            '"dataset_epochs_completed": 2,'
+            '"stopped_early": false,'
+            '"best_validation": {'
+            '"mean_path_efficiency": 0.5'
+            "}}"
+        )
+    )
+    write_result_row(
+        results_path,
+        {
+            "trial": 1,
+            "algorithm": "ppo",
+            "seed": 11,
+            "objective": 0.5,
+            "mean_path_efficiency": 0.5,
+            "success_rate": 1.0,
+            "average_episode_return": 2.0,
+            "average_successful_path_efficiency": 0.5,
+            "rollouts_per_task_requested": 3,
+            "task_batch_size": 4,
+            "rollout_group_size": 1,
+            "task_selection_passes_requested": 3,
+            "task_selection_passes_completed": 2,
+            "dataset_epochs_completed": 2,
             "stopped_early": False,
             "checkpoint_path": str(checkpoint_path),
             "evaluation_path": str(evaluation_path),

@@ -48,6 +48,10 @@ SUMMARY_SPLIT_ALIASES = {
     "same_layout": "same_layout",
     "val_with_same_layout": "same_layout",
 }
+SUMMARY_MONTAGE_X_LIMIT = (
+    0,
+    205,
+)
 
 DEFAULT_SEARCH_SPACES: dict[
     str,
@@ -1557,6 +1561,34 @@ def result_has_stale_completion_marker(
     )
 
 
+def training_summary_completed(
+    training_summary: dict[str, Any],
+) -> bool:
+    if training_summary.get("stopped_early") is True:
+        return True
+
+    completed = training_summary.get(
+        "task_selection_passes_completed",
+        training_summary.get(
+            "dataset_epochs_completed"
+        ),
+    )
+    requested = training_summary.get(
+        "task_selection_passes_requested",
+        training_summary.get(
+            "dataset_epochs_requested"
+        ),
+    )
+
+    if completed is None or requested is None:
+        return False
+
+    try:
+        return int(completed) >= int(requested)
+    except (TypeError, ValueError):
+        return False
+
+
 def result_artifacts_match(
     result: dict[str, Any],
 ) -> bool:
@@ -1588,6 +1620,11 @@ def result_artifacts_match(
     )
 
     if not isinstance(best_validation, dict):
+        return False
+
+    if not training_summary_completed(
+        training_summary
+    ):
         return False
 
     try:
@@ -1824,6 +1861,10 @@ def build_result_from_artifacts(
         if not isinstance(
             best_validation,
             dict,
+        ):
+            return None
+        if not training_summary_completed(
+            training_summary
         ):
             return None
         objective = best_validation[
@@ -2139,6 +2180,64 @@ def best_metric_by_split(
     }
 
 
+def metric_series_by_split(
+    metrics_path: Path,
+    metric: str,
+) -> dict[str, list[tuple[int, float]]]:
+    series: dict[str, list[tuple[int, float]]] = {
+        split: []
+        for split in SUMMARY_SPLITS
+    }
+
+    with metrics_path.open(
+        newline="",
+    ) as file:
+        reader = csv.DictReader(file)
+
+        for row in reader:
+            raw_value = row.get(metric)
+
+            if raw_value in {
+                None,
+                "",
+            }:
+                continue
+
+            split = canonical_summary_split(
+                row.get(
+                    "split",
+                    "validation",
+                )
+            )
+
+            if split not in series:
+                continue
+
+            raw_epoch = row.get(
+                "dataset_epoch",
+                row.get("epoch"),
+            )
+
+            if raw_epoch in {
+                None,
+                "",
+            }:
+                continue
+
+            series[split].append(
+                (
+                    int(raw_epoch),
+                    float(raw_value),
+                )
+            )
+
+    return {
+        split: sorted(points)
+        for split, points in series.items()
+        if points
+    }
+
+
 def collect_heatmap_cells(
     artifacts: list[dict[str, Any]],
     *,
@@ -2349,6 +2448,7 @@ def plot_validation_metric_montage(
     artifacts: list[dict[str, Any]],
     *,
     algorithm: str,
+    metric: str,
     output_path: Path,
 ) -> bool:
     plot_artifacts = [
@@ -2358,7 +2458,7 @@ def plot_validation_metric_montage(
             key=lambda item: item["trial"],
         )
         if artifact["algorithm"] == algorithm
-        and artifact["plot_path"].exists()
+        and artifact["metrics_path"].exists()
     ]
 
     if not plot_artifacts:
@@ -2390,23 +2490,67 @@ def plot_validation_metric_montage(
     )
 
     for axis in axes.reshape(-1):
-        axis.axis("off")
+        axis.set_visible(False)
 
     for axis, artifact in zip(
         axes.reshape(-1),
         plot_artifacts,
     ):
-        image = plt.imread(
-            artifact["plot_path"]
+        axis.set_visible(True)
+        split_series = metric_series_by_split(
+            artifact["metrics_path"],
+            metric,
         )
-        axis.imshow(image)
+
+        for split in SUMMARY_SPLITS:
+            points = split_series.get(split)
+
+            if not points:
+                continue
+
+            axis.plot(
+                [
+                    epoch
+                    for epoch, _ in points
+                ],
+                [
+                    value
+                    for _, value in points
+                ],
+                label=summary_split_label(split),
+            )
+
+        axis.set_xlim(
+            *SUMMARY_MONTAGE_X_LIMIT
+        )
+        axis.set_xlabel(
+            "Dataset epoch",
+            fontsize=8,
+        )
+        axis.set_ylabel(
+            metric,
+            fontsize=8,
+        )
         axis.set_title(
             f"Trial {artifact['trial']}",
             fontsize=9,
         )
+        axis.tick_params(
+            labelsize=7,
+        )
+        axis.grid(
+            True,
+            alpha=0.25,
+        )
+
+        if split_series:
+            axis.legend(
+                fontsize=7,
+                loc="lower right",
+            )
 
     figure.suptitle(
-        f"{algorithm} validation metrics across trials"
+        f"{algorithm} {metric} across trials"
     )
     figure.tight_layout()
     output_path.parent.mkdir(
@@ -2471,6 +2615,7 @@ def summarize_tuning(
         if plot_validation_metric_montage(
             artifacts,
             algorithm=algorithm,
+            metric=args.metric,
             output_path=montage_path,
         ):
             print(
@@ -2481,7 +2626,7 @@ def summarize_tuning(
         else:
             print(
                 "Skipped validation metrics trial grid for "
-                f"{algorithm}; no validation_metrics.png files "
+                f"{algorithm}; no validation_metrics.csv files "
                 "were found.",
                 flush=True,
             )
