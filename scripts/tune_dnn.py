@@ -3545,6 +3545,168 @@ def plot_summary_metric_series(
     return plotted
 
 
+def parse_summary_positive_int(
+    value: Any,
+) -> int | None:
+    if isinstance(
+        value,
+        bool,
+    ):
+        return None
+
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+
+    if parsed <= 0:
+        return None
+
+    return parsed
+
+
+def summary_axis_requested_budget(
+    artifact: dict[str, Any],
+) -> int | None:
+    training_summary_path = artifact_training_summary_path(
+        artifact
+    )
+
+    if not training_summary_path.exists():
+        return None
+
+    try:
+        training_summary = read_training_summary(
+            training_summary_path
+        )
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(
+        training_summary,
+        dict,
+    ):
+        return None
+
+    for name in (
+        "dataset_epochs_requested",
+        "task_selection_passes_requested",
+    ):
+        budget = parse_summary_positive_int(
+            training_summary.get(name)
+        )
+
+        if budget is not None:
+            return budget
+
+    return None
+
+
+def plotted_summary_max_epoch(
+    axis,
+) -> int | None:
+    max_epoch = None
+
+    for line in axis.lines:
+        for raw_epoch in line.get_xdata():
+            try:
+                epoch = float(raw_epoch)
+            except (TypeError, ValueError):
+                continue
+
+            if not math.isfinite(epoch):
+                continue
+
+            max_epoch = (
+                epoch
+                if max_epoch is None
+                else max(max_epoch, epoch)
+            )
+
+    if max_epoch is None:
+        return None
+
+    return max(
+        0,
+        math.ceil(max_epoch),
+    )
+
+
+def summary_axis_ticks(
+    max_epoch: int,
+) -> list[int]:
+    if max_epoch <= 6:
+        return list(range(max_epoch + 1))
+
+    rough_step = max_epoch / 4
+    magnitude = 10 ** math.floor(
+        math.log10(rough_step)
+    )
+
+    step = int(magnitude)
+    for multiplier in (
+        1,
+        2,
+        5,
+        10,
+    ):
+        candidate = int(
+            multiplier * magnitude
+        )
+
+        if candidate >= rough_step:
+            step = max(
+                1,
+                candidate,
+            )
+            break
+
+    ticks = list(
+        range(
+            0,
+            max_epoch + 1,
+            step,
+        )
+    )
+
+    if ticks[-1] != max_epoch:
+        ticks.append(max_epoch)
+
+    return ticks
+
+
+def set_summary_axis_x_scale(
+    axis,
+    artifact: dict[str, Any],
+) -> None:
+    requested_budget = summary_axis_requested_budget(
+        artifact
+    )
+    observed_max_epoch = plotted_summary_max_epoch(
+        axis
+    )
+
+    if requested_budget is None and observed_max_epoch is None:
+        return
+
+    max_epoch = max(
+        value
+        for value in (
+            requested_budget,
+            observed_max_epoch,
+        )
+        if value is not None
+    )
+
+    axis.set_xlim(
+        0,
+        max_epoch,
+    )
+    axis.set_xticks(
+        summary_axis_ticks(max_epoch)
+    )
+
+
 def set_summary_axis_y_limits(
     axis,
     *,
@@ -3695,6 +3857,10 @@ def plot_validation_metric_montage(
                 axis,
                 metric=metric,
             )
+            set_summary_axis_x_scale(
+                axis,
+                artifact,
+            )
 
             if plotted:
                 legend_handles, legend_labels = (
@@ -3707,7 +3873,6 @@ def plot_validation_metric_montage(
                     spine.set_linewidth(2.0)
                     spine.set_edgecolor("#d27d00")
 
-            row_index = index // SUMMARY_MONTAGE_COLUMNS
             column_index = index % SUMMARY_MONTAGE_COLUMNS
 
             axis.set_xlabel(

@@ -2158,6 +2158,102 @@ def test_validation_metric_montage_uses_fixed_bounded_trial_scale(
     )
 
 
+def test_validation_metric_montage_uses_requested_budget_x_axis_for_early_stop(
+    tmp_path,
+    monkeypatch,
+):
+    output_dir = tmp_path / "tuning"
+    run_dir = (
+        output_dir
+        / "trials"
+        / "trial_001"
+        / "ppo"
+    )
+    write_fake_validation_artifacts(
+        run_dir,
+        validation_score=0.02,
+        same_layout_score=0.03,
+        training_score=0.04,
+    )
+    (
+        run_dir / "training_summary.json"
+    ).write_text(
+        json.dumps(
+            {
+                "dataset_epochs_requested": 8,
+                "task_selection_passes_requested": 8,
+                "dataset_epochs_completed": 2,
+                "stopped_early": True,
+            }
+        )
+    )
+
+    artifacts = discover_validation_metric_artifacts(
+        output_dir
+    )
+    saved_figures = []
+
+    import matplotlib.figure
+
+    def fake_savefig(
+        self,
+        path,
+        *args,
+        **kwargs,
+    ):
+        first_axis = self.axes[0]
+        saved_figures.append(
+            {
+                "first_xlim": first_axis.get_xlim(),
+                "first_xticks": tuple(
+                    int(tick)
+                    for tick in first_axis.get_xticks()
+                ),
+                "first_xtick_labels_visible": [
+                    label.get_visible()
+                    for label in first_axis.get_xticklabels()
+                ],
+            }
+        )
+
+    monkeypatch.setattr(
+        matplotlib.figure.Figure,
+        "savefig",
+        fake_savefig,
+    )
+
+    assert plot_validation_metric_montage(
+        artifacts,
+        algorithm="ppo",
+        metric="mean_path_efficiency",
+        output_path=(
+            tmp_path
+            / "summary"
+            / "ppo_validation_metrics_trials.png"
+        ),
+    ) == 1
+
+    assert saved_figures[0]["first_xlim"] == (
+        0.0,
+        8.0,
+    )
+    assert saved_figures[0]["first_xticks"] == (
+        0,
+        2,
+        4,
+        6,
+        8,
+    )
+    assert saved_figures[0][
+        "first_xtick_labels_visible"
+    ]
+    assert all(
+        saved_figures[0][
+            "first_xtick_labels_visible"
+        ]
+    )
+
+
 def test_validation_metric_montage_paginates_more_than_twenty_trials(
     tmp_path,
     monkeypatch,
