@@ -165,6 +165,13 @@ Generate datasets first:
 python scripts/generate_dataset.py --train-mazes 200 --validation-mazes 50 --test-mazes 50 --tasks-per-maze 5
 ```
 
+Use a separate output directory for larger final-training datasets so tuning
+and experiment datasets remain intact:
+
+```bash
+python scripts/generate_dataset.py --train-mazes 2000 --validation-mazes 200 --test-mazes 200 --tasks-per-maze 5 --output-dir data/generalization
+```
+
 Then tune against the pre-generated train and validation sets:
 
 ```bash
@@ -173,7 +180,8 @@ python scripts/tune_dnn.py --algorithm ppo
 
 By default, the tuner reads `data/train.npz`, `data/validation.npz`, and
 `data/same_layout_new_goals.npz`, samples 100 hyperparameter combinations with
-a 200 rollouts-per-task maximum budget per combination, stores per-combination
+a random-search sampler and a 200 rollouts-per-task maximum budget per
+combination, stores per-combination
 trial directories under `runs/tuning/trials`, evaluates every validation task,
 appends `runs/tuning/tuning_results.csv`, and writes the current best
 combination to `runs/tuning/best_config.json`. Pass `--tensorboard` to write
@@ -183,6 +191,9 @@ tuning arguments and effective search space for controlled resumes. Pass
 `--hyperparameter-combinations` to change the number of sampled combinations,
 or pass
 `--search-space path/to/search_space.json` to override the default search space.
+Random search is the default sampler. To opt in to Optuna's TPE sampler, install
+the optional dependency with `pip install 'maze-rl[tuning]'` or
+`pip install optuna`, then pass `--sampler optuna` or `--optuna`.
 If a sweep is interrupted, rerun the same command with `--resume` to skip
 completed hyperparameter combinations recorded in `tuning_results.csv`, recover
 finished combination directories that were interrupted before their result row
@@ -203,6 +214,17 @@ tuner asks training to evaluate validation mean path efficiency every
 `best_checkpoint.pt`, and uses the best validation-layout checkpoint for
 combination selection. The ordinary `checkpoint.pt` remains the final training
 state.
+
+After tuning, train a longer final run from the stored best hyperparameter
+combination instead of copying values by hand:
+
+```bash
+python scripts/train.py --algorithm ppo --best-config --dataset data/generalization/train.npz --validation-dataset data/generalization/validation.npz --same-layout-dataset data/generalization/same_layout_new_goals.npz --validation-interval 5 --validation-all-tasks --rollouts-per-task 1000 --output-dir runs/final_ppo_generalization
+```
+
+`--best-config` reads `runs/tuning/best_config.json` by default. Pass a path
+such as `--best-config runs/tuning/best_config_ppo.json` to load a specific
+config file. Explicit training flags still override loaded values.
 
 Training writes `validation_metrics.png` beside `validation_metrics.csv`; the
 plot overlays validation-layout performance with same-layout new-task

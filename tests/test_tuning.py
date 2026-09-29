@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -34,6 +35,7 @@ from scripts.tune_dnn import (
     result_matches_trial,
     run_command,
     sample_hyperparameters,
+    sample_hyperparameters_with_optuna,
     summarize_tuning,
     summarize_evaluation,
     write_best_config_index,
@@ -75,6 +77,69 @@ def test_sample_hyperparameters_uses_space_distributions():
     assert 2 <= sample[
         "update_epochs"
     ] <= 4
+
+
+def test_sample_hyperparameters_with_optuna_uses_trial_suggestions():
+    class FakeTrial:
+        def suggest_float(
+            self,
+            name,
+            low,
+            high,
+            *,
+            log=False,
+        ):
+            if log:
+                return high
+
+            return low
+
+        def suggest_categorical(
+            self,
+            name,
+            values,
+        ):
+            return values[-1]
+
+        def suggest_int(
+            self,
+            name,
+            low,
+            high,
+        ):
+            return high
+
+    sample = sample_hyperparameters_with_optuna(
+        {
+            "learning_rate": {
+                "type": "loguniform",
+                "low": 1e-5,
+                "high": 1e-3,
+            },
+            "gamma": {
+                "type": "uniform",
+                "low": 0.95,
+                "high": 0.999,
+            },
+            "batch_size": {
+                "type": "choice",
+                "values": [32, 64],
+            },
+            "update_epochs": {
+                "type": "int",
+                "low": 2,
+                "high": 4,
+            },
+        },
+        FakeTrial(),
+    )
+
+    assert sample == {
+        "learning_rate": 1e-3,
+        "gamma": 0.95,
+        "batch_size": 64,
+        "update_epochs": 4,
+    }
 
 
 def test_ordered_search_space_restores_default_order_from_sorted_config():
@@ -120,7 +185,45 @@ def test_parse_args_uses_tuning_run_defaults(monkeypatch):
     assert args.q_snapshot_count == 11
     assert args.tensorboard is False
     assert args.tensorboard_from_cli is False
+    assert args.sampler == "random"
     assert args.resume is False
+
+
+def test_parse_args_accepts_optuna_sampler(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "tune_dnn.py",
+            "--algorithm",
+            "ppo",
+            "--sampler",
+            "optuna",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.sampler == "optuna"
+
+
+def test_parse_args_accepts_optuna_shortcut(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "tune_dnn.py",
+            "--algorithm",
+            "ppo",
+            "--optuna",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.sampler == "optuna"
 
 
 def test_parse_args_accepts_tensorboard_opt_in(
@@ -219,6 +322,7 @@ def test_resume_config_allows_tensorboard_cli_override():
 
     assert args.hyperparameter_combinations == 20
     assert args.tensorboard is False
+    assert args.sampler == "random"
 
 
 def test_resume_config_uses_stored_tensorboard_without_cli_override():
@@ -575,6 +679,160 @@ def test_other_algorithm_legacy_config_does_not_block_new_sweep(
 
     assert "Loaded tuning arguments from" not in output
     assert "--algorithm dqn" in output
+
+
+def test_optuna_sampler_dry_run_uses_optional_study(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    class FakeSampler:
+        def __init__(
+            self,
+            *,
+            seed,
+        ):
+            self.seed = seed
+
+    class FakeTrial:
+        def __init__(
+            self,
+            number,
+        ):
+            self.number = number
+
+        def suggest_float(
+            self,
+            name,
+            low,
+            high,
+            *,
+            log=False,
+        ):
+            return low
+
+        def suggest_categorical(
+            self,
+            name,
+            values,
+        ):
+            return values[0]
+
+        def suggest_int(
+            self,
+            name,
+            low,
+            high,
+        ):
+            return low
+
+    class FakeStudy:
+        def __init__(self):
+            self.trials = []
+            self.told = []
+
+        def ask(self):
+            trial = FakeTrial(
+                len(self.trials)
+            )
+            self.trials.append(trial)
+            return trial
+
+        def tell(
+            self,
+            trial,
+            value,
+        ):
+            self.told.append(
+                (
+                    trial.number,
+                    value,
+                )
+            )
+
+    study = FakeStudy()
+    created = []
+
+    def create_study(
+        *,
+        direction,
+        sampler,
+    ):
+        created.append(
+            (
+                direction,
+                sampler,
+            )
+        )
+        return study
+
+    fake_optuna = SimpleNamespace(
+        create_study=create_study,
+        samplers=SimpleNamespace(
+            TPESampler=FakeSampler,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "optuna",
+        fake_optuna,
+    )
+    search_space_path = tmp_path / "space.json"
+    search_space_path.write_text(
+        json.dumps(
+            {
+                "learning_rate": {
+                    "type": "choice",
+                    "values": [0.001],
+                },
+                "task_batch_size": {
+                    "type": "choice",
+                    "values": [64],
+                },
+                "rollout_group_size": {
+                    "type": "choice",
+                    "values": [1],
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "tune_dnn.py",
+            "--algorithm",
+            "ppo",
+            "--sampler",
+            "optuna",
+            "--dry-run",
+            "--output-dir",
+            str(tmp_path),
+            "--search-space",
+            str(search_space_path),
+            "--hyperparameter-combinations",
+            "2",
+        ],
+    )
+
+    main()
+
+    output = capsys.readouterr().out
+
+    assert created[0][0] == "maximize"
+    assert created[0][1].seed == 42
+    assert study.told == [
+        (
+            0,
+            0.0,
+        ),
+        (
+            1,
+            0.0,
+        ),
+    ]
+    assert "Hyperparameter combination 1/2" in output
+    assert "Hyperparameter combination 2/2" in output
+    assert '"learning_rate": 0.001' in output
 
 
 def test_resume_rejects_history_without_tuning_config(

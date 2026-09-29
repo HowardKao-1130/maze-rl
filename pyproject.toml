@@ -26,6 +26,9 @@ video = [
 dev = [
     "pytest",
 ]
+tuning = [
+    "optuna",
+]
 
 
 [tool.setuptools.packages.find]

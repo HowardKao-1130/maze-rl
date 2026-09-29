@@ -392,6 +392,7 @@ LEGACY_TUNING_CONFIG_FILENAME = "tuning_config.json"
 TUNING_CONFIG_DIRNAME = "tuning_configs"
 TUNING_ARGUMENT_FIELDS = [
     "algorithm",
+    "sampler",
     "hyperparameter_combinations",
     "rollouts_per_task",
     "max_steps",
@@ -411,6 +412,7 @@ TUNING_ARGUMENT_FIELDS = [
 ]
 TUNING_OPTIONAL_ARGUMENT_DEFAULTS = {
     "q_snapshot_count": 11,
+    "sampler": "random",
 }
 TUNING_PATH_ARGUMENT_FIELDS = {
     "train_dataset",
@@ -496,6 +498,28 @@ def parse_args(
         "--algorithm",
         required=True,
         choices=sorted(NEURAL_ALGORITHMS),
+    )
+    parser.add_argument(
+        "--sampler",
+        choices=[
+            "random",
+            "optuna",
+        ],
+        default="random",
+        help=(
+            "Hyperparameter sampler to use. Defaults to random "
+            "search; choose optuna to use Optuna's TPE sampler."
+        ),
+    )
+    parser.add_argument(
+        "--optuna",
+        dest="sampler",
+        action="store_const",
+        const="optuna",
+        help=(
+            "Use Optuna's TPE sampler for hyperparameter "
+            "selection. Disabled by default."
+        ),
     )
     parser.add_argument(
         "--hyperparameter-combinations",
@@ -801,6 +825,99 @@ def sample_hyperparameters(
         )
         for name, spec in search_space.items()
     }
+
+
+def sample_from_optuna_spec(
+    name: str,
+    spec: dict[str, Any],
+    trial: Any,
+):
+    distribution = spec["type"]
+
+    if distribution == "choice":
+        return _json_scalar(
+            trial.suggest_categorical(
+                name,
+                list(spec["values"]),
+            )
+        )
+
+    if distribution == "uniform":
+        return float(
+            trial.suggest_float(
+                name,
+                float(spec["low"]),
+                float(spec["high"]),
+            )
+        )
+
+    if distribution == "loguniform":
+        low = float(spec["low"])
+        high = float(spec["high"])
+
+        if low <= 0 or high <= 0:
+            raise ValueError(
+                "loguniform bounds must be positive."
+            )
+
+        return float(
+            trial.suggest_float(
+                name,
+                low,
+                high,
+                log=True,
+            )
+        )
+
+    if distribution == "int":
+        return int(
+            trial.suggest_int(
+                name,
+                int(spec["low"]),
+                int(spec["high"]),
+            )
+        )
+
+    raise ValueError(
+        f"Unknown distribution type: {distribution}"
+    )
+
+
+def sample_hyperparameters_with_optuna(
+    search_space: dict[str, dict[str, Any]],
+    trial: Any,
+) -> dict[str, float | int]:
+    return {
+        name: sample_from_optuna_spec(
+            name,
+            spec,
+            trial,
+        )
+        for name, spec in search_space.items()
+    }
+
+
+def create_optuna_study(
+    *,
+    seed: int,
+):
+    try:
+        import optuna
+    except ImportError as exc:
+        raise RuntimeError(
+            "Optuna tuning requires the optional optuna "
+            "dependency. Install it with "
+            "`pip install 'maze-rl[tuning]'` or "
+            "`pip install optuna`, then rerun with "
+            "--sampler optuna."
+        ) from exc
+
+    return optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(
+            seed=seed,
+        ),
+    )
 
 
 def ordered_search_space(
@@ -3725,6 +3842,13 @@ def main() -> None:
         )
 
     rng = np.random.default_rng(args.seed)
+    optuna_study = (
+        create_optuna_study(
+            seed=args.seed,
+        )
+        if args.sampler == "optuna"
+        else None
+    )
     completed_results = (
         read_completed_results(
             results_path,
@@ -3767,12 +3891,23 @@ def main() -> None:
                 1_000_000_000
             )
         )
-        hyperparameters = (
-            sample_hyperparameters(
-                search_space,
-                rng,
+        optuna_trial = None
+
+        if optuna_study is None:
+            hyperparameters = (
+                sample_hyperparameters(
+                    search_space,
+                    rng,
+                )
             )
-        )
+        else:
+            optuna_trial = optuna_study.ask()
+            hyperparameters = (
+                sample_hyperparameters_with_optuna(
+                    search_space,
+                    optuna_trial,
+                )
+            )
         trial_dir = (
             args.output_dir
             / "trials"
@@ -3835,6 +3970,13 @@ def main() -> None:
                     "the completed recorded result.",
                     flush=True,
                 )
+            elif optuna_study is not None:
+                optuna_study.tell(
+                    optuna_trial,
+                    float(
+                        completed_result["objective"]
+                    ),
+                )
 
             previous_best_result = best_result
             best_result = update_best_result(
@@ -3886,6 +4028,15 @@ def main() -> None:
                         "of rerunning.",
                         flush=True,
                     )
+                elif optuna_study is not None:
+                    optuna_study.tell(
+                        optuna_trial,
+                        float(
+                            recovered_result[
+                                "objective"
+                            ]
+                        ),
+                    )
 
                 write_result_row(
                     results_path,
@@ -3927,6 +4078,11 @@ def main() -> None:
         )
 
         if args.dry_run:
+            if optuna_study is not None:
+                optuna_study.tell(
+                    optuna_trial,
+                    0.0,
+                )
             continue
 
         result = build_result_from_artifacts(
@@ -3949,6 +4105,11 @@ def main() -> None:
             results_path,
             result,
         )
+        if optuna_study is not None:
+            optuna_study.tell(
+                optuna_trial,
+                float(result["objective"]),
+            )
 
         previous_best_result = best_result
         best_result = update_best_result(
