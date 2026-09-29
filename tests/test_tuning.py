@@ -381,6 +381,44 @@ def test_parse_args_accepts_resume(monkeypatch):
     assert args.resume is True
 
 
+def test_parse_args_accepts_resume_training_state_with_resume(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "tune_dnn.py",
+            "--algorithm",
+            "ppo",
+            "--resume",
+            "--resume-training-state",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.resume is True
+    assert args.resume_training_state is True
+    assert args.resume_training_state_from_cli is True
+
+
+def test_parse_args_rejects_resume_training_state_without_resume(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "tune_dnn.py",
+            "--algorithm",
+            "ppo",
+            "--resume-training-state",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        parse_args()
+
+
 def test_parse_args_accepts_trials_alias(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
@@ -1080,6 +1118,38 @@ def test_training_command_includes_trial_hyperparameters(tmp_path):
     assert command[
         command.index("--q-snapshot-count") + 1
     ] == "7"
+
+
+def test_training_command_can_request_training_state_resume(
+    tmp_path,
+):
+    args = SimpleNamespace(
+        algorithm="ppo",
+        rollouts_per_task=3,
+        max_steps=7,
+        validation_dataset=tmp_path / "validation.npz",
+        same_layout_dataset=tmp_path
+        / "same_layout_new_goals.npz",
+        validation_interval=2,
+        early_stopping_patience=4,
+        early_stopping_min_delta=0.01,
+        q_snapshot_count=7,
+        tensorboard=False,
+        keep_plots=False,
+        resume_training_state=True,
+    )
+
+    command = build_training_command(
+        args=args,
+        trial_dir=tmp_path / "trial",
+        train_dataset=tmp_path / "train.npz",
+        trial_seed=11,
+        hyperparameters={
+            "learning_rate": 0.0003,
+        },
+    )
+
+    assert "--resume-training-state" in command
 
 
 def test_training_command_passes_grpo_task_and_group_sizes(tmp_path):
