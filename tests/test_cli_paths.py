@@ -9,6 +9,7 @@ import pytest
 
 import torch
 
+from maze_rl.agents.q_learning import QLearningAgent
 from maze_rl.training.metrics import EpisodeMetrics
 from maze_rl.training.plots import plot_validation_metrics
 from scripts.generate_dataset import (
@@ -35,8 +36,11 @@ from scripts.open_tensorboard import (
 )
 from scripts.train import (
     HierarchicalTaskSampler,
+    agent_training_state_dict,
     configure_reproducibility,
     format_validation_progress_message,
+    load_agent_training_state,
+    load_training_state,
     log_tensorboard_episode,
     log_tensorboard_epoch,
     log_tensorboard_optimization_epoch,
@@ -45,6 +49,7 @@ from scripts.train import (
     optimization_epochs_for_round,
     parse_args as parse_train_args,
     rollout_group_size_for_algorithm,
+    save_training_state,
     should_validate_epoch,
     should_stop_early,
     task_batch_size_for_algorithm,
@@ -512,6 +517,25 @@ def test_training_accepts_no_progress(monkeypatch):
     args = parse_train_args()
 
     assert args.no_progress is True
+
+
+def test_training_accepts_resume_training_state(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "dqn",
+            "--resume-training-state",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.resume is False
+    assert args.resume_training_state is True
 
 
 def test_validation_progress_formats_best_in_parentheses():
@@ -1027,3 +1051,110 @@ def test_hierarchical_sampler_continues_epoch_without_replacement_across_collect
         3,
     }
     assert len(epoch_two_tasks) == 2
+
+
+def test_hierarchical_sampler_state_round_trips():
+    sampler = HierarchicalTaskSampler(
+        task_indices=[0, 1, 2, 3],
+        layout_indices=[0, 0, 1, 1],
+        seed=1,
+    )
+    first_specs = sampler.sample_collection(
+        collection_size=3,
+        target_dataset_epochs=2,
+    )
+
+    restored = HierarchicalTaskSampler(
+        task_indices=[0, 1, 2, 3],
+        layout_indices=[0, 0, 1, 1],
+        seed=999,
+    )
+    restored.load_state_dict(
+        sampler.state_dict()
+    )
+
+    assert restored.current_dataset_epoch == (
+        sampler.current_dataset_epoch
+    )
+    assert restored.completed_dataset_epochs == (
+        sampler.completed_dataset_epochs
+    )
+    assert restored.seen_in_dataset_epoch == (
+        sampler.seen_in_dataset_epoch
+    )
+    assert restored.rollout == sampler.rollout
+    assert restored.sample_collection(
+        collection_size=3,
+        target_dataset_epochs=2,
+    ) == sampler.sample_collection(
+        collection_size=3,
+        target_dataset_epochs=2,
+    )
+    assert first_specs
+
+
+def test_tabular_agent_training_state_round_trips():
+    agent = QLearningAgent(
+        action_count=4,
+        seed=1,
+    )
+    agent.update(
+        state=(0, 0),
+        action=2,
+        reward=1.0,
+        next_state=(0, 1),
+        terminated=False,
+    )
+    state = agent_training_state_dict(
+        "q_learning",
+        agent,
+    )
+
+    restored = QLearningAgent(
+        action_count=4,
+        seed=999,
+    )
+    load_agent_training_state(
+        "q_learning",
+        restored,
+        state,
+    )
+
+    original_q = agent.q_state_dict()
+    restored_q = restored.q_state_dict()
+
+    assert restored_q.keys() == original_q.keys()
+    for key, values in original_q.items():
+        np.testing.assert_array_equal(
+            restored_q[key],
+            values,
+        )
+    assert restored.rng.bit_generator.state == (
+        agent.rng.bit_generator.state
+    )
+
+
+def test_training_state_saves_atomically_and_loads(
+    tmp_path,
+):
+    path = tmp_path / "training_state.pt"
+    state = {
+        "version": 1,
+        "payload": {
+            "epoch": 3,
+        },
+    }
+
+    save_training_state(
+        path,
+        state,
+    )
+    loaded = load_training_state(
+        path,
+        torch.device("cpu"),
+    )
+
+    assert loaded == state
+    assert not path.with_suffix(
+        ".pt.tmp"
+    ).exists()
