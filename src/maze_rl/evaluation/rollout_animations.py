@@ -20,8 +20,10 @@ import numpy as np
 
 from maze_rl.evaluation.q_plots import (
     draw_q_values,
+    draw_best_action_arrows,
     draw_state_value,
     dqn_q_values_for_cell,
+    policy_scores_for_cell,
     q_values_for_cell,
     state_value_for_cell,
 )
@@ -263,15 +265,24 @@ def write_rollout_animation(
                     ):
                         overlay_values.append(
                             (
-                                "v",
+                                "policy_v",
                                 col,
                                 row,
-                                state_value_for_cell(
-                                    agent=agent,
-                                    maze=maze,
-                                    row=row,
-                                    col=col,
-                                    goal=goal,
+                                (
+                                    policy_scores_for_cell(
+                                        agent=agent,
+                                        maze=maze,
+                                        row=row,
+                                        col=col,
+                                        goal=goal,
+                                    ),
+                                    state_value_for_cell(
+                                        agent=agent,
+                                        maze=maze,
+                                        row=row,
+                                        col=col,
+                                        goal=goal,
+                                    ),
                                 ),
                             )
                         )
@@ -287,6 +298,20 @@ def write_rollout_animation(
                     col=col,
                     row=row,
                     values=value,
+                )
+            elif value_type == "policy_v":
+                policy_scores, state_value = value
+                draw_state_value(
+                    axis=axis,
+                    col=col,
+                    row=row,
+                    value=state_value,
+                )
+                draw_best_action_arrows(
+                    axis=axis,
+                    col=col,
+                    row=row,
+                    scores=policy_scores,
                 )
             else:
                 draw_state_value(

@@ -108,36 +108,14 @@ def draw_q_values(
         )
         return
 
-    best_value = np.max(values)
-    best_actions = np.flatnonzero(
-        np.isclose(values, best_value)
+    draw_best_action_arrows(
+        axis=axis,
+        col=col,
+        row=row,
+        scores=values,
     )
 
-    for action in best_actions:
-        start_offset, end_offset = ACTION_ARROWS[
-            int(action)
-        ]
-        axis.annotate(
-            "",
-            xy=(
-                col + end_offset[0],
-                row + end_offset[1],
-            ),
-            xytext=(
-                col + start_offset[0],
-                row + start_offset[1],
-            ),
-            arrowprops={
-                "arrowstyle": "-|>",
-                "color": "#d62728",
-                "linewidth": 1.4,
-                "mutation_scale": 9,
-                "shrinkA": 0,
-                "shrinkB": 0,
-            },
-            zorder=3,
-        )
-
+    best_value = np.max(values)
     y_offsets = [
         -0.27,
         -0.09,
@@ -165,6 +143,45 @@ def draw_q_values(
             color=color,
             fontsize=6,
             zorder=4,
+        )
+
+
+def draw_best_action_arrows(
+    axis,
+    col: int,
+    row: int,
+    scores: np.ndarray,
+    *,
+    zorder: float = 3,
+) -> None:
+    best_value = np.max(scores)
+    best_actions = np.flatnonzero(
+        np.isclose(scores, best_value)
+    )
+
+    for action in best_actions:
+        start_offset, end_offset = ACTION_ARROWS[
+            int(action)
+        ]
+        axis.annotate(
+            "",
+            xy=(
+                col + end_offset[0],
+                row + end_offset[1],
+            ),
+            xytext=(
+                col + start_offset[0],
+                row + start_offset[1],
+            ),
+            arrowprops={
+                "arrowstyle": "-|>",
+                "color": "#d62728",
+                "linewidth": 1.4,
+                "mutation_scale": 9,
+                "shrinkA": 0,
+                "shrinkB": 0,
+            },
+            zorder=zorder,
         )
 
 
@@ -416,6 +433,38 @@ def dqn_q_values_for_cell(
             observation_tensor
         )
         .squeeze(0)
+        .detach()
+        .cpu()
+        .numpy()
+    )
+
+
+@torch.no_grad()
+def policy_scores_for_cell(
+    agent,
+    maze: np.ndarray,
+    row: int,
+    col: int,
+    goal: np.ndarray,
+) -> np.ndarray:
+    observation = task_observation_for_cell(
+        maze=maze,
+        row=row,
+        col=col,
+        goal=goal,
+    )
+    observation_tensor = torch.as_tensor(
+        observation,
+        dtype=torch.float32,
+        device=agent.device,
+    ).unsqueeze(0)
+
+    logits, _ = agent.network(
+        observation_tensor
+    )
+
+    return (
+        logits.squeeze(0)
         .detach()
         .cpu()
         .numpy()

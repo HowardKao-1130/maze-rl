@@ -6,6 +6,7 @@ import torch
 from maze_rl.evaluation import q_plots
 from maze_rl.evaluation import rollout_animations
 from maze_rl.evaluation.q_plots import (
+    draw_best_action_arrows,
     draw_goal_cell,
     draw_q_values,
     pad_frame_to_even_dimensions,
@@ -54,6 +55,29 @@ def test_draw_q_values_highlights_all_tied_best_actions():
         "U:1.00",
         "L:1.00",
         "R:1.00",
+    ]
+
+
+def test_draw_best_action_arrows_highlights_all_tied_scores():
+    axis = RecordingAxis()
+
+    draw_best_action_arrows(
+        axis=axis,
+        col=2,
+        row=3,
+        scores=np.array(
+            [0.0, 1.0, 1.0, -1.0]
+        ),
+        zorder=4.5,
+    )
+
+    assert len(axis.annotations) == 2
+    assert [
+        annotation_kwargs["zorder"]
+        for _, annotation_kwargs in axis.annotations
+    ] == [
+        4.5,
+        4.5,
     ]
 
 
@@ -478,6 +502,97 @@ def test_write_rollout_animation_reports_task_progress(
         total
         for _, total in progress_updates
     } == {2}
+
+
+def test_write_rollout_animation_draws_ppo_policy_arrows(
+    tmp_path,
+    monkeypatch,
+):
+    arrow_calls = []
+
+    class FakeAnimation:
+        def __init__(
+            self,
+            figure,
+            update,
+            frames,
+            interval,
+            blit,
+            repeat,
+        ):
+            self.update = update
+
+        def save(
+            self,
+            output_path,
+            writer,
+            fps,
+            dpi,
+            progress_callback=None,
+        ):
+            self.update(0)
+            output_path.write_bytes(b"video")
+
+    monkeypatch.setattr(
+        rollout_animations.animation,
+        "FuncAnimation",
+        FakeAnimation,
+    )
+    monkeypatch.setattr(
+        rollout_animations.animation.writers,
+        "is_available",
+        lambda writer: True,
+    )
+    monkeypatch.setattr(
+        rollout_animations,
+        "policy_scores_for_cell",
+        lambda **kwargs: np.array(
+            [0.0, 1.0, 1.0, -1.0]
+        ),
+    )
+    monkeypatch.setattr(
+        rollout_animations,
+        "state_value_for_cell",
+        lambda **kwargs: 0.5,
+    )
+    monkeypatch.setattr(
+        rollout_animations,
+        "draw_best_action_arrows",
+        lambda **kwargs: arrow_calls.append(
+            kwargs
+        ),
+    )
+
+    rollout_animations.write_rollout_animation(
+        env=FakeRolloutAnimationEnv(),
+        results=[
+            rollout_result(
+                episode=1,
+                task_index=0,
+            )
+        ],
+        split_label="val",
+        output_path=tmp_path / "val_rollouts.mp4",
+        fps=8.0,
+        algorithm="ppo",
+        agent=object(),
+    )
+
+    assert arrow_calls
+    assert all(
+        "zorder" not in call
+        for call in arrow_calls
+    )
+    assert all(
+        call["scores"].tolist()
+        == [
+            0.0,
+            1.0,
+            1.0,
+            -1.0,
+        ]
+        for call in arrow_calls
+    )
 
 
 class FakeDQNPlotAgent:

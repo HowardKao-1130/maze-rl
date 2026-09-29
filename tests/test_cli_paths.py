@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,7 +39,9 @@ from scripts.train import (
     HierarchicalTaskSampler,
     agent_training_state_dict,
     configure_reproducibility,
+    format_training_epoch_progress_message,
     format_validation_progress_message,
+    load_best_config_overrides,
     load_agent_training_state,
     load_training_state,
     log_tensorboard_episode,
@@ -554,6 +557,46 @@ def test_validation_progress_formats_best_in_parentheses():
     )
 
 
+def test_training_epoch_progress_formats_epoch_summary():
+    assert (
+        format_training_epoch_progress_message(
+            dataset_epoch=5,
+            task_selection_pass_budget=1000,
+            epoch_metrics=[
+                EpisodeMetrics(
+                    episode=1,
+                    epoch=5,
+                    task_index=0,
+                    layout_index=0,
+                    episode_return=-1.0,
+                    steps=12,
+                    internal_updates=1,
+                    success=True,
+                    wall_collisions=0,
+                    optimal_path_length=10,
+                    path_efficiency=0.8,
+                ),
+                EpisodeMetrics(
+                    episode=2,
+                    epoch=5,
+                    task_index=1,
+                    layout_index=0,
+                    episode_return=-3.0,
+                    steps=20,
+                    internal_updates=1,
+                    success=False,
+                    wall_collisions=2,
+                    optimal_path_length=10,
+                    path_efficiency=0.0,
+                ),
+            ],
+        )
+        == "train task_selection_pass=    5/1000 "
+        "(0%) mean_return=-2.000 success_rate=0.500 "
+        "mean_path_efficiency=0.400 mean_steps=16.0"
+    )
+
+
 def test_same_layout_dataset_matches_validation_size(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "sys.argv",
@@ -626,6 +669,112 @@ def test_neural_hyperparameters_filter_unset_values():
         "gamma": 0.97,
         "learning_rate": 0.0001,
     }
+
+
+def test_parse_train_args_accepts_best_config_shorthand(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "ppo",
+            "--best-config",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.best_config == Path(
+        "runs/tuning/best_config.json"
+    )
+
+
+def test_load_best_config_overrides_reads_algorithm_index(tmp_path):
+    config_path = tmp_path / "best_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "dqn": {
+                    "algorithm": "dqn",
+                    "hyperparameters": {
+                        "learning_rate": 0.001,
+                    },
+                },
+                "ppo": {
+                    "algorithm": "ppo",
+                    "hyperparameters": {
+                        "learning_rate": 0.0001,
+                        "gamma": 0.97,
+                        "task_batch_size": 32,
+                        "rollout_group_size": 1,
+                    },
+                },
+            }
+        )
+    )
+
+    overrides = load_best_config_overrides(
+        config_path,
+        "ppo",
+    )
+
+    assert overrides.path == config_path
+    assert overrides.hyperparameters == {
+        "learning_rate": 0.0001,
+        "gamma": 0.97,
+    }
+    assert overrides.task_batch_size == 32
+    assert overrides.rollout_group_size == 1
+
+
+def test_load_best_config_overrides_reads_algorithm_file(tmp_path):
+    config_path = tmp_path / "best_config_ppo.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "algorithm": "ppo",
+                "hyperparameters": {
+                    "learning_rate": 0.0001,
+                },
+                "task_batch_size": 64,
+                "rollout_group_size": 1,
+            }
+        )
+    )
+
+    overrides = load_best_config_overrides(
+        config_path,
+        "ppo",
+    )
+
+    assert overrides.hyperparameters == {
+        "learning_rate": 0.0001,
+    }
+    assert overrides.task_batch_size == 64
+    assert overrides.rollout_group_size == 1
+
+
+def test_load_best_config_overrides_rejects_mismatched_algorithm(tmp_path):
+    config_path = tmp_path / "best_config_dqn.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "algorithm": "dqn",
+                "hyperparameters": {
+                    "learning_rate": 0.001,
+                },
+            }
+        )
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="but --algorithm is 'ppo'",
+    ):
+        load_best_config_overrides(
+            config_path,
+            "ppo",
+        )
 
 
 def test_neural_hyperparameters_reject_tabular_agents():
