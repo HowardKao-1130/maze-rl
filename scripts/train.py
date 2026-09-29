@@ -147,6 +147,14 @@ DEFAULT_ROLLOUT_GROUP_SIZES = {
 }
 
 
+@dataclass(frozen=True)
+class BestConfigOverrides:
+    path: Path
+    hyperparameters: dict[str, float | int]
+    task_batch_size: int | None = None
+    rollout_group_size: int | None = None
+
+
 def configure_reproducibility(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -484,6 +492,20 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--best-config",
+        nargs="?",
+        const=Path("runs/tuning/best_config.json"),
+        type=Path,
+        default=None,
+        help=(
+            "Load the tuned best hyperparameter combination for "
+            "--algorithm. Omitting the path reads "
+            "runs/tuning/best_config.json. Explicit CLI "
+            "hyperparameters override loaded values."
+        ),
+    )
+
+    parser.add_argument(
         "--task-batch-size",
         "--rollout-episodes",
         dest="task_batch_size",
@@ -673,6 +695,75 @@ def parse_args():
     )
 
     return parser.parse_args()
+
+
+def load_best_config_overrides(
+    path: Path,
+    algorithm: str,
+) -> BestConfigOverrides:
+    with path.open() as file:
+        best_config = json.load(file)
+
+    if not isinstance(best_config, dict):
+        raise ValueError(
+            f"{path} must contain a JSON object."
+        )
+
+    if "hyperparameters" in best_config:
+        selected_config = best_config
+    else:
+        selected_config = best_config.get(
+            algorithm
+        )
+
+        if selected_config is None:
+            raise ValueError(
+                f"{path} does not contain a best config for "
+                f"algorithm {algorithm!r}."
+            )
+
+    if not isinstance(selected_config, dict):
+        raise ValueError(
+            f"{path} best config for {algorithm!r} must be a JSON object."
+        )
+
+    config_algorithm = selected_config.get(
+        "algorithm"
+    )
+    if (
+        config_algorithm is not None
+        and config_algorithm != algorithm
+    ):
+        raise ValueError(
+            f"{path} contains algorithm {config_algorithm!r}, "
+            f"but --algorithm is {algorithm!r}."
+        )
+
+    raw_hyperparameters = selected_config.get(
+        "hyperparameters",
+        {},
+    )
+    if not isinstance(raw_hyperparameters, dict):
+        raise ValueError(
+            f"{path} hyperparameters must be a JSON object."
+        )
+
+    hyperparameters = dict(raw_hyperparameters)
+    task_batch_size = hyperparameters.pop(
+        "task_batch_size",
+        selected_config.get("task_batch_size"),
+    )
+    rollout_group_size = hyperparameters.pop(
+        "rollout_group_size",
+        selected_config.get("rollout_group_size"),
+    )
+
+    return BestConfigOverrides(
+        path=path,
+        hyperparameters=hyperparameters,
+        task_batch_size=task_batch_size,
+        rollout_group_size=rollout_group_size,
+    )
 
 
 def neural_hyperparameters_from_args(
@@ -1483,6 +1574,55 @@ def format_progress_message(
     return message
 
 
+def format_training_epoch_progress_message(
+    dataset_epoch: int,
+    task_selection_pass_budget: int,
+    epoch_metrics,
+) -> str:
+    mean_return = float(
+        np.mean(
+            [
+                metrics.episode_return
+                for metrics in epoch_metrics
+            ]
+        )
+    )
+    success_rate = float(
+        np.mean(
+            [
+                metrics.success
+                for metrics in epoch_metrics
+            ]
+        )
+    )
+    mean_path_efficiency = float(
+        np.mean(
+            [
+                metrics.path_efficiency
+                for metrics in epoch_metrics
+            ]
+        )
+    )
+    mean_steps = float(
+        np.mean(
+            [
+                metrics.steps
+                for metrics in epoch_metrics
+            ]
+        )
+    )
+
+    return (
+        "train task_selection_pass="
+        f"{dataset_epoch:5d}/{task_selection_pass_budget} "
+        f"({dataset_epoch / task_selection_pass_budget:.0%}) "
+        f"mean_return={mean_return:.3f} "
+        f"success_rate={success_rate:.3f} "
+        f"mean_path_efficiency={mean_path_efficiency:.3f} "
+        f"mean_steps={mean_steps:.1f}"
+    )
+
+
 def format_validation_progress_message(
     split: str,
     dataset_epoch: int,
@@ -1505,55 +1645,6 @@ def format_validation_progress_message(
         message += f" (best={best_score:.3f})"
 
     return message
-
-
-def format_training_epoch_progress_message(
-    dataset_epoch: int,
-    task_selection_pass_budget: int,
-    epoch_metrics,
-) -> str:
-    success_rate = float(
-        np.mean(
-            [
-                metrics.success
-                for metrics in epoch_metrics
-            ]
-        )
-    )
-    mean_path_efficiency = float(
-        np.mean(
-            [
-                metrics.path_efficiency
-                for metrics in epoch_metrics
-            ]
-        )
-    )
-    mean_return = float(
-        np.mean(
-            [
-                metrics.episode_return
-                for metrics in epoch_metrics
-            ]
-        )
-    )
-    mean_steps = float(
-        np.mean(
-            [
-                metrics.steps
-                for metrics in epoch_metrics
-            ]
-        )
-    )
-
-    return (
-        "train task_selection_pass="
-        f"{dataset_epoch:5d}/{task_selection_pass_budget} "
-        f"({dataset_epoch / task_selection_pass_budget:.0%}) "
-        f"mean_path_efficiency={mean_path_efficiency:.3f} "
-        f"success_rate={success_rate:.3f} "
-        f"mean_return={mean_return:.3f} "
-        f"mean_steps={mean_steps:.1f}"
-    )
 
 
 def create_tensorboard_writer(
@@ -2092,19 +2183,56 @@ def main():
         fixed_index=args.fixed_index,
     )
 
-    agent_hyperparameters = (
-        neural_hyperparameters_from_args(
-            args
+    best_config_overrides = None
+    if args.best_config is not None:
+        if args.algorithm not in NEURAL_ALGORITHMS:
+            raise ValueError(
+                "--best-config is only supported for DNN agents."
+            )
+
+        best_config_overrides = load_best_config_overrides(
+            args.best_config,
+            args.algorithm,
         )
+
+    loaded_hyperparameters = (
+        {}
+        if best_config_overrides is None
+        else best_config_overrides.hyperparameters
+    )
+    explicit_hyperparameters = neural_hyperparameters_from_args(
+        args
+    )
+    agent_hyperparameters = {
+        **loaded_hyperparameters,
+        **explicit_hyperparameters,
+    }
+    config_task_batch_size = (
+        None
+        if best_config_overrides is None
+        else best_config_overrides.task_batch_size
     )
     task_batch_size = task_batch_size_for_algorithm(
         args.algorithm,
-        args.task_batch_size,
+        (
+            args.task_batch_size
+            if args.task_batch_size is not None
+            else config_task_batch_size
+        ),
+    )
+    config_rollout_group_size = (
+        None
+        if best_config_overrides is None
+        else best_config_overrides.rollout_group_size
     )
     rollout_group_size = (
         rollout_group_size_for_algorithm(
             args.algorithm,
-            args.rollout_group_size,
+            (
+                args.rollout_group_size
+                if args.rollout_group_size is not None
+                else config_rollout_group_size
+            ),
         )
     )
     task_selection_pass_budget = (
@@ -3053,6 +3181,11 @@ def main():
         ),
         "hyperparameters": agent_hyperparameters,
     }
+
+    if best_config_overrides is not None:
+        summary["best_config_path"] = str(
+            best_config_overrides.path
+        )
 
     if best_validation is not None:
         summary["best_validation"] = (
