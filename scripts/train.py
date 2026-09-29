@@ -291,6 +291,38 @@ class HierarchicalTaskSampler:
 
         return specs
 
+    def state_dict(self) -> dict:
+        return {
+            "rng_state": self.rng.bit_generator.state,
+            "current_dataset_epoch": self.current_dataset_epoch,
+            "completed_dataset_epochs": self.completed_dataset_epochs,
+            "seen_in_dataset_epoch": sorted(
+                self.seen_in_dataset_epoch
+            ),
+            "rollout": self.rollout,
+        }
+
+    def load_state_dict(
+        self,
+        state: dict,
+    ) -> None:
+        self.rng.bit_generator.state = state[
+            "rng_state"
+        ]
+        self.current_dataset_epoch = int(
+            state["current_dataset_epoch"]
+        )
+        self.completed_dataset_epochs = int(
+            state["completed_dataset_epochs"]
+        )
+        self.seen_in_dataset_epoch = {
+            int(task_index)
+            for task_index in state[
+                "seen_in_dataset_epoch"
+            ]
+        }
+        self.rollout = int(state["rollout"])
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -358,6 +390,15 @@ def parse_args():
         "--resume",
         action="store_true",
         help="Append to an existing metrics file instead of starting fresh.",
+    )
+    parser.add_argument(
+        "--resume-training-state",
+        action="store_true",
+        help=(
+            "Restore the full training_state.pt state for this run. "
+            "This is separate from --resume, which only preserves "
+            "existing metric files."
+        ),
     )
 
     parser.add_argument(
@@ -980,6 +1021,322 @@ def save_neural_checkpoint_state(
         },
         path,
     )
+
+
+def network_module_for_algorithm(
+    algorithm: str,
+    agent,
+):
+    if algorithm == "dqn":
+        return agent.online_network
+
+    if algorithm in {
+        "reinforce",
+        "grpo",
+    }:
+        return agent.policy
+
+    return agent.network
+
+
+def agent_training_state_dict(
+    algorithm: str,
+    agent,
+) -> dict:
+    state = {
+        "algorithm": algorithm,
+    }
+
+    if algorithm in TABULAR_ALGORITHMS:
+        state.update(
+            {
+                "q": agent.q_state_dict(),
+                "rng_state": agent.rng.bit_generator.state,
+            }
+        )
+
+        if hasattr(agent, "model"):
+            state["model"] = dict(agent.model)
+
+        return state
+
+    if algorithm == "dqn":
+        state.update(
+            {
+                "online_network_state_dict": (
+                    agent.online_network.state_dict()
+                ),
+                "target_network_state_dict": (
+                    agent.target_network.state_dict()
+                ),
+                "optimizer_state_dict": (
+                    agent.optimizer.state_dict()
+                ),
+                "epsilon": agent.epsilon,
+                "environment_steps": (
+                    agent.environment_steps
+                ),
+                "training_steps": agent.training_steps,
+                "rng_state": agent.rng.bit_generator.state,
+                "replay_buffer": list(
+                    agent.replay_buffer.buffer
+                ),
+                "replay_buffer_rng_state": (
+                    agent.replay_buffer
+                    .rng
+                    .bit_generator
+                    .state
+                ),
+            }
+        )
+        return state
+
+    state.update(
+        {
+            "model_state_dict": (
+                network_module_for_algorithm(
+                    algorithm,
+                    agent,
+                ).state_dict()
+            ),
+            "optimizer_state_dict": (
+                agent.optimizer.state_dict()
+            ),
+        }
+    )
+
+    if hasattr(
+        agent,
+        "entropy_coefficient",
+    ):
+        state["entropy_coefficient"] = (
+            agent.entropy_coefficient
+        )
+
+    return state
+
+
+def load_agent_training_state(
+    algorithm: str,
+    agent,
+    state: dict,
+) -> None:
+    if state.get("algorithm") != algorithm:
+        raise RuntimeError(
+            "Training state algorithm "
+            f"{state.get('algorithm')!r} does not match "
+            f"requested algorithm {algorithm!r}."
+        )
+
+    if algorithm in TABULAR_ALGORITHMS:
+        agent.load_q_state_dict(state["q"])
+        agent.rng.bit_generator.state = state[
+            "rng_state"
+        ]
+
+        if hasattr(agent, "model"):
+            agent.model = dict(
+                state.get(
+                    "model",
+                    {},
+                )
+            )
+
+        return
+
+    if algorithm == "dqn":
+        agent.online_network.load_state_dict(
+            state[
+                "online_network_state_dict"
+            ]
+        )
+        agent.target_network.load_state_dict(
+            state[
+                "target_network_state_dict"
+            ]
+        )
+        agent.optimizer.load_state_dict(
+            state[
+                "optimizer_state_dict"
+            ]
+        )
+        agent.epsilon = float(state["epsilon"])
+        agent.environment_steps = int(
+            state["environment_steps"]
+        )
+        agent.training_steps = int(
+            state["training_steps"]
+        )
+        agent.rng.bit_generator.state = state[
+            "rng_state"
+        ]
+        agent.replay_buffer.buffer.clear()
+        agent.replay_buffer.buffer.extend(
+            state["replay_buffer"]
+        )
+        agent.replay_buffer.rng.bit_generator.state = (
+            state[
+                "replay_buffer_rng_state"
+            ]
+        )
+        return
+
+    network_module_for_algorithm(
+        algorithm,
+        agent,
+    ).load_state_dict(
+        state["model_state_dict"]
+    )
+    agent.optimizer.load_state_dict(
+        state["optimizer_state_dict"]
+    )
+
+    if "entropy_coefficient" in state:
+        agent.entropy_coefficient = float(
+            state["entropy_coefficient"]
+        )
+
+
+def runtime_rng_state_dict() -> dict:
+    state = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+    }
+
+    if torch.cuda.is_available():
+        state["torch_cuda"] = (
+            torch.cuda.get_rng_state_all()
+        )
+
+    return state
+
+
+def load_runtime_rng_state(
+    state: dict,
+) -> None:
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch"])
+
+    if (
+        torch.cuda.is_available()
+        and "torch_cuda" in state
+    ):
+        torch.cuda.set_rng_state_all(
+            state["torch_cuda"]
+        )
+
+
+def training_state_metadata(
+    *,
+    args,
+    agent_hyperparameters: dict[str, float | int],
+    task_selection_pass_budget: int,
+    task_batch_size: int,
+    rollout_group_size: int,
+) -> dict:
+    return {
+        "algorithm": args.algorithm,
+        "agent_hyperparameters": dict(
+            agent_hyperparameters
+        ),
+        "dataset": str(args.dataset),
+        "fixed_index": args.fixed_index,
+        "max_steps": args.max_steps,
+        "seed": args.seed,
+        "rollouts_per_task": args.rollouts_per_task,
+        "task_selection_pass_budget": (
+            task_selection_pass_budget
+        ),
+        "task_batch_size": task_batch_size,
+        "rollout_group_size": rollout_group_size,
+        "validation_dataset": (
+            None
+            if args.validation_dataset is None
+            else str(args.validation_dataset)
+        ),
+        "same_layout_dataset": (
+            None
+            if args.same_layout_dataset is None
+            else str(args.same_layout_dataset)
+        ),
+        "validation_interval": args.validation_interval,
+        "validation_episodes": args.validation_episodes,
+        "validation_all_tasks": args.validation_all_tasks,
+        "early_stopping_patience": (
+            args.early_stopping_patience
+        ),
+        "early_stopping_min_delta": (
+            args.early_stopping_min_delta
+        ),
+    }
+
+
+def validate_training_state_metadata(
+    state: dict,
+    expected_metadata: dict,
+) -> None:
+    metadata = state.get("metadata")
+
+    if metadata != expected_metadata:
+        raise RuntimeError(
+            "Stored training state does not match the "
+            "requested training configuration."
+        )
+
+
+def file_size(path: Path) -> int | None:
+    if not path.exists():
+        return None
+
+    return path.stat().st_size
+
+
+def truncate_file(
+    path: Path,
+    size: int | None,
+) -> None:
+    if size is None or not path.exists():
+        return
+
+    with path.open("r+b") as file:
+        file.truncate(size)
+
+
+def save_training_state(
+    path: Path,
+    state: dict,
+) -> None:
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    temporary_path = path.with_suffix(
+        path.suffix + ".tmp"
+    )
+    torch.save(
+        state,
+        temporary_path,
+    )
+    temporary_path.replace(path)
+
+
+def load_training_state(
+    path: Path,
+    device: torch.device,
+) -> dict:
+    try:
+        return torch.load(
+            path,
+            map_location=device,
+            weights_only=False,
+        )
+    except TypeError:
+        return torch.load(
+            path,
+            map_location=device,
+        )
 
 
 def should_validate_epoch(
@@ -1702,6 +2059,9 @@ def main():
     validation_metrics_path = (
         run_dir / "validation_metrics.csv"
     )
+    training_state_path = (
+        run_dir / "training_state.pt"
+    )
     best_checkpoint_path = (
         run_dir / "best_checkpoint.pt"
     )
@@ -1709,14 +2069,25 @@ def main():
         run_dir / "training_summary.json"
     )
 
-    if metrics_path.exists() and not args.resume:
+    if (
+        metrics_path.exists()
+        and not args.resume
+        and not args.resume_training_state
+    ):
         metrics_path.unlink()
 
     if (
         validation_metrics_path.exists()
         and not args.resume
+        and not args.resume_training_state
     ):
         validation_metrics_path.unlink()
+
+    if (
+        training_state_path.exists()
+        and not args.resume_training_state
+    ):
+        training_state_path.unlink()
 
     validation_envs = {}
 
@@ -1841,6 +2212,137 @@ def main():
         seed=args.seed,
     )
     rollout = 0
+    restored_epoch_metrics_by_epoch = {}
+    restored_next_epoch_to_log = 1
+    expected_training_state_metadata = (
+        training_state_metadata(
+            args=args,
+            agent_hyperparameters=agent_hyperparameters,
+            task_selection_pass_budget=task_selection_pass_budget,
+            task_batch_size=task_batch_size,
+            rollout_group_size=rollout_group_size,
+        )
+    )
+
+    if args.resume_training_state:
+        if not training_state_path.exists():
+            raise RuntimeError(
+                "--resume-training-state requested, but "
+                f"{training_state_path} does not exist."
+            )
+
+        training_state = load_training_state(
+            training_state_path,
+            device,
+        )
+        validate_training_state_metadata(
+            training_state,
+            expected_training_state_metadata,
+        )
+        load_agent_training_state(
+            args.algorithm,
+            agent,
+            training_state["agent"],
+        )
+        sampler.load_state_dict(
+            training_state["sampler"]
+        )
+        load_runtime_rng_state(
+            training_state["rng"]
+        )
+
+        progress_state = training_state[
+            "progress"
+        ]
+        reached_task_indices = set(
+            progress_state[
+                "reached_task_indices"
+            ]
+        )
+        cumulative_transitions = int(
+            progress_state[
+                "cumulative_transitions"
+            ]
+        )
+        training_round = int(
+            progress_state["training_round"]
+        )
+        optimization_epoch = int(
+            progress_state[
+                "optimization_epoch"
+            ]
+        )
+        rollout = int(progress_state["rollout"])
+        q_snapshots = list(
+            progress_state.get(
+                "q_snapshots",
+                [],
+            )
+        )
+        model_snapshots = list(
+            progress_state.get(
+                "model_snapshots",
+                [],
+            )
+        )
+        best_validation = progress_state.get(
+            "best_validation"
+        )
+        latest_validation_by_split = dict(
+            progress_state.get(
+                "latest_validation_by_split",
+                {},
+            )
+        )
+        validation_checks_without_improvement = int(
+            progress_state[
+                "validation_checks_without_improvement"
+            ]
+        )
+        validation_has_positive_score = bool(
+            progress_state[
+                "validation_has_positive_score"
+            ]
+        )
+        stopped_early = bool(
+            progress_state["stopped_early"]
+        )
+        stopped_epoch = progress_state[
+            "stopped_epoch"
+        ]
+        restored_epoch_metrics_by_epoch = {
+            int(epoch): list(epoch_metrics)
+            for epoch, epoch_metrics in progress_state[
+                "epoch_metrics_by_epoch"
+            ].items()
+        }
+        restored_next_epoch_to_log = int(
+            progress_state[
+                "next_epoch_to_log"
+            ]
+        )
+
+        file_offsets = training_state.get(
+            "file_offsets",
+            {},
+        )
+        truncate_file(
+            metrics_path,
+            file_offsets.get(
+                "metrics_csv_size"
+            ),
+        )
+        truncate_file(
+            validation_metrics_path,
+            file_offsets.get(
+                "validation_metrics_csv_size"
+            ),
+        )
+
+        print(
+            "Loaded full training state from "
+            f"{training_state_path}"
+        )
 
     def build_rollout_groups(
         rollout_specs,
@@ -1876,6 +2378,67 @@ def main():
             for group in rollout_groups
             for episode_spec in group
         ]
+
+    def save_training_progress_state(
+        epoch_metrics_by_epoch,
+        next_epoch_to_log: int,
+    ) -> None:
+        save_training_state(
+            training_state_path,
+            {
+                "version": 1,
+                "metadata": expected_training_state_metadata,
+                "agent": agent_training_state_dict(
+                    args.algorithm,
+                    agent,
+                ),
+                "sampler": sampler.state_dict(),
+                "rng": runtime_rng_state_dict(),
+                "progress": {
+                    "reached_task_indices": sorted(
+                        reached_task_indices
+                    ),
+                    "cumulative_transitions": (
+                        cumulative_transitions
+                    ),
+                    "training_round": training_round,
+                    "optimization_epoch": (
+                        optimization_epoch
+                    ),
+                    "rollout": rollout,
+                    "q_snapshots": q_snapshots,
+                    "model_snapshots": model_snapshots,
+                    "best_validation": best_validation,
+                    "latest_validation_by_split": (
+                        latest_validation_by_split
+                    ),
+                    "validation_checks_without_improvement": (
+                        validation_checks_without_improvement
+                    ),
+                    "validation_has_positive_score": (
+                        validation_has_positive_score
+                    ),
+                    "stopped_early": stopped_early,
+                    "stopped_epoch": stopped_epoch,
+                    "epoch_metrics_by_epoch": (
+                        epoch_metrics_by_epoch
+                    ),
+                    "next_epoch_to_log": (
+                        next_epoch_to_log
+                    ),
+                },
+                "file_offsets": {
+                    "metrics_csv_size": file_size(
+                        metrics_path
+                    ),
+                    "validation_metrics_csv_size": (
+                        file_size(
+                            validation_metrics_path
+                        )
+                    ),
+                },
+            },
+        )
 
     def finish_dataset_epoch(
         dataset_epoch,
@@ -2126,8 +2689,10 @@ def main():
         "a2c",
         "ppo",
     }:
-        epoch_metrics_by_epoch = {}
-        next_epoch_to_log = 1
+        epoch_metrics_by_epoch = dict(
+            restored_epoch_metrics_by_epoch
+        )
+        next_epoch_to_log = restored_next_epoch_to_log
 
         while (
             sampler.completed_dataset_epochs
@@ -2186,10 +2751,16 @@ def main():
                     next_epoch_to_log,
                 )
             )
+            save_training_progress_state(
+                epoch_metrics_by_epoch,
+                next_epoch_to_log,
+            )
 
     elif args.algorithm == "grpo":
-        epoch_metrics_by_epoch = {}
-        next_epoch_to_log = 1
+        epoch_metrics_by_epoch = dict(
+            restored_epoch_metrics_by_epoch
+        )
+        next_epoch_to_log = restored_next_epoch_to_log
 
         print(
             "grpo task_selection_passes="
@@ -2241,10 +2812,16 @@ def main():
                     next_epoch_to_log,
                 )
             )
+            save_training_progress_state(
+                epoch_metrics_by_epoch,
+                next_epoch_to_log,
+            )
 
     else:
-        epoch_metrics_by_epoch = {}
-        next_epoch_to_log = 1
+        epoch_metrics_by_epoch = dict(
+            restored_epoch_metrics_by_epoch
+        )
+        next_epoch_to_log = restored_next_epoch_to_log
 
         while (
             sampler.completed_dataset_epochs
@@ -2332,6 +2909,15 @@ def main():
                     next_epoch_to_log,
                 )
             )
+            save_training_progress_state(
+                epoch_metrics_by_epoch,
+                next_epoch_to_log,
+            )
+
+    save_training_progress_state(
+        epoch_metrics_by_epoch,
+        next_epoch_to_log,
+    )
 
     checkpoint_suffix = (
         ".pkl"
@@ -2378,6 +2964,9 @@ def main():
         "checkpoint_path": str(
             checkpoint_path
         ),
+        "training_state_path": str(
+            training_state_path
+        ),
         "hyperparameters": agent_hyperparameters,
     }
 
@@ -2407,6 +2996,11 @@ def main():
     print(
         f"Saved checkpoint to "
         f"{checkpoint_path}"
+    )
+
+    print(
+        "Saved full training state to "
+        f"{training_state_path}"
     )
 
     if best_validation is not None:

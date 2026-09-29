@@ -324,9 +324,11 @@ TUNING_ARGUMENT_FIELDS = [
     "early_stopping_min_delta",
     "tensorboard",
     "keep_plots",
+    "resume_training_state",
 ]
 TUNING_OPTIONAL_ARGUMENT_DEFAULTS = {
     "q_snapshot_count": 11,
+    "resume_training_state": False,
 }
 TUNING_PATH_ARGUMENT_FIELDS = {
     "train_dataset",
@@ -573,6 +575,16 @@ def parse_args(
         ),
     )
     parser.add_argument(
+        "--resume-training-state",
+        action="store_true",
+        help=(
+            "For incomplete combinations, ask the child training "
+            "run to restore its full training_state.pt. This is "
+            "separate from --resume, which controls tuner-level "
+            "combination skipping and recovery."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help=(
@@ -587,12 +599,20 @@ def parse_args(
         args.hyperparameter_combinations is not None
     )
     args.tensorboard_from_cli = args.tensorboard is not None
+    args.resume_training_state_from_cli = (
+        args.resume_training_state
+    )
 
     if args.hyperparameter_combinations is None:
         args.hyperparameter_combinations = 100
 
     if args.tensorboard is None:
         args.tensorboard = False
+
+    if args.resume_training_state and not args.resume:
+        parser.error(
+            "--resume-training-state requires --resume for tuning."
+        )
 
     return args
 
@@ -928,6 +948,16 @@ def apply_tuning_config(
         ):
             continue
 
+        if (
+            name == "resume_training_state"
+            and getattr(
+                args,
+                "resume_training_state_from_cli",
+                False,
+            )
+        ):
+            continue
+
         argument_name = name
 
         if (
@@ -1077,6 +1107,15 @@ def build_training_command(
         command.append("--tensorboard")
     else:
         command.append("--no-tensorboard")
+
+    if getattr(
+        args,
+        "resume_training_state",
+        False,
+    ):
+        command.append(
+            "--resume-training-state"
+        )
 
     if not args.keep_plots:
         command.append("--no-plot")

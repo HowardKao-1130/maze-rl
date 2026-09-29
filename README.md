@@ -50,10 +50,12 @@ goal. Columns plot each metric against dataset epoch and cumulative env steps.
 New metrics files also include `internal_updates`, which adds a cumulative
 internal-update column.
 
-Training writes `metrics.csv`, a `checkpoint.pkl` for tabular algorithms or
-`checkpoint.pt` for neural algorithms, and this plot automatically at the end of
-each run. Existing `metrics.csv` files are replaced by default; pass `--resume`
-to append to an existing metrics file.
+Training writes `metrics.csv`, `training_state.pt`, a `checkpoint.pkl` for
+tabular algorithms or `checkpoint.pt` for neural algorithms, and this plot
+automatically at the end of each run. Existing `metrics.csv` files are replaced
+by default; pass `--resume` to append to an existing metrics file. The separate
+`--resume-training-state` mode restores `training_state.pt`, including model,
+optimizer, sampler, RNG, counter, pending-metric, and validation state.
 Training prints periodic per-rollout progress messages by default; pass
 `--no-progress` to hide those messages. Hyperparameter tuning passes
 `--no-progress` automatically so tuning output focuses on combination and
@@ -187,12 +189,14 @@ If a sweep is interrupted, rerun the same command with `--resume` to skip
 completed hyperparameter combinations recorded in `tuning_results.csv`, recover
 finished combination directories that were interrupted before their result row
 was appended, and rerun only incomplete combinations with the same sampled seed
-and hyperparameters. When `--resume` finds the algorithm's stored tuning config,
-it ignores new conflicting tuning arguments and continues with the stored
-arguments, including the combination count, rollout budget, datasets, seed,
-validation settings, and search space. If tuning history exists for that
-algorithm without a stored config, resume stops instead of guessing the old
-arguments.
+and hyperparameters. Add `--resume-training-state` with `--resume` to ask
+incomplete child training runs to restore their saved `training_state.pt`
+instead of starting that combination over. When `--resume` finds the
+algorithm's stored tuning config, it ignores new conflicting tuning arguments
+and continues with the stored arguments, including the combination count,
+rollout budget, datasets, seed, validation settings, and search space. If
+tuning history exists for that algorithm without a stored config, resume stops
+instead of guessing the old arguments.
 
 Keep `--rollouts-per-task` as the training budget for comparable combinations.
 Increasing it usually improves final performance but also changes compute cost,
