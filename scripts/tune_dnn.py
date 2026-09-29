@@ -1310,10 +1310,18 @@ def build_training_command(
     else:
         command.append("--no-tensorboard")
 
-    if getattr(
-        args,
-        "resume_training_state",
-        False,
+    training_state_path = (
+        trial_dir
+        / args.algorithm
+        / "training_state.pt"
+    )
+    if (
+        getattr(
+            args,
+            "resume_training_state",
+            False,
+        )
+        and training_state_path.exists()
     ):
         command.append(
             "--resume-training-state"
@@ -2429,6 +2437,24 @@ def train_metric_candidates(
     ]
 
 
+def training_metric_row_matches(
+    row: dict[str, str],
+    *,
+    metric: str,
+    candidate: str,
+) -> bool:
+    if (
+        metric
+        == "average_successful_path_efficiency"
+        and candidate == "path_efficiency"
+    ):
+        return parse_summary_float(
+            row.get("success")
+        ) == 1.0
+
+    return True
+
+
 def best_train_metric(
     metrics_path: Path,
     *,
@@ -2452,6 +2478,13 @@ def best_train_metric(
 
         for row in rows:
             if candidate not in row:
+                continue
+
+            if not training_metric_row_matches(
+                row,
+                metric=metric,
+                candidate=candidate,
+            ):
                 continue
 
             value = parse_summary_float(
@@ -2580,6 +2613,13 @@ def aligned_training_metric_series(
 
         for row in rows:
             if candidate not in row:
+                continue
+
+            if not training_metric_row_matches(
+                row,
+                metric=metric,
+                candidate=candidate,
+            ):
                 continue
 
             epoch = int(
@@ -3464,170 +3504,189 @@ def plot_validation_metric_montage(
     ):
         stale_page_path.unlink()
 
-    plot_count = len(plot_artifacts)
     slot_count = (
         SUMMARY_MONTAGE_COLUMNS
         * SUMMARY_MONTAGE_ROWS
     )
-    if plot_count > slot_count:
-        raise RuntimeError(
-            "Validation metric trial grids support at most "
-            f"{slot_count} trials per agent; found "
-            f"{plot_count} for {algorithm}."
-        )
-
-    figure, axes = plt.subplots(
-        SUMMARY_MONTAGE_ROWS,
-        SUMMARY_MONTAGE_COLUMNS,
-        figsize=(
-            (
-                SUMMARY_MONTAGE_AXIS_WIDTH
-                * SUMMARY_MONTAGE_COLUMNS
-            ),
-            (
-                SUMMARY_MONTAGE_AXIS_HEIGHT
-                * SUMMARY_MONTAGE_ROWS
-            ),
-        ),
-        sharey=False,
-        squeeze=False,
+    plot_count = len(plot_artifacts)
+    page_count = math.ceil(
+        plot_count / slot_count
     )
 
-    for axis in axes.reshape(-1):
-        axis.axis("off")
-
-    legend_handles = None
-    legend_labels = None
-
-    for index, (axis, artifact) in enumerate(zip(
-        axes.reshape(-1),
-        plot_artifacts,
-    )):
-        axis.axis("on")
-        plotted = plot_summary_metric_series(
-            axis,
-            artifact,
-            metric=metric,
-        )
-        is_best_trial = artifact["trial"] in best_trials
-        title = f"Trial {artifact['trial']}"
-        score_text = artifact_title_score_text(
-            artifact,
-            metric=metric,
+    for page_index in range(page_count):
+        page_artifacts = plot_artifacts[
+            page_index * slot_count : (
+                page_index + 1
+            )
+            * slot_count
+        ]
+        page_output_path = (
+            output_path
+            if page_index == 0
+            else output_path.with_name(
+                f"{output_path.stem}_page_"
+                f"{page_index + 1:02d}"
+                f"{output_path.suffix}"
+            )
         )
 
-        if is_best_trial:
-            title = f"{title} best"
-
-        if score_text:
-            title = f"{title}: {score_text}"
-
-        axis.set_title(
-            title,
-            fontsize=18,
-            pad=8,
-        )
-        axis.tick_params(
-            labelsize=15,
-        )
-        axis.grid(
-            True,
-            alpha=0.22,
-            linewidth=0.8,
+        figure, axes = plt.subplots(
+            SUMMARY_MONTAGE_ROWS,
+            SUMMARY_MONTAGE_COLUMNS,
+            figsize=(
+                (
+                    SUMMARY_MONTAGE_AXIS_WIDTH
+                    * SUMMARY_MONTAGE_COLUMNS
+                ),
+                (
+                    SUMMARY_MONTAGE_AXIS_HEIGHT
+                    * SUMMARY_MONTAGE_ROWS
+                ),
+            ),
+            sharey=False,
+            squeeze=False,
         )
 
-        set_summary_axis_y_limits(
-            axis,
-            metric=metric,
-        )
+        for axis in axes.reshape(-1):
+            axis.axis("off")
 
-        if plotted:
-            legend_handles, legend_labels = (
-                axis.get_legend_handles_labels()
+        legend_handles = None
+        legend_labels = None
+
+        for index, (axis, artifact) in enumerate(zip(
+            axes.reshape(-1),
+            page_artifacts,
+        )):
+            axis.axis("on")
+            plotted = plot_summary_metric_series(
+                axis,
+                artifact,
+                metric=metric,
+            )
+            is_best_trial = artifact["trial"] in best_trials
+            title = f"Trial {artifact['trial']}"
+            score_text = artifact_title_score_text(
+                artifact,
+                metric=metric,
             )
 
-        if is_best_trial:
-            axis.set_facecolor("#fffaf0")
-            for spine in axis.spines.values():
-                spine.set_linewidth(2.0)
-                spine.set_edgecolor("#d27d00")
+            if is_best_trial:
+                title = f"{title} best"
 
-        row_index = index // SUMMARY_MONTAGE_COLUMNS
-        column_index = index % SUMMARY_MONTAGE_COLUMNS
+            if score_text:
+                title = f"{title}: {score_text}"
 
-        if row_index == SUMMARY_MONTAGE_ROWS - 1:
-            axis.set_xlabel(
-                "Dataset epoch",
-                fontsize=16,
+            axis.set_title(
+                title,
+                fontsize=18,
+                pad=8,
             )
-        else:
             axis.tick_params(
-                labelbottom=False,
+                labelsize=15,
+            )
+            axis.grid(
+                True,
+                alpha=0.22,
+                linewidth=0.8,
             )
 
-        if column_index == 0:
-            axis.set_ylabel(
-                metric_label,
-                fontsize=16,
+            set_summary_axis_y_limits(
+                axis,
+                metric=metric,
             )
 
-    for axis in axes.reshape(-1)[plot_count:]:
-        axis.axis("on")
-        axis.set_facecolor("#f7f7f7")
-        axis.set_xticks([])
-        axis.set_yticks([])
-        axis.text(
-            0.5,
-            0.5,
-            "No completed trial",
-            ha="center",
-            va="center",
-            transform=axis.transAxes,
-            color="#777777",
-            fontsize=18,
-        )
-        for spine in axis.spines.values():
-            spine.set_color("#dddddd")
-            spine.set_linewidth(1.0)
+            if plotted:
+                legend_handles, legend_labels = (
+                    axis.get_legend_handles_labels()
+                )
 
-    figure.suptitle(
-        (
-            f"{algorithm} validation and aligned training "
-            "metrics across trials"
-        ),
-        fontsize=30,
-        y=0.99,
-    )
-    if (
-        legend_handles is not None
-        and legend_labels is not None
-    ):
-        figure.legend(
-            legend_handles,
-            legend_labels,
-            loc="upper center",
-            ncol=len(legend_labels),
-            bbox_to_anchor=(0.5, 0.96),
-            frameon=False,
-            fontsize=22,
+            if is_best_trial:
+                axis.set_facecolor("#fffaf0")
+                for spine in axis.spines.values():
+                    spine.set_linewidth(2.0)
+                    spine.set_edgecolor("#d27d00")
+
+            row_index = index // SUMMARY_MONTAGE_COLUMNS
+            column_index = index % SUMMARY_MONTAGE_COLUMNS
+
+            if row_index == SUMMARY_MONTAGE_ROWS - 1:
+                axis.set_xlabel(
+                    "Dataset epoch",
+                    fontsize=16,
+                )
+            else:
+                axis.tick_params(
+                    labelbottom=False,
+                )
+
+            if column_index == 0:
+                axis.set_ylabel(
+                    metric_label,
+                    fontsize=16,
+                )
+
+        for axis in axes.reshape(-1)[len(page_artifacts):]:
+            axis.axis("on")
+            axis.set_facecolor("#f7f7f7")
+            axis.set_xticks([])
+            axis.set_yticks([])
+            axis.text(
+                0.5,
+                0.5,
+                "No completed trial",
+                ha="center",
+                va="center",
+                transform=axis.transAxes,
+                color="#777777",
+                fontsize=18,
+            )
+            for spine in axis.spines.values():
+                spine.set_color("#dddddd")
+                spine.set_linewidth(1.0)
+
+        page_label = (
+            ""
+            if page_count == 1
+            else f" (page {page_index + 1}/{page_count})"
         )
-    figure.subplots_adjust(
-        left=0.045,
-        right=0.99,
-        bottom=0.04,
-        top=0.91,
-        hspace=0.22,
-        wspace=0.14,
-    )
-    figure.savefig(
-        output_path,
-        dpi=SUMMARY_MONTAGE_DPI,
-        facecolor="white",
-        edgecolor="white",
-        transparent=False,
-    )
-    rewrite_png_without_alpha(output_path)
-    plt.close(figure)
+        figure.suptitle(
+            (
+                f"{algorithm} validation and aligned training "
+                f"metrics across trials{page_label}"
+            ),
+            fontsize=30,
+            y=0.99,
+        )
+        if (
+            legend_handles is not None
+            and legend_labels is not None
+        ):
+            figure.legend(
+                legend_handles,
+                legend_labels,
+                loc="upper center",
+                ncol=len(legend_labels),
+                bbox_to_anchor=(0.5, 0.96),
+                frameon=False,
+                fontsize=22,
+            )
+        figure.subplots_adjust(
+            left=0.045,
+            right=0.99,
+            bottom=0.04,
+            top=0.91,
+            hspace=0.22,
+            wspace=0.14,
+        )
+        figure.savefig(
+            page_output_path,
+            dpi=SUMMARY_MONTAGE_DPI,
+            facecolor="white",
+            edgecolor="white",
+            transparent=False,
+        )
+        rewrite_png_without_alpha(page_output_path)
+        plt.close(figure)
 
     return plot_count
 
@@ -3692,10 +3751,26 @@ def summarize_tuning(
         )
 
         if filled_trial_slots:
+            slot_count = (
+                SUMMARY_MONTAGE_COLUMNS
+                * SUMMARY_MONTAGE_ROWS
+            )
+            page_count = math.ceil(
+                filled_trial_slots / slot_count
+            )
+            grid_summary = (
+                f"{filled_trial_slots}/{slot_count} "
+                "trial slots filled"
+                if page_count == 1
+                else (
+                    f"{filled_trial_slots} trial plots "
+                    f"across {page_count} pages"
+                )
+            )
             print(
                 "Saved validation metrics trial grid to "
                 f"{montage_path} "
-                f"({filled_trial_slots}/20 trial slots filled)",
+                f"({grid_summary})",
                 flush=True,
             )
         else:

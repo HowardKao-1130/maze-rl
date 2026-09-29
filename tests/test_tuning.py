@@ -1123,6 +1123,13 @@ def test_training_command_includes_trial_hyperparameters(tmp_path):
 def test_training_command_can_request_training_state_resume(
     tmp_path,
 ):
+    state_dir = tmp_path / "trial" / "ppo"
+    state_dir.mkdir(
+        parents=True,
+    )
+    (
+        state_dir / "training_state.pt"
+    ).write_bytes(b"state")
     args = SimpleNamespace(
         algorithm="ppo",
         rollouts_per_task=3,
@@ -1150,6 +1157,38 @@ def test_training_command_can_request_training_state_resume(
     )
 
     assert "--resume-training-state" in command
+
+
+def test_training_command_skips_training_state_resume_without_state(
+    tmp_path,
+):
+    args = SimpleNamespace(
+        algorithm="ppo",
+        rollouts_per_task=3,
+        max_steps=7,
+        validation_dataset=tmp_path / "validation.npz",
+        same_layout_dataset=tmp_path
+        / "same_layout_new_goals.npz",
+        validation_interval=2,
+        early_stopping_patience=4,
+        early_stopping_min_delta=0.01,
+        q_snapshot_count=7,
+        tensorboard=False,
+        keep_plots=False,
+        resume_training_state=True,
+    )
+
+    command = build_training_command(
+        args=args,
+        trial_dir=tmp_path / "trial",
+        train_dataset=tmp_path / "train.npz",
+        trial_seed=11,
+        hyperparameters={
+            "learning_rate": 0.0003,
+        },
+    )
+
+    assert "--resume-training-state" not in command
 
 
 def test_training_command_passes_grpo_task_and_group_sizes(tmp_path):
@@ -1787,6 +1826,38 @@ def test_aligned_training_metric_series_uses_validation_epochs(tmp_path):
     ]
 
 
+def test_aligned_training_metric_series_filters_successful_efficiency(
+    tmp_path,
+):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (
+        run_dir / "metrics.csv"
+    ).write_text(
+        (
+            "episode,epoch,success,path_efficiency\n"
+            "1,1,True,0.8\n"
+            "2,1,False,0.2\n"
+            "3,1,True,0.6\n"
+            "4,2,False,0.9\n"
+        )
+    )
+
+    assert aligned_training_metric_series(
+        run_dir / "metrics.csv",
+        metric="average_successful_path_efficiency",
+        aligned_epochs={
+            1,
+            2,
+        },
+    ) == [
+        (
+            1,
+            0.7,
+        )
+    ]
+
+
 def test_best_performing_trials_marks_validation_metric_ties(tmp_path):
     output_dir = tmp_path / "tuning"
     write_fake_validation_artifacts(
@@ -2076,8 +2147,9 @@ def test_validation_metric_montage_uses_fixed_bounded_trial_scale(
     )
 
 
-def test_validation_metric_montage_rejects_more_than_twenty_trials(
+def test_validation_metric_montage_paginates_more_than_twenty_trials(
     tmp_path,
+    monkeypatch,
 ):
     output_dir = tmp_path / "tuning"
 
@@ -2094,21 +2166,61 @@ def test_validation_metric_montage_rejects_more_than_twenty_trials(
     artifacts = discover_validation_metric_artifacts(
         output_dir
     )
+    output_path = (
+        tmp_path
+        / "summary"
+        / "ppo_validation_metrics_trials.png"
+    )
+    saved_figures = []
 
-    with pytest.raises(
-        RuntimeError,
-        match="at most 20 trials",
+    import matplotlib.figure
+
+    def fake_savefig(
+        self,
+        path,
+        *args,
+        **kwargs,
     ):
-        plot_validation_metric_montage(
-            artifacts,
-            algorithm="ppo",
-            metric="mean_path_efficiency",
-            output_path=(
+        saved_figures.append(
+            {
+                "path": path,
+                "axis_count": len(self.axes),
+                "visible_axes": sum(
+                    axis.axison
+                    for axis in self.axes
+                ),
+            }
+        )
+
+    monkeypatch.setattr(
+        matplotlib.figure.Figure,
+        "savefig",
+        fake_savefig,
+    )
+
+    assert plot_validation_metric_montage(
+        artifacts,
+        algorithm="ppo",
+        metric="mean_path_efficiency",
+        output_path=output_path,
+    ) == 21
+
+    assert saved_figures == [
+        {
+            "path": output_path,
+            "axis_count": 20,
+            "visible_axes": 20,
+        },
+        {
+            "path": (
                 tmp_path
                 / "summary"
-                / "ppo_validation_metrics_trials.png"
+                / "ppo_validation_metrics_trials_page_02.png"
             ),
-        )
+            "axis_count": 20,
+            "visible_axes": 20,
+        },
+    ]
 
 
 def test_read_completed_results_requires_artifacts(tmp_path):
