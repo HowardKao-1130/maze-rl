@@ -1303,19 +1303,51 @@ def runtime_rng_state_dict() -> dict:
     return state
 
 
+def torch_rng_state_tensor(
+    state,
+) -> torch.Tensor:
+    if isinstance(
+        state,
+        torch.Tensor,
+    ):
+        return (
+            state.detach()
+            .cpu()
+            .to(dtype=torch.uint8)
+            .contiguous()
+        )
+
+    return torch.as_tensor(
+        state,
+        dtype=torch.uint8,
+        device="cpu",
+    ).contiguous()
+
+
 def load_runtime_rng_state(
     state: dict,
 ) -> None:
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
-    torch.set_rng_state(state["torch"])
+    torch.set_rng_state(
+        torch_rng_state_tensor(
+            state["torch"]
+        )
+    )
 
     if (
         torch.cuda.is_available()
         and "torch_cuda" in state
     ):
         torch.cuda.set_rng_state_all(
-            state["torch_cuda"]
+            [
+                torch_rng_state_tensor(
+                    cuda_state
+                )
+                for cuda_state in state[
+                    "torch_cuda"
+                ]
+            ]
         )
 
 
@@ -1596,14 +1628,18 @@ def format_validation_progress_message(
     dataset_epoch: int,
     task_selection_pass_budget: int,
     validation_score: float,
+    success_rate: float | None = None,
     best_score: float | None = None,
 ) -> str:
     message = (
-        f"{split} task_selection_pass="
+        f"  {split} task_selection_pass="
         f"{dataset_epoch:5d}/{task_selection_pass_budget} "
         f"({dataset_epoch / task_selection_pass_budget:.0%}) "
         f"mean_path_efficiency={validation_score:.3f}"
     )
+
+    if success_rate is not None:
+        message += f" success_rate={success_rate:.3f}"
 
     if best_score is not None:
         message += f" (best={best_score:.3f})"
@@ -2743,6 +2779,9 @@ def main():
                             dataset_epoch,
                             task_selection_pass_budget,
                             validation_score,
+                            success_rate=validation_row[
+                                "success_rate"
+                            ],
                         )
                     )
                     continue
@@ -2782,7 +2821,10 @@ def main():
                         dataset_epoch,
                         task_selection_pass_budget,
                         validation_score,
-                        best_validation[
+                        success_rate=validation_row[
+                            "success_rate"
+                        ],
+                        best_score=best_validation[
                             "mean_path_efficiency"
                         ],
                     )

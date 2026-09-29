@@ -48,6 +48,10 @@ SUMMARY_SPLIT_ALIASES = {
     "same_layout": "same_layout",
     "val_with_same_layout": "same_layout",
 }
+SUMMARY_MONTAGE_X_LIMIT = (
+    0,
+    205,
+)
 SUMMARY_TRAIN_METRIC_ALIASES = {
     "average_episode_return": [
         "episode_return",
@@ -131,7 +135,6 @@ def rewrite_png_without_alpha(
         path,
         composited.astype(np.uint8),
     )
-
 
 DEFAULT_SEARCH_SPACES: dict[
     str,
@@ -1757,6 +1760,34 @@ def result_has_stale_completion_marker(
     )
 
 
+def training_summary_completed(
+    training_summary: dict[str, Any],
+) -> bool:
+    if training_summary.get("stopped_early") is True:
+        return True
+
+    completed = training_summary.get(
+        "task_selection_passes_completed",
+        training_summary.get(
+            "dataset_epochs_completed"
+        ),
+    )
+    requested = training_summary.get(
+        "task_selection_passes_requested",
+        training_summary.get(
+            "dataset_epochs_requested"
+        ),
+    )
+
+    if completed is None or requested is None:
+        return False
+
+    try:
+        return int(completed) >= int(requested)
+    except (TypeError, ValueError):
+        return False
+
+
 def result_artifacts_match(
     result: dict[str, Any],
 ) -> bool:
@@ -1788,6 +1819,11 @@ def result_artifacts_match(
     )
 
     if not isinstance(best_validation, dict):
+        return False
+
+    if not training_summary_completed(
+        training_summary
+    ):
         return False
 
     try:
@@ -2024,6 +2060,10 @@ def build_result_from_artifacts(
         if not isinstance(
             best_validation,
             dict,
+        ):
+            return None
+        if not training_summary_completed(
+            training_summary
         ):
             return None
         objective = best_validation[
@@ -2346,6 +2386,64 @@ def best_metric_by_split(
         split: max(split_values)
         for split, split_values in values.items()
         if split_values
+    }
+
+
+def metric_series_by_split(
+    metrics_path: Path,
+    metric: str,
+) -> dict[str, list[tuple[int, float]]]:
+    series: dict[str, list[tuple[int, float]]] = {
+        split: []
+        for split in SUMMARY_SPLITS
+    }
+
+    with metrics_path.open(
+        newline="",
+    ) as file:
+        reader = csv.DictReader(file)
+
+        for row in reader:
+            raw_value = row.get(metric)
+
+            if raw_value in {
+                None,
+                "",
+            }:
+                continue
+
+            split = canonical_summary_split(
+                row.get(
+                    "split",
+                    "validation",
+                )
+            )
+
+            if split not in series:
+                continue
+
+            raw_epoch = row.get(
+                "dataset_epoch",
+                row.get("epoch"),
+            )
+
+            if raw_epoch in {
+                None,
+                "",
+            }:
+                continue
+
+            series[split].append(
+                (
+                    int(raw_epoch),
+                    float(raw_value),
+                )
+            )
+
+    return {
+        split: sorted(points)
+        for split, points in series.items()
+        if points
     }
 
 
@@ -3584,6 +3682,9 @@ def plot_validation_metric_montage(
             axis.tick_params(
                 labelsize=15,
             )
+            axis.set_xlim(
+                *SUMMARY_MONTAGE_X_LIMIT
+            )
             axis.grid(
                 True,
                 alpha=0.22,
@@ -3609,15 +3710,10 @@ def plot_validation_metric_montage(
             row_index = index // SUMMARY_MONTAGE_COLUMNS
             column_index = index % SUMMARY_MONTAGE_COLUMNS
 
-            if row_index == SUMMARY_MONTAGE_ROWS - 1:
-                axis.set_xlabel(
-                    "Dataset epoch",
-                    fontsize=16,
-                )
-            else:
-                axis.tick_params(
-                    labelbottom=False,
-                )
+            axis.set_xlabel(
+                "Dataset epoch",
+                fontsize=16,
+            )
 
             if column_index == 0:
                 axis.set_ylabel(
@@ -3776,7 +3872,7 @@ def summarize_tuning(
         else:
             print(
                 "Skipped validation metrics trial grid for "
-                f"{algorithm}; no validation_metrics.png files "
+                f"{algorithm}; no validation_metrics.csv files "
                 "were found.",
                 flush=True,
             )

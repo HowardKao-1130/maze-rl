@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import random
 from types import SimpleNamespace
 
 import numpy as np
@@ -43,6 +44,7 @@ from scripts.train import (
     format_validation_progress_message,
     load_best_config_overrides,
     load_agent_training_state,
+    load_runtime_rng_state,
     load_training_state,
     log_tensorboard_episode,
     log_tensorboard_epoch,
@@ -550,10 +552,34 @@ def test_validation_progress_formats_best_in_parentheses():
             dataset_epoch=103,
             task_selection_pass_budget=200,
             validation_score=0.419,
+            success_rate=0.625,
             best_score=0.439,
         )
-        == "validation task_selection_pass=  103/200 "
-        "(52%) mean_path_efficiency=0.419 (best=0.439)"
+        == "  validation task_selection_pass=  103/200 "
+        "(52%) mean_path_efficiency=0.419 "
+        "success_rate=0.625 (best=0.439)"
+    )
+
+
+def test_training_epoch_progress_includes_success_and_efficiency():
+    assert (
+        format_training_epoch_progress_message(
+            dataset_epoch=2,
+            task_selection_pass_budget=4,
+            epoch_metrics=[
+                make_metrics(
+                    episode=1,
+                    epoch=2,
+                ),
+                make_metrics(
+                    episode=2,
+                    epoch=2,
+                ),
+            ],
+        )
+        == "train task_selection_pass=    2/4 (50%) "
+        "mean_return=1.500 success_rate=1.000 "
+        "mean_path_efficiency=0.714 mean_steps=7.0"
     )
 
 
@@ -1309,6 +1335,18 @@ def test_training_state_saves_atomically_and_loads(
     assert not path.with_suffix(
         ".pt.tmp"
     ).exists()
+
+
+def test_runtime_rng_restore_accepts_non_cpu_byte_tensor():
+    state = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state().to(
+            dtype=torch.int16
+        ),
+    }
+
+    load_runtime_rng_state(state)
 
 
 def test_training_state_metadata_rejects_changed_hyperparameters(

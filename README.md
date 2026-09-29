@@ -56,10 +56,12 @@ automatically at the end of each run. Existing `metrics.csv` files are replaced
 by default; pass `--resume` to append to an existing metrics file. The separate
 `--resume-training-state` mode restores `training_state.pt`, including model,
 optimizer, sampler, RNG, counter, pending-metric, and validation state.
-Training prints periodic per-rollout progress messages by default; pass
-`--no-progress` to hide those messages. Hyperparameter tuning passes
-`--no-progress` automatically so tuning output focuses on combination and
-validation summaries.
+Training prints completed task-selection-pass progress by default, including
+training-set mean path efficiency and success rate. When validation datasets are
+enabled, validation progress also prints mean path efficiency and success rate.
+Pass `--no-progress` to hide those training progress messages. Hyperparameter
+tuning passes `--no-progress` automatically so tuning output focuses on
+combination and validation summaries.
 
 Training enables deterministic Torch algorithms, disables cuDNN benchmarking and
 TF32, and configures cuBLAS workspace determinism before importing Torch. This
