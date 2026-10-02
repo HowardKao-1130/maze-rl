@@ -674,9 +674,8 @@ def test_validation_progress_formats_best_in_parentheses():
             success_rate=0.625,
             best_score=0.439,
         )
-        == "  validation task_selection_pass=  103/200 "
-        "(52%) mean_path_efficiency=0.419 "
-        "success_rate=0.625 (best=0.439)"
+        == "                        val      eff=0.419 "
+        "succ=0.625 (best=0.439)"
     )
 
 
@@ -695,10 +694,11 @@ def test_training_epoch_progress_includes_success_and_efficiency():
                     epoch=2,
                 ),
             ],
+            early_stopping_counter=7,
+            early_stopping_patience=35,
         )
-        == "train task_selection_pass=    2/4 (50%) "
-        "mean_return=1.500 success_rate=1.000 "
-        "mean_path_efficiency=0.714 mean_steps=7.0"
+        == "pass 2/4 50% | train eff=0.714 "
+        "succ=1.000 steps=7.0 es=7/35"
     )
 
 
@@ -735,10 +735,11 @@ def test_training_epoch_progress_formats_epoch_summary():
                     path_efficiency=0.0,
                 ),
             ],
+            early_stopping_counter=3,
+            early_stopping_patience=10,
         )
-        == "train task_selection_pass=    5/1000 "
-        "(0%) mean_return=-2.000 success_rate=0.500 "
-        "mean_path_efficiency=0.400 mean_steps=16.0"
+        == "pass    5/1000  0% | train eff=0.400 "
+        "succ=0.500 steps=16.0 es=3/10"
     )
 
 

@@ -2064,15 +2064,9 @@ def format_training_epoch_progress_message(
     dataset_epoch: int,
     task_selection_pass_budget: int,
     epoch_metrics,
+    early_stopping_counter: int | None = None,
+    early_stopping_patience: int | None = None,
 ) -> str:
-    mean_return = float(
-        np.mean(
-            [
-                metrics.episode_return
-                for metrics in epoch_metrics
-            ]
-        )
-    )
     success_rate = float(
         np.mean(
             [
@@ -2097,15 +2091,24 @@ def format_training_epoch_progress_message(
             ]
         )
     )
+    early_stopping_status = (
+        "-"
+        if (
+            early_stopping_counter is None
+            or early_stopping_patience is None
+        )
+        else f"{early_stopping_counter}/{early_stopping_patience}"
+    )
 
     return (
-        "train task_selection_pass="
-        f"{dataset_epoch:5d}/{task_selection_pass_budget} "
-        f"({dataset_epoch / task_selection_pass_budget:.0%}) "
-        f"mean_return={mean_return:.3f} "
-        f"success_rate={success_rate:.3f} "
-        f"mean_path_efficiency={mean_path_efficiency:.3f} "
-        f"mean_steps={mean_steps:.1f}"
+        "pass "
+        f"{dataset_epoch:>{len(str(task_selection_pass_budget))}d}/"
+        f"{task_selection_pass_budget} "
+        f"{dataset_epoch / task_selection_pass_budget:>3.0%} | "
+        f"train eff={mean_path_efficiency:.3f} "
+        f"succ={success_rate:.3f} "
+        f"steps={mean_steps:.1f} "
+        f"es={early_stopping_status}"
     )
 
 
@@ -2117,15 +2120,26 @@ def format_validation_progress_message(
     success_rate: float | None = None,
     best_score: float | None = None,
 ) -> str:
+    progress_prefix_width = (
+        len("pass ")
+        + len(str(task_selection_pass_budget))
+        + 1
+        + len(str(task_selection_pass_budget))
+        + 1
+        + 4
+        + len(" | ")
+    )
+    split_label = {
+        "validation": "val",
+        "same_layout": "same-val",
+    }.get(split, split)
     message = (
-        f"  {split} task_selection_pass="
-        f"{dataset_epoch:5d}/{task_selection_pass_budget} "
-        f"({dataset_epoch / task_selection_pass_budget:.0%}) "
-        f"mean_path_efficiency={validation_score:.3f}"
+        f"{'':{progress_prefix_width + 4}s}"
+        f"{split_label:<8s} eff={validation_score:.3f}"
     )
 
     if success_rate is not None:
-        message += f" success_rate={success_rate:.3f}"
+        message += f" succ={success_rate:.3f}"
 
     if best_score is not None:
         message += f" (best={best_score:.3f})"
@@ -3271,6 +3285,12 @@ def main():
                     dataset_epoch,
                     task_selection_pass_budget,
                     epoch_metrics,
+                    early_stopping_counter=(
+                        validation_checks_without_improvement
+                    ),
+                    early_stopping_patience=(
+                        args.early_stopping_patience
+                    ),
                 )
             )
 
