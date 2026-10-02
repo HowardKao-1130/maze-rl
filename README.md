@@ -56,6 +56,12 @@ automatically at the end of each run. Existing `metrics.csv` files are replaced
 by default; pass `--resume` to append to an existing metrics file. The separate
 `--resume-training-state` mode restores `training_state.pt`, including model,
 optimizer, sampler, RNG, counter, pending-metric, and validation state.
+When restoring full training state, omitted run-identity arguments such as the
+dataset, seed, rollout budget, batch shape, and validation settings default to
+the values recorded in `training_state.pt`; explicit incompatible values are
+rejected by the metadata check. Explicit future-run settings such as a larger
+rollout budget, validation cadence, validation episode sampling, and
+early-stopping thresholds can override the stored values.
 Training prints completed task-selection-pass progress by default, including
 training-set mean path efficiency and success rate. When validation datasets are
 enabled, validation progress also prints mean path efficiency and success rate.
@@ -68,9 +74,9 @@ TF32, and configures cuBLAS workspace determinism before importing Torch. This
 targets repeatable neural training for the same code, dataset, arguments,
 hardware, drivers, and library versions.
 
-Neural agents (`dqn`, `reinforce`, `a2c`, and `ppo`) also write TensorBoard logs
-to `runs/<algorithm>/tensorboard` during training by default. Open the latest
-event file for one algorithm with:
+Training does not write TensorBoard logs by default. Pass `--tensorboard` to
+write event logs to `<run directory>/tensorboard`. Open the latest event file
+for one algorithm with:
 
 ```bash
 python scripts/open_tensorboard.py --algorithm dqn
@@ -82,9 +88,8 @@ directory so older event files from previous runs are not overlaid. Pass
 `--event-file <path>` to open a specific event file, or `--all-events` to load
 every event file in the log directory.
 
-Use `--no-tensorboard` to disable neural-agent event logs, `--tensorboard` to
-enable them for a tabular run, or `--tensorboard-dir` to choose another log
-directory.
+Use `--tensorboard` to enable event logs, or `--tensorboard-dir` to choose
+another log directory.
 
 Neural-agent hyperparameters can be passed directly to training, for example:
 

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import pickle
 import random
+import sys
 
 import numpy as np
 
@@ -173,7 +174,75 @@ def configure_reproducibility(seed: int) -> None:
 def tensorboard_default_enabled(
     algorithm: str,
 ) -> bool:
-    return algorithm not in TABULAR_ALGORITHMS
+    del algorithm
+    return False
+
+
+RESUME_METADATA_CLI_OPTIONS = {
+    "dataset": ("--dataset",),
+    "fixed_index": ("--fixed-index",),
+    "max_steps": ("--max-steps",),
+    "seed": ("--seed",),
+    "rollouts_per_task": (
+        "--rollouts-per-task",
+        "--dataset-epochs",
+    ),
+    "task_batch_size": (
+        "--task-batch-size",
+        "--rollout-episodes",
+    ),
+    "rollout_group_size": (
+        "--rollout-group-size",
+        "--group-size",
+    ),
+    "validation_dataset": (
+        "--validation-dataset",
+    ),
+    "same_layout_dataset": (
+        "--same-layout-dataset",
+    ),
+    "validation_interval": (
+        "--validation-interval",
+    ),
+    "validation_episodes": (
+        "--validation-episodes",
+    ),
+    "validation_all_tasks": (
+        "--validation-all-tasks",
+        "--no-validation-all-tasks",
+    ),
+    "early_stopping_patience": (
+        "--early-stopping-patience",
+    ),
+    "early_stopping_min_delta": (
+        "--early-stopping-min-delta",
+    ),
+}
+
+
+def cli_option_present(
+    argv: list[str],
+    option_names: tuple[str, ...],
+) -> bool:
+    return any(
+        argument == option
+        or argument.startswith(f"{option}=")
+        for argument in argv
+        for option in option_names
+    )
+
+
+def resume_metadata_fields_from_argv(
+    argv: list[str],
+) -> set[str]:
+    return {
+        field
+        for field, option_names in RESUME_METADATA_CLI_OPTIONS.items()
+        if cli_option_present(
+            argv,
+            option_names,
+        )
+    }
 
 
 @dataclass(frozen=True)
@@ -476,8 +545,7 @@ def parse_args():
         action=argparse.BooleanOptionalAction,
         default=None,
         help=(
-            "Write TensorBoard event logs. Defaults on for neural "
-            "agents and off for tabular agents."
+            "Write TensorBoard event logs. Defaults off."
         ),
     )
 
@@ -694,7 +762,14 @@ def parse_args():
         ),
     )
 
-    return parser.parse_args()
+    argv = sys.argv[1:]
+    args = parser.parse_args()
+    args.resume_metadata_cli_fields = (
+        resume_metadata_fields_from_argv(
+            argv,
+        )
+    )
+    return args
 
 
 def load_best_config_overrides(
@@ -1399,14 +1474,197 @@ def training_state_metadata(
 def validate_training_state_metadata(
     state: dict,
     expected_metadata: dict,
+    *,
+    allowed_mismatches: set[str] | None = None,
 ) -> None:
     metadata = state.get("metadata")
+    allowed_mismatches = allowed_mismatches or set()
 
-    if metadata != expected_metadata:
+    if metadata == expected_metadata:
+        return
+
+    comparable_metadata = dict(
+        metadata or {}
+    )
+    comparable_expected = dict(
+        expected_metadata
+    )
+
+    for key in allowed_mismatches:
+        if key in comparable_metadata:
+            comparable_metadata[key] = (
+                comparable_expected.get(key)
+            )
+
+    if comparable_metadata != comparable_expected:
+        mismatched_keys = sorted(
+            {
+                *comparable_metadata.keys(),
+                *comparable_expected.keys(),
+            }
+        )
+        mismatched_keys = [
+            key
+            for key in mismatched_keys
+            if comparable_metadata.get(key)
+            != comparable_expected.get(key)
+        ]
         raise RuntimeError(
             "Stored training state does not match the "
-            "requested training configuration."
+            "requested training configuration. "
+            f"Mismatched keys: {', '.join(mismatched_keys)}"
         )
+
+
+def load_training_state_metadata(
+    path: Path,
+) -> dict:
+    if not path.exists():
+        raise RuntimeError(
+            "--resume-training-state requested, but "
+            f"{path} does not exist."
+        )
+
+    try:
+        state = torch.load(
+            path,
+            map_location="cpu",
+            weights_only=False,
+        )
+    except TypeError:
+        state = torch.load(
+            path,
+            map_location="cpu",
+        )
+
+    metadata = state.get("metadata")
+
+    if not isinstance(
+        metadata,
+        dict,
+    ):
+        raise RuntimeError(
+            f"{path} does not contain training metadata."
+        )
+
+    return metadata
+
+
+def optional_metadata_path(
+    metadata: dict,
+    name: str,
+) -> Path | None:
+    value = metadata.get(name)
+
+    if value is None:
+        return None
+
+    return Path(value)
+
+
+def apply_resume_training_state_defaults(
+    args,
+    metadata: dict,
+) -> None:
+    if metadata.get("algorithm") != args.algorithm:
+        raise RuntimeError(
+            "Stored training state algorithm does not match "
+            f"--algorithm {args.algorithm!r}."
+        )
+
+    provided_fields = getattr(
+        args,
+        "resume_metadata_cli_fields",
+        set(),
+    )
+    metadata_defaults = {
+        "dataset": Path(metadata["dataset"]),
+        "fixed_index": metadata["fixed_index"],
+        "max_steps": int(metadata["max_steps"]),
+        "seed": int(metadata["seed"]),
+        "rollouts_per_task": int(
+            metadata["rollouts_per_task"]
+        ),
+        "task_batch_size": metadata.get(
+            "task_batch_size"
+        ),
+        "rollout_group_size": metadata.get(
+            "rollout_group_size"
+        ),
+        "validation_dataset": optional_metadata_path(
+            metadata,
+            "validation_dataset",
+        ),
+        "same_layout_dataset": optional_metadata_path(
+            metadata,
+            "same_layout_dataset",
+        ),
+        "validation_interval": int(
+            metadata["validation_interval"]
+        ),
+        "validation_episodes": int(
+            metadata["validation_episodes"]
+        ),
+        "validation_all_tasks": bool(
+            metadata["validation_all_tasks"]
+        ),
+        "early_stopping_patience": metadata[
+            "early_stopping_patience"
+        ],
+        "early_stopping_min_delta": float(
+            metadata["early_stopping_min_delta"]
+        ),
+    }
+
+    for field, value in metadata_defaults.items():
+        if field not in provided_fields:
+            setattr(
+                args,
+                field,
+                value,
+            )
+
+
+def resume_training_state_allowed_mismatches(
+    args,
+) -> set[str]:
+    provided_fields = getattr(
+        args,
+        "resume_metadata_cli_fields",
+        set(),
+    )
+    allowed_by_field = {
+        "rollouts_per_task": {
+            "rollouts_per_task",
+            "task_selection_pass_budget",
+        },
+        "validation_interval": {
+            "validation_interval",
+        },
+        "validation_episodes": {
+            "validation_episodes",
+        },
+        "validation_all_tasks": {
+            "validation_all_tasks",
+        },
+        "early_stopping_patience": {
+            "early_stopping_patience",
+        },
+        "early_stopping_min_delta": {
+            "early_stopping_min_delta",
+        },
+    }
+    allowed = set()
+
+    for field in provided_fields:
+        allowed.update(
+            allowed_by_field.get(
+                field,
+                set(),
+            )
+        )
+
+    return allowed
 
 
 def file_size(path: Path) -> int | None:
@@ -2169,6 +2427,24 @@ def optimization_epochs_for_round(
 def main():
     args = parse_args()
 
+    resume_training_metadata = None
+
+    if args.resume_training_state:
+        training_state_path = (
+            args.output_dir
+            / args.algorithm
+            / "training_state.pt"
+        )
+        resume_training_metadata = (
+            load_training_state_metadata(
+                training_state_path
+            )
+        )
+        apply_resume_training_state_defaults(
+            args,
+            resume_training_metadata,
+        )
+
     configure_reproducibility(args.seed)
 
     device = torch.device(
@@ -2184,7 +2460,10 @@ def main():
     )
 
     best_config_overrides = None
-    if args.best_config is not None:
+    if (
+        args.best_config is not None
+        and resume_training_metadata is None
+    ):
         if args.algorithm not in NEURAL_ALGORITHMS:
             raise ValueError(
                 "--best-config is only supported for DNN agents."
@@ -2195,11 +2474,18 @@ def main():
             args.algorithm,
         )
 
-    loaded_hyperparameters = (
-        {}
-        if best_config_overrides is None
-        else best_config_overrides.hyperparameters
-    )
+    if resume_training_metadata is not None:
+        loaded_hyperparameters = dict(
+            resume_training_metadata[
+                "agent_hyperparameters"
+            ]
+        )
+    else:
+        loaded_hyperparameters = (
+            {}
+            if best_config_overrides is None
+            else best_config_overrides.hyperparameters
+        )
     explicit_hyperparameters = neural_hyperparameters_from_args(
         args
     )
@@ -2451,6 +2737,11 @@ def main():
         validate_training_state_metadata(
             training_state,
             expected_training_state_metadata,
+            allowed_mismatches=(
+                resume_training_state_allowed_mismatches(
+                    args
+                )
+            ),
         )
         load_agent_training_state(
             args.algorithm,
