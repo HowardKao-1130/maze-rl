@@ -39,6 +39,7 @@ from scripts.open_tensorboard import (
 from scripts.train import (
     HierarchicalTaskSampler,
     agent_training_state_dict,
+    apply_resume_training_state_defaults,
     apply_retroactive_resume_metadata,
     configure_reproducibility,
     format_training_epoch_progress_message,
@@ -56,6 +57,7 @@ from scripts.train import (
     parse_args as parse_train_args,
     replay_early_stopping_from_validation_metrics,
     rollout_group_size_for_algorithm,
+    resume_training_state_allowed_mismatches,
     save_training_state,
     should_validate_epoch,
     should_stop_early,
@@ -577,6 +579,70 @@ def test_training_accepts_resume_training_state(
 
     assert args.resume is False
     assert args.resume_training_state is True
+
+
+def test_resume_training_state_defaults_to_stored_metadata(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "ppo",
+            "--resume-training-state",
+            "--rollouts-per-task",
+            "300",
+        ],
+    )
+
+    args = parse_train_args()
+    metadata = {
+        "algorithm": "ppo",
+        "agent_hyperparameters": {
+            "learning_rate": 0.0001,
+        },
+        "dataset": str(tmp_path / "train.npz"),
+        "fixed_index": None,
+        "max_steps": 80,
+        "seed": 123,
+        "rollouts_per_task": 1000,
+        "task_selection_pass_budget": 1000,
+        "task_batch_size": 32,
+        "rollout_group_size": 1,
+        "validation_dataset": str(
+            tmp_path / "validation.npz"
+        ),
+        "same_layout_dataset": None,
+        "validation_interval": 5,
+        "validation_episodes": 17,
+        "validation_all_tasks": False,
+        "early_stopping_patience": 9,
+        "early_stopping_min_delta": 0.01,
+    }
+
+    apply_resume_training_state_defaults(
+        args,
+        metadata,
+    )
+
+    assert args.dataset == tmp_path / "train.npz"
+    assert args.max_steps == 80
+    assert args.seed == 123
+    assert args.rollouts_per_task == 300
+    assert args.task_batch_size == 32
+    assert args.validation_dataset == tmp_path / "validation.npz"
+    assert args.validation_interval == 5
+    assert args.validation_all_tasks is False
+    assert args.early_stopping_patience == 9
+    assert args.early_stopping_min_delta == 0.01
+    assert resume_training_state_allowed_mismatches(
+        args
+    ) == {
+        "rollouts_per_task",
+        "task_selection_pass_budget",
+    }
 
 
 def test_training_accepts_retroactive_early_stop(
@@ -1573,6 +1639,53 @@ def test_training_state_metadata_allows_early_stopping_override(
         allowed_mismatches={
             "early_stopping_patience",
             "early_stopping_min_delta",
+        },
+    )
+
+
+def test_training_state_metadata_allows_explicit_budget_override(
+    tmp_path,
+):
+    args = SimpleNamespace(
+        algorithm="dqn",
+        dataset=tmp_path / "train.npz",
+        fixed_index=None,
+        max_steps=20,
+        seed=42,
+        rollouts_per_task=10,
+        validation_dataset=tmp_path / "validation.npz",
+        same_layout_dataset=None,
+        validation_interval=5,
+        validation_episodes=1,
+        validation_all_tasks=False,
+        early_stopping_patience=None,
+        early_stopping_min_delta=0.0,
+    )
+    metadata = training_state_metadata(
+        args=args,
+        agent_hyperparameters={
+            "learning_rate": 0.001,
+            "gamma": 0.95,
+            "batch_size": 32,
+        },
+        task_selection_pass_budget=10,
+        task_batch_size=1,
+        rollout_group_size=1,
+    )
+    requested_metadata = {
+        **metadata,
+        "rollouts_per_task": 20,
+        "task_selection_pass_budget": 20,
+    }
+
+    validate_training_state_metadata(
+        {
+            "metadata": metadata,
+        },
+        requested_metadata,
+        allowed_mismatches={
+            "rollouts_per_task",
+            "task_selection_pass_budget",
         },
     )
 

@@ -64,6 +64,12 @@ automatically at the end of each run. Existing `metrics.csv` files are replaced
 by default; pass `--resume` to append to an existing metrics file. The separate
 `--resume-training-state` mode restores `training_state.pt`, including model,
 optimizer, sampler, RNG, counter, pending-metric, and validation state.
+When restoring full training state, omitted run-identity arguments such as the
+dataset, seed, rollout budget, batch shape, and validation settings default to
+the values recorded in `training_state.pt`; explicit incompatible values are
+rejected by the metadata check. Explicit future-run settings such as a larger
+rollout budget, validation cadence, validation episode sampling, and
+early-stopping thresholds can override the stored values.
 Pass `--retroactive-early-stop` with `--resume-training-state` to allow
 early-stopping patience and min-delta to differ from the stored state, replay
 the existing `validation_metrics.csv`, and stop immediately when that history

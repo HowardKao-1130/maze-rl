@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import pickle
 import random
+import sys
 
 import numpy as np
 
@@ -196,6 +197,73 @@ def default_output_dir(
     return Path(
         f"runs/final_{algorithm}_best"
     )
+
+
+RESUME_METADATA_CLI_OPTIONS = {
+    "dataset": ("--dataset",),
+    "fixed_index": ("--fixed-index",),
+    "max_steps": ("--max-steps",),
+    "seed": ("--seed",),
+    "rollouts_per_task": (
+        "--rollouts-per-task",
+        "--dataset-epochs",
+    ),
+    "task_batch_size": (
+        "--task-batch-size",
+        "--rollout-episodes",
+    ),
+    "rollout_group_size": (
+        "--rollout-group-size",
+        "--group-size",
+    ),
+    "validation_dataset": (
+        "--validation-dataset",
+    ),
+    "same_layout_dataset": (
+        "--same-layout-dataset",
+    ),
+    "validation_interval": (
+        "--validation-interval",
+    ),
+    "validation_episodes": (
+        "--validation-episodes",
+    ),
+    "validation_all_tasks": (
+        "--validation-all-tasks",
+        "--no-validation-all-tasks",
+    ),
+    "early_stopping_patience": (
+        "--early-stopping-patience",
+    ),
+    "early_stopping_min_delta": (
+        "--early-stopping-min-delta",
+    ),
+}
+
+
+def cli_option_present(
+    argv: list[str],
+    option_names: tuple[str, ...],
+) -> bool:
+    return any(
+        argument == option
+        or argument.startswith(f"{option}=")
+        for argument in argv
+        for option in option_names
+    )
+
+
+def resume_metadata_fields_from_argv(
+    argv: list[str],
+) -> set[str]:
+    return {
+        field
+        for field, option_names in RESUME_METADATA_CLI_OPTIONS.items()
+        if cli_option_present(
+            argv,
+            option_names,
+        )
+    }
 
 
 @dataclass(frozen=True)
@@ -731,7 +799,13 @@ def parse_args():
         ),
     )
 
+    argv = sys.argv[1:]
     args = parser.parse_args()
+    args.resume_metadata_cli_fields = (
+        resume_metadata_fields_from_argv(
+            argv,
+        )
+    )
 
     if args.best_config == BEST_CONFIG_DEFAULT_SENTINEL:
         args.best_config = default_best_config_path(
@@ -1586,6 +1660,111 @@ def apply_retroactive_resume_metadata(
     args.validation_all_tasks = bool(
         metadata["validation_all_tasks"]
     )
+
+
+def apply_resume_training_state_defaults(
+    args,
+    metadata: dict,
+) -> None:
+    if metadata.get("algorithm") != args.algorithm:
+        raise RuntimeError(
+            "Stored training state algorithm does not match "
+            f"--algorithm {args.algorithm!r}."
+        )
+
+    provided_fields = getattr(
+        args,
+        "resume_metadata_cli_fields",
+        set(),
+    )
+    metadata_defaults = {
+        "dataset": Path(metadata["dataset"]),
+        "fixed_index": metadata["fixed_index"],
+        "max_steps": int(metadata["max_steps"]),
+        "seed": int(metadata["seed"]),
+        "rollouts_per_task": int(
+            metadata["rollouts_per_task"]
+        ),
+        "task_batch_size": metadata.get(
+            "task_batch_size"
+        ),
+        "rollout_group_size": metadata.get(
+            "rollout_group_size"
+        ),
+        "validation_dataset": optional_metadata_path(
+            metadata,
+            "validation_dataset",
+        ),
+        "same_layout_dataset": optional_metadata_path(
+            metadata,
+            "same_layout_dataset",
+        ),
+        "validation_interval": int(
+            metadata["validation_interval"]
+        ),
+        "validation_episodes": int(
+            metadata["validation_episodes"]
+        ),
+        "validation_all_tasks": bool(
+            metadata["validation_all_tasks"]
+        ),
+        "early_stopping_patience": metadata[
+            "early_stopping_patience"
+        ],
+        "early_stopping_min_delta": float(
+            metadata["early_stopping_min_delta"]
+        ),
+    }
+
+    for field, value in metadata_defaults.items():
+        if field not in provided_fields:
+            setattr(
+                args,
+                field,
+                value,
+            )
+
+
+def resume_training_state_allowed_mismatches(
+    args,
+) -> set[str]:
+    provided_fields = getattr(
+        args,
+        "resume_metadata_cli_fields",
+        set(),
+    )
+    allowed_by_field = {
+        "rollouts_per_task": {
+            "rollouts_per_task",
+            "task_selection_pass_budget",
+        },
+        "validation_interval": {
+            "validation_interval",
+        },
+        "validation_episodes": {
+            "validation_episodes",
+        },
+        "validation_all_tasks": {
+            "validation_all_tasks",
+        },
+        "early_stopping_patience": {
+            "early_stopping_patience",
+        },
+        "early_stopping_min_delta": {
+            "early_stopping_min_delta",
+        },
+    }
+    allowed = set()
+
+    for field in provided_fields:
+        allowed.update(
+            allowed_by_field.get(
+                field,
+                set(),
+            )
+        )
+
+    return allowed
 
 
 def file_size(path: Path) -> int | None:
@@ -2485,28 +2664,39 @@ def main():
             "--resume-training-state."
         )
 
+    resume_training_metadata = None
     retroactive_resume_metadata = None
 
-    if args.retroactive_early_stop:
+    if args.resume_training_state:
         training_state_path = (
             args.output_dir
             / args.algorithm
             / "training_state.pt"
         )
-        retroactive_resume_metadata = (
+        resume_training_metadata = (
             load_training_state_metadata(
                 training_state_path
             )
         )
-        apply_retroactive_resume_metadata(
-            args,
-            retroactive_resume_metadata,
-        )
 
-        if args.validation_dataset is None:
-            raise ValueError(
-                "--retroactive-early-stop requires a stored "
-                "validation dataset."
+        if args.retroactive_early_stop:
+            retroactive_resume_metadata = (
+                resume_training_metadata
+            )
+            apply_retroactive_resume_metadata(
+                args,
+                retroactive_resume_metadata,
+            )
+
+            if args.validation_dataset is None:
+                raise ValueError(
+                    "--retroactive-early-stop requires a stored "
+                    "validation dataset."
+                )
+        else:
+            apply_resume_training_state_defaults(
+                args,
+                resume_training_metadata,
             )
 
     configure_reproducibility(args.seed)
@@ -2526,7 +2716,7 @@ def main():
     best_config_overrides = None
     if (
         args.best_config is not None
-        and retroactive_resume_metadata is None
+        and resume_training_metadata is None
     ):
         if args.algorithm not in NEURAL_ALGORITHMS:
             raise ValueError(
@@ -2540,11 +2730,11 @@ def main():
 
     loaded_hyperparameters = (
         dict(
-            retroactive_resume_metadata[
+            resume_training_metadata[
                 "agent_hyperparameters"
             ]
         )
-        if retroactive_resume_metadata is not None
+        if resume_training_metadata is not None
         else (
             {}
             if best_config_overrides is None
@@ -2803,12 +2993,17 @@ def main():
             training_state,
             expected_training_state_metadata,
             allowed_mismatches=(
-                {
-                    "early_stopping_patience",
-                    "early_stopping_min_delta",
-                }
-                if args.retroactive_early_stop
-                else None
+                resume_training_state_allowed_mismatches(
+                    args
+                )
+                | (
+                    {
+                        "early_stopping_patience",
+                        "early_stopping_min_delta",
+                    }
+                    if args.retroactive_early_stop
+                    else set()
+                )
             ),
         )
         load_agent_training_state(
