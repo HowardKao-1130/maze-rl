@@ -42,6 +42,14 @@ Plot aggregate training curves:
 python scripts/plot_training_metrics.py --metrics runs/q_learning/metrics.csv --output runs/q_learning/training_metrics.png
 ```
 
+Plot all non-tuning neural-agent training histories discovered under `runs/`
+into one image. When validation metrics are available, the plot includes train,
+validation, and same-layout validation curves:
+
+```bash
+python scripts/summarize_training_runs.py --output runs/training_history_summary.png
+```
+
 The plot shows separate rows for dataset-epoch mean rollout return, success
 rate, env steps per rollout, and, for TD methods, dataset-epoch mean absolute TD
 error. Success rate is the mean of the per-rollout `success` flag, so it is the
@@ -56,6 +64,11 @@ automatically at the end of each run. Existing `metrics.csv` files are replaced
 by default; pass `--resume` to append to an existing metrics file. The separate
 `--resume-training-state` mode restores `training_state.pt`, including model,
 optimizer, sampler, RNG, counter, pending-metric, and validation state.
+Pass `--retroactive-early-stop` with `--resume-training-state` to allow
+early-stopping patience and min-delta to differ from the stored state, replay
+the existing `validation_metrics.csv`, and stop immediately when that history
+already satisfies the requested early-stopping rule. This mode changes the
+resume decision; it does not rewind model weights to an earlier epoch.
 Training prints completed task-selection-pass progress by default, including
 training-set mean path efficiency and success rate. When validation datasets are
 enabled, validation progress also prints mean path efficiency and success rate.
@@ -68,12 +81,12 @@ TF32, and configures cuBLAS workspace determinism before importing Torch. This
 targets repeatable neural training for the same code, dataset, arguments,
 hardware, drivers, and library versions.
 
-Neural agents (`dqn`, `reinforce`, `a2c`, and `ppo`) also write TensorBoard logs
-to `runs/<algorithm>/tensorboard` during training by default. Open the latest
+Training does not write TensorBoard logs by default. When `--tensorboard` is
+enabled, logs are written to `<run directory>/tensorboard`. Open the latest
 event file for one algorithm with:
 
 ```bash
-python scripts/open_tensorboard.py --algorithm dqn
+python scripts/open_tensorboard.py --logdir runs/final_dqn_best/dqn/tensorboard
 ```
 
 By default, the launcher shows only the newest
@@ -82,9 +95,8 @@ directory so older event files from previous runs are not overlaid. Pass
 `--event-file <path>` to open a specific event file, or `--all-events` to load
 every event file in the log directory.
 
-Use `--no-tensorboard` to disable neural-agent event logs, `--tensorboard` to
-enable them for a tabular run, or `--tensorboard-dir` to choose another log
-directory.
+Use `--tensorboard` to enable event logs, or `--tensorboard-dir` to choose
+another log directory.
 
 Neural-agent hyperparameters can be passed directly to training, for example:
 
@@ -225,12 +237,13 @@ After tuning, train a longer final run from the stored best hyperparameter
 combination instead of copying values by hand:
 
 ```bash
-python scripts/train.py --algorithm ppo --best-config --dataset data/generalization/train.npz --validation-dataset data/generalization/validation.npz --same-layout-dataset data/generalization/same_layout_new_goals.npz --validation-interval 5 --validation-all-tasks --rollouts-per-task 1000 --output-dir runs/final_ppo_generalization
+python scripts/train.py --algorithm ppo --best-config --dataset data/generalization/train.npz --validation-dataset data/generalization/validation.npz --same-layout-dataset data/generalization/same_layout_new_goals.npz --validation-interval 5 --validation-all-tasks --rollouts-per-task 1000
 ```
 
-`--best-config` reads `runs/tuning/best_config.json` by default. Pass a path
-such as `--best-config runs/tuning/best_config_ppo.json` to load a specific
-config file. Explicit training flags still override loaded values.
+`--best-config` reads `runs/tuning/best_config_<algorithm>.json` by default,
+and training writes to `runs/final_<algorithm>_best/<algorithm>` unless
+`--output-dir` is provided. Explicit training flags still override loaded
+values.
 
 Training writes `validation_metrics.png` beside `validation_metrics.csv`; the
 plot overlays validation-layout performance with same-layout new-task
@@ -245,7 +258,10 @@ python scripts/tune_dnn.py summarize --output-dir runs/tuning
 ```
 
 The command writes `runs/tuning/summary_plots/mean_path_efficiency_heatmap.png`
-for best validation and same-layout performance across trials, plus one
+for best validation and same-layout performance across trials, plus
+`mean_path_efficiency_training_progress_by_agent.png`, which shows full
+`metrics.csv` training curves for every completed DNN trial grouped by agent
+and highlights the trial(s) with the best validation score. It also writes one
 `<algorithm>_validation_metrics_trials.png` grid per neural agent containing
 per-trial validation and same-layout validation curves overlaid with the
 matching epoch-aligned training curve when `metrics.csv` is available. Trial
@@ -253,7 +269,8 @@ subplot titles show the best performance for the plotted curves, and the best
 validation score for that agent is highlighted, including ties. DNN summary
 grids use a single 5x4 sheet with display-safe dimensions and extra row height
 so 20-trial sweeps fit in one readable overview, and bounded metrics use a
-fixed 0-to-1 y scale so trials remain directly comparable. It also writes
+fixed 0-to-1 y scale so trials remain directly comparable. The command also
+writes
 `<algorithm>_mean_path_efficiency_parallel_coordinates.png` plots that place
 each trial's numeric hyperparameters and validation score on shared parallel
 axes, with better scores drawn in brighter colors and the best trial(s)

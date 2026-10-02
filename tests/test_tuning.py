@@ -31,6 +31,7 @@ from scripts.tune_dnn import (
     main,
     ordered_search_space,
     parse_args,
+    plot_all_agent_training_progress,
     plot_validation_metric_montage,
     read_completed_results,
     result_matches_trial,
@@ -39,6 +40,7 @@ from scripts.tune_dnn import (
     sample_hyperparameters_with_optuna,
     summarize_tuning,
     summarize_evaluation,
+    training_metric_series,
     write_best_config_index,
     write_result_row,
     write_tuning_config,
@@ -1671,6 +1673,10 @@ def test_summarize_tuning_writes_heatmap_trial_grids_and_parallel_coordinates(
     ).exists()
     assert (
         summary_output_dir
+        / "mean_path_efficiency_training_progress_by_agent.png"
+    ).exists()
+    assert (
+        summary_output_dir
         / "dqn_validation_metrics_trials.png"
     ).exists()
     assert (
@@ -1834,6 +1840,169 @@ def test_aligned_training_metric_series_uses_validation_epochs(tmp_path):
             1,
             0.4,
         )
+    ]
+
+
+def test_training_metric_series_uses_full_training_progress(tmp_path):
+    run_dir = (
+        tmp_path
+        / "tuning"
+        / "trials"
+        / "trial_001"
+        / "dqn"
+    )
+    write_fake_validation_artifacts(
+        run_dir,
+        validation_score=0.25,
+        same_layout_score=0.2,
+        training_score=0.45,
+        write_training_plot=False,
+    )
+
+    assert training_metric_series(
+        run_dir / "metrics.csv",
+        metric="mean_path_efficiency",
+    ) == [
+        (
+            1,
+            0.4,
+        ),
+        (
+            2,
+            0.25,
+        ),
+    ]
+
+
+def test_all_agent_training_progress_summarizes_full_training_curves(
+    tmp_path,
+    monkeypatch,
+):
+    output_dir = tmp_path / "tuning"
+    write_fake_validation_artifacts(
+        output_dir
+        / "trials"
+        / "trial_001"
+        / "dqn",
+        validation_score=0.25,
+        same_layout_score=0.2,
+        training_score=0.45,
+    )
+    write_fake_validation_artifacts(
+        output_dir
+        / "trials"
+        / "trial_002"
+        / "dqn",
+        validation_score=0.75,
+        same_layout_score=0.7,
+        training_score=0.6,
+    )
+    write_fake_validation_artifacts(
+        output_dir
+        / "trials"
+        / "trial_001"
+        / "ppo",
+        validation_score=0.5,
+        same_layout_score=0.45,
+        training_score=0.55,
+    )
+    artifacts = discover_validation_metric_artifacts(
+        output_dir
+    )
+    saved_figures = []
+
+    import matplotlib.figure
+
+    def fake_savefig(
+        self,
+        path,
+        *args,
+        **kwargs,
+    ):
+        saved_figures.append(
+            {
+                "path": path,
+                "axis_count": len(self.axes),
+                "line_counts": [
+                    len(axis.lines)
+                    for axis in self.axes
+                ],
+                "x_data": [
+                    [
+                        tuple(
+                            int(value)
+                            for value in line.get_xdata()
+                        )
+                        for line in axis.lines
+                    ]
+                    for axis in self.axes
+                ],
+                "line_widths": [
+                    [
+                        line.get_linewidth()
+                        for line in axis.lines
+                    ]
+                    for axis in self.axes
+                ],
+            }
+        )
+
+    monkeypatch.setattr(
+        matplotlib.figure.Figure,
+        "savefig",
+        fake_savefig,
+    )
+
+    assert plot_all_agent_training_progress(
+        artifacts,
+        metric="mean_path_efficiency",
+        output_path=(
+            tmp_path
+            / "summary"
+            / "mean_path_efficiency_training_progress_by_agent.png"
+        ),
+    ) == 3
+
+    assert saved_figures == [
+        {
+            "path": (
+                tmp_path
+                / "summary"
+                / "mean_path_efficiency_training_progress_by_agent.png"
+            ),
+            "axis_count": 2,
+            "line_counts": [
+                2,
+                1,
+            ],
+            "x_data": [
+                [
+                    (
+                        1,
+                        2,
+                    ),
+                    (
+                        1,
+                        2,
+                    ),
+                ],
+                [
+                    (
+                        1,
+                        2,
+                    )
+                ],
+            ],
+            "line_widths": [
+                [
+                    1.2,
+                    2.8,
+                ],
+                [
+                    2.8,
+                ],
+            ],
+        }
     ]
 
 
@@ -3183,6 +3352,40 @@ def test_load_search_space_allows_grpo_rollout_group_size(tmp_path):
     )
 
     assert "rollout_group_size" in search_space
+
+
+def test_load_search_space_rejects_grpo_singleton_rollout_group_size(tmp_path):
+    path = tmp_path / "space.json"
+    path.write_text(
+        '{"learning_rate": {"type": "uniform", "low": 0.1, "high": 0.2}, '
+        '"rollout_group_size": {"type": "choice", "values": [1, 2]}}'
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="at least 2",
+    ):
+        load_search_space(
+            "grpo",
+            path,
+        )
+
+
+def test_load_search_space_rejects_grpo_group_size_alias_below_minimum(tmp_path):
+    path = tmp_path / "space.json"
+    path.write_text(
+        '{"learning_rate": {"type": "uniform", "low": 0.1, "high": 0.2}, '
+        '"group_size": {"type": "int", "low": 1, "high": 4}}'
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="at least 2",
+    ):
+        load_search_space(
+            "grpo",
+            path,
+        )
 
 
 def test_load_search_space_allows_grpo_task_batch_size(tmp_path):

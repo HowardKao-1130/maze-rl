@@ -370,6 +370,8 @@ TRAINING_LOOP_PARAMETER_ALIASES = {
     "group_size": "rollout_group_size",
 }
 
+MIN_GRPO_ROLLOUT_GROUP_SIZE = 2
+
 RESULT_FIELDNAMES = [
     "trial",
     "algorithm",
@@ -446,7 +448,8 @@ def parse_summarize_args(
     parser = argparse.ArgumentParser(
         description=(
             "Summarize DNN tuning artifacts with validation "
-            "heatmaps, per-agent validation plot grids, and "
+            "heatmaps, all-agent training progress plots, "
+            "per-agent validation plot grids, and "
             "parallel-coordinate hyperparameter plots."
         )
     )
@@ -788,14 +791,54 @@ def sample_from_spec(
     )
 
 
+def validate_search_space(
+    algorithm: str,
+    search_space: dict[str, dict[str, Any]],
+) -> None:
+    if algorithm != "grpo":
+        return
+
+    spec = search_space.get("rollout_group_size")
+    if spec is None:
+        return
+
+    distribution = spec.get("type")
+    minimum = MIN_GRPO_ROLLOUT_GROUP_SIZE
+
+    if distribution == "choice":
+        values = spec.get("values", [])
+        if any(
+            int(value) < minimum
+            for value in values
+        ):
+            raise ValueError(
+                "grpo rollout_group_size choices must all "
+                f"be at least {minimum}."
+            )
+        return
+
+    if distribution in {"int", "uniform", "loguniform"}:
+        if float(spec["low"]) < minimum:
+            raise ValueError(
+                "grpo rollout_group_size lower bound must "
+                f"be at least {minimum}."
+            )
+        return
+
+
 def load_search_space(
     algorithm: str,
     path: Path | None,
 ) -> dict[str, dict[str, Any]]:
     if path is None:
-        return DEFAULT_SEARCH_SPACES[
+        search_space = DEFAULT_SEARCH_SPACES[
             algorithm
         ]
+        validate_search_space(
+            algorithm,
+            search_space,
+        )
+        return search_space
 
     with path.open() as file:
         data = json.load(file)
@@ -833,6 +876,11 @@ def load_search_space(
             f"{algorithm} search space has unsupported "
             f"parameters: {names}"
         )
+
+    validate_search_space(
+        algorithm,
+        data,
+    )
 
     return data
 
@@ -2757,6 +2805,70 @@ def aligned_training_metric_series(
     return []
 
 
+def training_metric_series(
+    metrics_path: Path,
+    *,
+    metric: str,
+) -> list[tuple[int, float]]:
+    if not metrics_path.exists():
+        return []
+
+    with metrics_path.open(
+        newline="",
+    ) as file:
+        rows = list(
+            csv.DictReader(file)
+        )
+
+    for candidate in train_metric_candidates(
+        metric
+    ):
+        values_by_epoch: dict[int, list[float]] = {}
+
+        for row in rows:
+            if candidate not in row:
+                continue
+
+            if not training_metric_row_matches(
+                row,
+                metric=metric,
+                candidate=candidate,
+            ):
+                continue
+
+            epoch = int(
+                row.get("epoch")
+                or row.get("episode")
+                or 0
+            )
+            value = parse_summary_float(
+                row.get(candidate)
+            )
+
+            if value is None:
+                continue
+
+            values_by_epoch.setdefault(
+                epoch,
+                [],
+            ).append(value)
+
+        if values_by_epoch:
+            return [
+                (
+                    epoch,
+                    float(
+                        np.mean(values)
+                    ),
+                )
+                for epoch, values in sorted(
+                    values_by_epoch.items()
+                )
+            ]
+
+    return []
+
+
 def artifact_title_score_text(
     artifact: dict[str, Any],
     *,
@@ -3689,13 +3801,10 @@ def set_summary_axis_x_scale(
     if requested_budget is None and observed_max_epoch is None:
         return
 
-    max_epoch = max(
-        value
-        for value in (
-            requested_budget,
-            observed_max_epoch,
-        )
-        if value is not None
+    max_epoch = (
+        requested_budget
+        if requested_budget is not None
+        else observed_max_epoch
     )
 
     axis.set_xlim(
@@ -3719,6 +3828,234 @@ def set_summary_axis_y_limits(
         0.0,
         1.0,
     )
+
+
+def plot_all_agent_training_progress(
+    artifacts: list[dict[str, Any]],
+    *,
+    metric: str,
+    output_path: Path,
+) -> int:
+    series_by_artifact = []
+
+    for artifact in sorted(
+        artifacts,
+        key=lambda item: (
+            item["algorithm"],
+            item["trial"],
+        ),
+    ):
+        series = training_metric_series(
+            artifact["training_metrics_path"],
+            metric=metric,
+        )
+
+        if not series:
+            continue
+
+        series_by_artifact.append(
+            (
+                artifact,
+                series,
+            )
+        )
+
+    if not series_by_artifact:
+        return 0
+
+    algorithms = ordered_algorithms(
+        {
+            artifact["algorithm"]
+            for artifact, _ in series_by_artifact
+        }
+    )
+    artifacts_by_algorithm = {
+        algorithm: [
+            (
+                artifact,
+                series,
+            )
+            for artifact, series in series_by_artifact
+            if artifact["algorithm"] == algorithm
+        ]
+        for algorithm in algorithms
+    }
+    best_trials_by_algorithm = {
+        algorithm: best_performing_trials(
+            [
+                artifact
+                for artifact, _ in algorithm_artifacts
+            ],
+            metric=metric,
+        )
+        for algorithm, algorithm_artifacts in artifacts_by_algorithm.items()
+    }
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    metric_label = SUMMARY_METRIC_LABELS.get(
+        metric,
+        metric,
+    )
+    column_count = min(
+        2,
+        len(algorithms),
+    )
+    row_count = math.ceil(
+        len(algorithms) / column_count
+    )
+    figure, axes = plt.subplots(
+        row_count,
+        column_count,
+        figsize=(
+            8.5 * column_count,
+            4.7 * row_count,
+        ),
+        squeeze=False,
+    )
+
+    for axis in axes.reshape(-1):
+        axis.axis("off")
+
+    for axis, algorithm in zip(
+        axes.reshape(-1),
+        algorithms,
+    ):
+        axis.axis("on")
+        algorithm_artifacts = artifacts_by_algorithm[
+            algorithm
+        ]
+        best_trials = best_trials_by_algorithm[
+            algorithm
+        ]
+        best_label_used = False
+        trial_label_used = False
+
+        for artifact, series in algorithm_artifacts:
+            is_best = artifact["trial"] in best_trials
+            epochs = [
+                epoch
+                for epoch, _ in series
+            ]
+            values = [
+                value
+                for _, value in series
+            ]
+            label = None
+
+            if is_best and not best_label_used:
+                label = "best validation trial"
+                best_label_used = True
+            elif (
+                not is_best
+                and not trial_label_used
+            ):
+                label = "trial"
+                trial_label_used = True
+
+            axis.plot(
+                epochs,
+                values,
+                color=(
+                    "#d27d00"
+                    if is_best
+                    else "#9aa7b7"
+                ),
+                linewidth=2.8 if is_best else 1.2,
+                alpha=0.95 if is_best else 0.42,
+                label=label,
+                zorder=3 if is_best else 2,
+            )
+
+        axis.set_title(
+            (
+                f"{algorithm} training progress "
+                f"({len(algorithm_artifacts)} trial(s))"
+            ),
+            fontsize=13,
+        )
+        axis.set_xlabel("Dataset epoch")
+        axis.set_ylabel(metric_label)
+        axis.grid(
+            True,
+            alpha=0.22,
+            linewidth=0.8,
+        )
+        set_summary_axis_y_limits(
+            axis,
+            metric=metric,
+        )
+
+        requested_budgets = [
+            summary_axis_requested_budget(artifact)
+            for artifact, _ in algorithm_artifacts
+        ]
+        requested_budgets = [
+            budget
+            for budget in requested_budgets
+            if budget is not None
+        ]
+        observed_max_epoch = plotted_summary_max_epoch(
+            axis
+        )
+
+        if (
+            requested_budgets
+            or observed_max_epoch is not None
+        ):
+            max_epoch = (
+                max(requested_budgets)
+                if requested_budgets
+                else observed_max_epoch
+            )
+            axis.set_xlim(
+                0,
+                max_epoch,
+            )
+            axis.set_xticks(
+                summary_axis_ticks(max_epoch)
+            )
+
+        if (
+            best_label_used
+            or trial_label_used
+        ):
+            axis.legend(
+                loc="best",
+                frameon=False,
+            )
+
+    figure.suptitle(
+        f"DNN training progress by agent: {metric_label}",
+        fontsize=16,
+        y=0.995,
+    )
+    figure.tight_layout(
+        rect=(
+            0,
+            0,
+            1,
+            0.97,
+        )
+    )
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    figure.savefig(
+        output_path,
+        dpi=170,
+        facecolor="white",
+        edgecolor="white",
+        transparent=False,
+    )
+    rewrite_png_without_alpha(output_path)
+    plt.close(figure)
+
+    return len(series_by_artifact)
 
 
 def plot_validation_metric_montage(
@@ -3988,6 +4325,33 @@ def summarize_tuning(
         flush=True,
     )
 
+    training_progress_path = (
+        summary_output_dir
+        / f"{args.metric}_training_progress_by_agent.png"
+    )
+    training_progress_count = (
+        plot_all_agent_training_progress(
+            artifacts,
+            metric=args.metric,
+            output_path=training_progress_path,
+        )
+    )
+
+    if training_progress_count:
+        print(
+            "Saved all-agent training progress plot to "
+            f"{training_progress_path} "
+            f"({training_progress_count} trial(s))",
+            flush=True,
+        )
+    else:
+        print(
+            "Skipped all-agent training progress plot; no "
+            "metrics.csv files with matching training metrics "
+            "were found.",
+            flush=True,
+        )
+
     parallel_trials = collect_parallel_coordinate_trials(
         artifacts,
         metric=args.metric,
@@ -4205,6 +4569,11 @@ def main() -> None:
                 else None
             ),
         )
+
+    validate_search_space(
+        args.algorithm,
+        search_space,
+    )
 
     if (
         not args.dry_run
