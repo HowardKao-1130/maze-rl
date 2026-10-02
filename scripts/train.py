@@ -173,7 +173,29 @@ def configure_reproducibility(seed: int) -> None:
 def tensorboard_default_enabled(
     algorithm: str,
 ) -> bool:
-    return algorithm not in TABULAR_ALGORITHMS
+    del algorithm
+    return False
+
+
+BEST_CONFIG_DEFAULT_SENTINEL = Path(
+    "__algorithm_default_best_config__"
+)
+
+
+def default_best_config_path(
+    algorithm: str,
+) -> Path:
+    return Path(
+        f"runs/tuning/best_config_{algorithm}.json"
+    )
+
+
+def default_output_dir(
+    algorithm: str,
+) -> Path:
+    return Path(
+        f"runs/final_{algorithm}_best"
+    )
 
 
 @dataclass(frozen=True)
@@ -391,7 +413,11 @@ def parse_args():
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("runs"),
+        default=None,
+        help=(
+            "Parent directory for training artifacts. Defaults to "
+            "runs/final_<algorithm>_best."
+        ),
     )
 
     parser.add_argument(
@@ -474,10 +500,10 @@ def parse_args():
     parser.add_argument(
         "--tensorboard",
         action=argparse.BooleanOptionalAction,
-        default=None,
+        default=False,
         help=(
-            "Write TensorBoard event logs. Defaults on for neural "
-            "agents and off for tabular agents."
+            "Write TensorBoard event logs. Defaults off; pass "
+            "--tensorboard to enable them."
         ),
     )
 
@@ -494,13 +520,13 @@ def parse_args():
     parser.add_argument(
         "--best-config",
         nargs="?",
-        const=Path("runs/tuning/best_config.json"),
+        const=BEST_CONFIG_DEFAULT_SENTINEL,
         type=Path,
         default=None,
         help=(
             "Load the tuned best hyperparameter combination for "
             "--algorithm. Omitting the path reads "
-            "runs/tuning/best_config.json. Explicit CLI "
+            "runs/tuning/best_config_<algorithm>.json. Explicit CLI "
             "hyperparameters override loaded values."
         ),
     )
@@ -540,10 +566,10 @@ def parse_args():
     parser.add_argument(
         "--validation-interval",
         type=int,
-        default=0,
+        default=1,
         help=(
-            "Task-selection-pass interval for validation. Use 0 to "
-            "disable periodic validation."
+            "Task-selection-pass interval for validation when "
+            "--validation-dataset is provided."
         ),
     )
     parser.add_argument(
@@ -564,7 +590,7 @@ def parse_args():
     parser.add_argument(
         "--early-stopping-patience",
         type=int,
-        default=None,
+        default=35,
         help=(
             "Stop after this many validation checks without "
             "sufficient improvement. Requires --validation-dataset."
@@ -577,6 +603,17 @@ def parse_args():
         help=(
             "Minimum validation mean path-efficiency improvement "
             "required to reset early-stopping patience."
+        ),
+    )
+    parser.add_argument(
+        "--retroactive-early-stop",
+        action="store_true",
+        help=(
+            "Only with --resume-training-state: allow early-stopping "
+            "patience/min-delta to differ from the stored state, "
+            "replay existing validation_metrics.csv with the requested "
+            "rule, and stop immediately if that history already meets "
+            "the early-stopping condition."
         ),
     )
 
@@ -694,7 +731,19 @@ def parse_args():
         ),
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if args.best_config == BEST_CONFIG_DEFAULT_SENTINEL:
+        args.best_config = default_best_config_path(
+            args.algorithm
+        )
+
+    if args.output_dir is None:
+        args.output_dir = default_output_dir(
+            args.algorithm
+        )
+
+    return args
 
 
 def load_best_config_overrides(
@@ -836,6 +885,15 @@ def rollout_group_size_for_algorithm(
     if rollout_group_size <= 0:
         raise ValueError(
             "--rollout-group-size must be positive."
+        )
+
+    if (
+        algorithm == "grpo"
+        and rollout_group_size < 2
+    ):
+        raise ValueError(
+            "--rollout-group-size must be at least 2 "
+            "for GRPO."
         )
 
     if (
@@ -1399,14 +1457,135 @@ def training_state_metadata(
 def validate_training_state_metadata(
     state: dict,
     expected_metadata: dict,
+    *,
+    allowed_mismatches: set[str] | None = None,
 ) -> None:
     metadata = state.get("metadata")
+    allowed_mismatches = allowed_mismatches or set()
 
-    if metadata != expected_metadata:
+    if metadata == expected_metadata:
+        return
+
+    comparable_metadata = dict(
+        metadata or {}
+    )
+    comparable_expected = dict(
+        expected_metadata
+    )
+
+    for key in allowed_mismatches:
+        if key in comparable_metadata:
+            comparable_metadata[key] = (
+                comparable_expected.get(key)
+            )
+
+    if comparable_metadata != comparable_expected:
+        mismatched_keys = sorted(
+            {
+                *comparable_metadata.keys(),
+                *comparable_expected.keys(),
+            }
+        )
+        mismatched_keys = [
+            key
+            for key in mismatched_keys
+            if comparable_metadata.get(key)
+            != comparable_expected.get(key)
+        ]
         raise RuntimeError(
             "Stored training state does not match the "
-            "requested training configuration."
+            "requested training configuration. "
+            f"Mismatched keys: {', '.join(mismatched_keys)}"
         )
+
+
+def load_training_state_metadata(
+    path: Path,
+) -> dict:
+    if not path.exists():
+        raise RuntimeError(
+            "--resume-training-state requested, but "
+            f"{path} does not exist."
+        )
+
+    state = torch.load(
+        path,
+        map_location="cpu",
+        weights_only=False,
+    )
+    metadata = state.get("metadata")
+
+    if not isinstance(
+        metadata,
+        dict,
+    ):
+        raise RuntimeError(
+            f"{path} does not contain training metadata."
+        )
+
+    return metadata
+
+
+def optional_metadata_path(
+    metadata: dict,
+    name: str,
+) -> Path | None:
+    value = metadata.get(name)
+
+    if value is None:
+        return None
+
+    return Path(value)
+
+
+def apply_retroactive_resume_metadata(
+    args,
+    metadata: dict,
+) -> None:
+    if metadata.get("algorithm") != args.algorithm:
+        raise RuntimeError(
+            "Stored training state algorithm does not match "
+            f"--algorithm {args.algorithm!r}."
+        )
+
+    args.dataset = Path(
+        metadata["dataset"]
+    )
+    args.fixed_index = metadata[
+        "fixed_index"
+    ]
+    args.max_steps = int(
+        metadata["max_steps"]
+    )
+    args.seed = int(
+        metadata["seed"]
+    )
+    args.rollouts_per_task = int(
+        metadata["rollouts_per_task"]
+    )
+    args.task_batch_size = metadata.get(
+        "task_batch_size"
+    )
+    args.rollout_group_size = metadata.get(
+        "rollout_group_size"
+    )
+    args.validation_dataset = optional_metadata_path(
+        metadata,
+        "validation_dataset",
+    )
+    args.same_layout_dataset = optional_metadata_path(
+        metadata,
+        "same_layout_dataset",
+    )
+    args.validation_interval = int(
+        metadata["validation_interval"]
+    )
+    args.validation_episodes = int(
+        metadata["validation_episodes"]
+    )
+    args.validation_all_tasks = bool(
+        metadata["validation_all_tasks"]
+    )
 
 
 def file_size(path: Path) -> int | None:
@@ -1486,6 +1665,134 @@ def should_stop_early(
         and has_positive_validation_score
         and checks_without_improvement >= patience
     )
+
+
+def parse_validation_csv_row(
+    row: dict[str, str],
+) -> dict:
+    return {
+        "split": row.get(
+            "split",
+            "validation",
+        ),
+        "dataset_epoch": int(
+            row["dataset_epoch"]
+        ),
+        "episodes": int(
+            row["episodes"]
+        ),
+        "success_rate": float(
+            row["success_rate"]
+        ),
+        "average_episode_return": float(
+            row["average_episode_return"]
+        ),
+        "mean_path_efficiency": float(
+            row["mean_path_efficiency"]
+        ),
+        "average_successful_path_efficiency": float(
+            row[
+                "average_successful_path_efficiency"
+            ]
+        ),
+    }
+
+
+def replay_early_stopping_from_validation_metrics(
+    path: Path,
+    *,
+    patience: int | None,
+    min_delta: float,
+) -> dict:
+    best_validation = None
+    latest_validation_by_split = {}
+    checks_without_improvement = 0
+    has_positive_validation_score = False
+    stopped_early = False
+    stopped_epoch = None
+
+    if not path.exists():
+        return {
+            "best_validation": best_validation,
+            "latest_validation_by_split": (
+                latest_validation_by_split
+            ),
+            "validation_checks_without_improvement": (
+                checks_without_improvement
+            ),
+            "validation_has_positive_score": (
+                has_positive_validation_score
+            ),
+            "stopped_early": stopped_early,
+            "stopped_epoch": stopped_epoch,
+        }
+
+    with path.open(
+        newline="",
+    ) as file:
+        reader = csv.DictReader(file)
+
+        for raw_row in reader:
+            row = parse_validation_csv_row(
+                raw_row
+            )
+            split = row["split"]
+            latest_validation_by_split[
+                split
+            ] = row
+
+            if split != "validation":
+                continue
+
+            validation_score = row[
+                "mean_path_efficiency"
+            ]
+
+            if validation_score > 0.0:
+                has_positive_validation_score = True
+
+            improved = (
+                best_validation is None
+                or validation_score
+                > best_validation[
+                    "mean_path_efficiency"
+                ]
+                + min_delta
+            )
+
+            if improved:
+                checks_without_improvement = 0
+                best_validation = row
+            else:
+                checks_without_improvement += 1
+
+            if (
+                not stopped_early
+                and should_stop_early(
+                    patience,
+                    checks_without_improvement,
+                    has_positive_validation_score,
+                )
+            ):
+                stopped_early = True
+                stopped_epoch = row[
+                    "dataset_epoch"
+                ]
+
+    return {
+        "best_validation": best_validation,
+        "latest_validation_by_split": (
+            latest_validation_by_split
+        ),
+        "validation_checks_without_improvement": (
+            checks_without_improvement
+        ),
+        "validation_has_positive_score": (
+            has_positive_validation_score
+        ),
+        "stopped_early": stopped_early,
+        "stopped_epoch": stopped_epoch,
+    }
 
 
 def append_validation_csv(
@@ -2169,6 +2476,39 @@ def optimization_epochs_for_round(
 def main():
     args = parse_args()
 
+    if (
+        args.retroactive_early_stop
+        and not args.resume_training_state
+    ):
+        raise ValueError(
+            "--retroactive-early-stop requires "
+            "--resume-training-state."
+        )
+
+    retroactive_resume_metadata = None
+
+    if args.retroactive_early_stop:
+        training_state_path = (
+            args.output_dir
+            / args.algorithm
+            / "training_state.pt"
+        )
+        retroactive_resume_metadata = (
+            load_training_state_metadata(
+                training_state_path
+            )
+        )
+        apply_retroactive_resume_metadata(
+            args,
+            retroactive_resume_metadata,
+        )
+
+        if args.validation_dataset is None:
+            raise ValueError(
+                "--retroactive-early-stop requires a stored "
+                "validation dataset."
+            )
+
     configure_reproducibility(args.seed)
 
     device = torch.device(
@@ -2184,7 +2524,10 @@ def main():
     )
 
     best_config_overrides = None
-    if args.best_config is not None:
+    if (
+        args.best_config is not None
+        and retroactive_resume_metadata is None
+    ):
         if args.algorithm not in NEURAL_ALGORITHMS:
             raise ValueError(
                 "--best-config is only supported for DNN agents."
@@ -2196,9 +2539,17 @@ def main():
         )
 
     loaded_hyperparameters = (
-        {}
-        if best_config_overrides is None
-        else best_config_overrides.hyperparameters
+        dict(
+            retroactive_resume_metadata[
+                "agent_hyperparameters"
+            ]
+        )
+        if retroactive_resume_metadata is not None
+        else (
+            {}
+            if best_config_overrides is None
+            else best_config_overrides.hyperparameters
+        )
     )
     explicit_hyperparameters = neural_hyperparameters_from_args(
         args
@@ -2451,6 +2802,14 @@ def main():
         validate_training_state_metadata(
             training_state,
             expected_training_state_metadata,
+            allowed_mismatches=(
+                {
+                    "early_stopping_patience",
+                    "early_stopping_min_delta",
+                }
+                if args.retroactive_early_stop
+                else None
+            ),
         )
         load_agent_training_state(
             args.algorithm,
@@ -2552,10 +2911,57 @@ def main():
             ),
         )
 
+        if args.retroactive_early_stop:
+            replayed_early_stop = (
+                replay_early_stopping_from_validation_metrics(
+                    validation_metrics_path,
+                    patience=args.early_stopping_patience,
+                    min_delta=args.early_stopping_min_delta,
+                )
+            )
+            best_validation = replayed_early_stop[
+                "best_validation"
+            ]
+            latest_validation_by_split = (
+                replayed_early_stop[
+                    "latest_validation_by_split"
+                ]
+            )
+            validation_checks_without_improvement = int(
+                replayed_early_stop[
+                    "validation_checks_without_improvement"
+                ]
+            )
+            validation_has_positive_score = bool(
+                replayed_early_stop[
+                    "validation_has_positive_score"
+                ]
+            )
+            stopped_early = bool(
+                replayed_early_stop[
+                    "stopped_early"
+                ]
+            )
+            stopped_epoch = replayed_early_stop[
+                "stopped_epoch"
+            ]
+
         print(
             "Loaded full training state from "
             f"{training_state_path}"
         )
+
+        if args.retroactive_early_stop:
+            if stopped_early:
+                print(
+                    "Retroactive early stopping condition was "
+                    f"already met at dataset epoch {stopped_epoch}."
+                )
+            else:
+                print(
+                    "Replayed validation history for retroactive "
+                    "early stopping; continuing training."
+                )
 
     def build_rollout_groups(
         rollout_specs,

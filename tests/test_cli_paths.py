@@ -39,6 +39,7 @@ from scripts.open_tensorboard import (
 from scripts.train import (
     HierarchicalTaskSampler,
     agent_training_state_dict,
+    apply_retroactive_resume_metadata,
     configure_reproducibility,
     format_training_epoch_progress_message,
     format_validation_progress_message,
@@ -53,6 +54,7 @@ from scripts.train import (
     neural_hyperparameters_from_args,
     optimization_epochs_for_round,
     parse_args as parse_train_args,
+    replay_early_stopping_from_validation_metrics,
     rollout_group_size_for_algorithm,
     save_training_state,
     should_validate_epoch,
@@ -510,6 +512,38 @@ def test_training_progress_messages_enabled_by_default(monkeypatch):
     assert args.no_progress is False
 
 
+def test_training_tensorboard_disabled_by_default(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "dqn",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.tensorboard is False
+
+
+def test_training_matches_tuning_early_stopping_defaults(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "dqn",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.validation_interval == 1
+    assert args.early_stopping_patience == 35
+    assert args.early_stopping_min_delta == 0.0
+
+
 def test_training_accepts_no_progress(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
@@ -543,6 +577,25 @@ def test_training_accepts_resume_training_state(
 
     assert args.resume is False
     assert args.resume_training_state is True
+
+
+def test_training_accepts_retroactive_early_stop(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "ppo",
+            "--resume-training-state",
+            "--retroactive-early-stop",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.retroactive_early_stop is True
 
 
 def test_validation_progress_formats_best_in_parentheses():
@@ -711,7 +764,26 @@ def test_parse_train_args_accepts_best_config_shorthand(monkeypatch):
     args = parse_train_args()
 
     assert args.best_config == Path(
-        "runs/tuning/best_config.json"
+        "runs/tuning/best_config_ppo.json"
+    )
+
+
+def test_parse_train_args_uses_algorithm_output_dir_by_default(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "ppo",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.output_dir == Path(
+        "runs/final_ppo_best"
     )
 
 
@@ -916,11 +988,11 @@ def test_tensorboard_command_passes_through_extra_args():
     ]
 
 
-def test_tensorboard_defaults_only_for_neural_agents():
+def test_tensorboard_defaults_off_for_all_agents():
     assert not tensorboard_default_enabled(
         "sarsa"
     )
-    assert tensorboard_default_enabled(
+    assert not tensorboard_default_enabled(
         "dqn"
     )
 
@@ -1066,6 +1138,17 @@ def test_rollout_group_size_rejects_non_positive_values():
         )
 
 
+def test_rollout_group_size_rejects_grpo_singleton_group():
+    with pytest.raises(
+        ValueError,
+        match="at least 2",
+    ):
+        rollout_group_size_for_algorithm(
+            "grpo",
+            1,
+        )
+
+
 def test_task_batch_size_can_override_dnn_defaults():
     assert task_batch_size_for_algorithm(
         "ppo",
@@ -1143,6 +1226,42 @@ def test_early_stopping_still_applies_after_positive_validation():
         checks_without_improvement=4,
         has_positive_validation_score=True,
     )
+
+
+def test_replay_early_stopping_from_validation_metrics(
+    tmp_path,
+):
+    metrics_path = tmp_path / "validation_metrics.csv"
+    metrics_path.write_text(
+        "split,dataset_epoch,episodes,success_rate,"
+        "average_episode_return,mean_path_efficiency,"
+        "average_successful_path_efficiency\n"
+        "validation,1,2,0.5,1.0,0.4,0.8\n"
+        "same_layout,1,2,0.5,1.0,0.5,0.8\n"
+        "validation,2,2,0.5,1.0,0.45,0.8\n"
+        "validation,3,2,0.5,1.0,0.44,0.8\n"
+        "validation,4,2,0.5,1.0,0.43,0.8\n"
+    )
+
+    replayed = (
+        replay_early_stopping_from_validation_metrics(
+            metrics_path,
+            patience=2,
+            min_delta=0.0,
+        )
+    )
+
+    assert replayed["stopped_early"] is True
+    assert replayed["stopped_epoch"] == 4
+    assert replayed["best_validation"][
+        "dataset_epoch"
+    ] == 2
+    assert replayed[
+        "validation_checks_without_improvement"
+    ] == 2
+    assert replayed["latest_validation_by_split"][
+        "same_layout"
+    ]["mean_path_efficiency"] == 0.5
 
 
 def test_plot_validation_metrics_writes_split_curve(tmp_path):
@@ -1403,3 +1522,121 @@ def test_training_state_metadata_rejects_changed_hyperparameters(
             },
             changed_metadata,
         )
+
+
+def test_training_state_metadata_allows_early_stopping_override(
+    tmp_path,
+):
+    args = SimpleNamespace(
+        algorithm="ppo",
+        dataset=tmp_path / "train.npz",
+        fixed_index=None,
+        max_steps=20,
+        seed=42,
+        rollouts_per_task=10,
+        validation_dataset=tmp_path / "validation.npz",
+        same_layout_dataset=None,
+        validation_interval=5,
+        validation_episodes=1,
+        validation_all_tasks=False,
+        early_stopping_patience=35,
+        early_stopping_min_delta=0.0,
+    )
+    metadata = training_state_metadata(
+        args=args,
+        agent_hyperparameters={
+            "learning_rate": 0.001,
+            "gamma": 0.95,
+        },
+        task_selection_pass_budget=10,
+        task_batch_size=64,
+        rollout_group_size=1,
+    )
+    args.early_stopping_patience = 4
+    args.early_stopping_min_delta = 0.01
+    changed_metadata = training_state_metadata(
+        args=args,
+        agent_hyperparameters={
+            "learning_rate": 0.001,
+            "gamma": 0.95,
+        },
+        task_selection_pass_budget=10,
+        task_batch_size=64,
+        rollout_group_size=1,
+    )
+
+    validate_training_state_metadata(
+        {
+            "metadata": metadata,
+        },
+        changed_metadata,
+        allowed_mismatches={
+            "early_stopping_patience",
+            "early_stopping_min_delta",
+        },
+    )
+
+
+def test_apply_retroactive_resume_metadata_reuses_stored_config(
+    tmp_path,
+):
+    args = SimpleNamespace(
+        algorithm="ppo",
+        dataset=Path("data/train.npz"),
+        fixed_index=None,
+        max_steps=200,
+        seed=42,
+        rollouts_per_task=100,
+        task_batch_size=None,
+        rollout_group_size=None,
+        validation_dataset=Path("data/validation.npz"),
+        same_layout_dataset=None,
+        validation_interval=1,
+        validation_episodes=200,
+        validation_all_tasks=True,
+        early_stopping_patience=35,
+        early_stopping_min_delta=0.0,
+    )
+    metadata = {
+        "algorithm": "ppo",
+        "dataset": "data/generalization/train.npz",
+        "fixed_index": None,
+        "max_steps": 200,
+        "seed": 42,
+        "rollouts_per_task": 1000,
+        "task_batch_size": 32,
+        "rollout_group_size": 1,
+        "validation_dataset": (
+            "data/generalization/validation.npz"
+        ),
+        "same_layout_dataset": (
+            "data/generalization/same_layout_new_goals.npz"
+        ),
+        "validation_interval": 5,
+        "validation_episodes": 500,
+        "validation_all_tasks": True,
+        "agent_hyperparameters": {
+            "learning_rate": 0.001,
+        },
+    }
+
+    apply_retroactive_resume_metadata(
+        args,
+        metadata,
+    )
+
+    assert args.dataset == Path(
+        "data/generalization/train.npz"
+    )
+    assert args.rollouts_per_task == 1000
+    assert args.task_batch_size == 32
+    assert args.rollout_group_size == 1
+    assert args.validation_dataset == Path(
+        "data/generalization/validation.npz"
+    )
+    assert args.same_layout_dataset == Path(
+        "data/generalization/same_layout_new_goals.npz"
+    )
+    assert args.validation_interval == 5
+    assert args.validation_episodes == 500
+    assert args.early_stopping_patience == 35
