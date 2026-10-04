@@ -1086,7 +1086,7 @@ def test_training_command_includes_trial_hyperparameters(tmp_path):
 
     assert "--no-tensorboard" in command
     assert "--no-plot" in command
-    assert "--no-progress" in command
+    assert "--no-progress" not in command
     assert command[
         command.index("--minibatch-size") + 1
     ] == "32"

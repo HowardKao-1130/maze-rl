@@ -1353,7 +1353,6 @@ def build_training_command(
         str(trial_dir),
         "--q-snapshot-count",
         str(args.q_snapshot_count),
-        "--no-progress",
     ]
 
     if args.tensorboard:

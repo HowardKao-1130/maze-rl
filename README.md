@@ -79,8 +79,8 @@ Training prints completed task-selection-pass progress by default, including
 training-set mean path efficiency and success rate. When validation datasets are
 enabled, validation progress also prints mean path efficiency and success rate.
 Pass `--no-progress` to hide those training progress messages. Hyperparameter
-tuning passes `--no-progress` automatically so tuning output focuses on
-combination and validation summaries.
+tuning child runs show the same compact training and validation progress so
+sweeps can be monitored with the same metrics as final training.
 
 Training enables deterministic Torch algorithms, disables cuDNN benchmarking and
 TF32, and configures cuBLAS workspace determinism before importing Torch. This
