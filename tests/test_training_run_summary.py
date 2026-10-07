@@ -110,6 +110,8 @@ def test_collect_training_run_series_averages_by_epoch(
         [
             ("validation", 1, 0.25),
             ("same_layout", 1, 0.35),
+            ("train_greedy", 1, 0.45),
+            ("train", 2, 0.90),
             ("validation", 2, 0.50),
         ],
     )
@@ -138,6 +140,12 @@ def test_collect_training_run_series_averages_by_epoch(
     ] == [
         (1, 0.35),
     ]
+    assert series[0].validation_points_by_split[
+        "train_greedy"
+    ] == [
+        (1, 0.45),
+        (2, 0.9),
+    ]
 
 
 def test_plot_training_run_summary_writes_one_image(
@@ -149,8 +157,19 @@ def test_plot_training_run_summary_writes_one_image(
         [(1, 0.2, True), (2, 0.5, True)],
     )
     write_metrics_csv(
-        runs_dir / "q_learning" / "metrics.csv",
+        runs_dir / "tabular" / "q_learning" / "metrics.csv",
         [(1, 0.1, False), (2, 0.3, True)],
+    )
+    write_metrics_csv(
+        runs_dir
+        / "dnn"
+        / "dataset"
+        / "tuning"
+        / "trials"
+        / "trial_001"
+        / "ppo"
+        / "metrics.csv",
+        [(1, 0.9, True)],
     )
     series = collect_training_run_series(
         runs_dir,

@@ -1,12 +1,24 @@
 import argparse
 import json
 from pathlib import Path
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(
+        0,
+        str(REPO_ROOT),
+    )
 
 from maze_rl.maze.dataset import (
     generate_mazes,
     generate_tasks_for_layouts,
     generate_split_seeds,
     save_dataset,
+)
+from scripts.experiment_naming import (
+    DEFAULT_DATA_OUTPUT_ROOT,
+    experiment_dataset_name,
 )
 
 
@@ -88,7 +100,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("data"),
+        default=None,
+        help=(
+            "Directory for generated split files. Overrides "
+            "--experiment-name and --output-root when provided."
+        ),
+    )
+
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        default=DEFAULT_DATA_OUTPUT_ROOT,
+        help=(
+            "Root directory for automatically named experiment "
+            "datasets."
+        ),
+    )
+
+    parser.add_argument(
+        "--experiment-name",
+        default=None,
+        help=(
+            "Optional prefix for an automatically named output "
+            "directory, for example "
+            "generalization_followup_2000x200x200_t5_seed42. "
+            "Defaults to dataset."
+        ),
     )
 
     parser.add_argument(
@@ -109,11 +146,30 @@ def parse_args() -> argparse.Namespace:
         default=5,
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if args.output_dir is None:
+        args.output_dir = args.output_root / experiment_dataset_name(
+            args.experiment_name,
+            train_mazes=args.train_mazes,
+            validation_mazes=args.validation_mazes,
+            test_mazes=args.test_mazes,
+            tasks_per_maze=args.tasks_per_maze,
+            seed=args.seed,
+        )
+
+    return args
 
 
 def main() -> None:
     args = parse_args()
+    train_path = args.output_dir / "train.npz"
+    validation_path = args.output_dir / "validation.npz"
+    same_layout_path = (
+        args.output_dir / "same_layout_new_goals.npz"
+    )
+    test_path = args.output_dir / "test.npz"
+    metadata_path = args.output_dir / "metadata.json"
 
     if args.validation_mazes > args.train_mazes:
         raise SystemExit(
@@ -121,6 +177,13 @@ def main() -> None:
             "same_layout_new_goals.npz uses validation-sized held-out "
             "tasks on unique training layouts."
         )
+
+    print(f"Writing datasets to {args.output_dir}")
+    print(f"  train:        {train_path}")
+    print(f"  validation:   {validation_path}")
+    print(f"  same-layout:  {same_layout_path}")
+    print(f"  test:         {test_path}")
+    print(f"  metadata:     {metadata_path}")
 
     (
         train_seeds,
@@ -203,7 +266,7 @@ def main() -> None:
     )
 
     save_dataset(
-        args.output_dir / "train.npz",
+        train_path,
         train_layouts,
         train_seeds,
         train_layout_indices,
@@ -212,7 +275,7 @@ def main() -> None:
     )
 
     save_dataset(
-        args.output_dir / "validation.npz",
+        validation_path,
         validation_layouts,
         validation_seeds,
         validation_layout_indices,
@@ -221,7 +284,7 @@ def main() -> None:
     )
 
     save_dataset(
-        args.output_dir / "same_layout_new_goals.npz",
+        same_layout_path,
         same_layout_layouts,
         same_layout_seeds,
         same_layout_indices,
@@ -230,7 +293,7 @@ def main() -> None:
     )
 
     save_dataset(
-        args.output_dir / "test.npz",
+        test_path,
         test_layouts,
         test_seeds,
         test_layout_indices,
@@ -256,8 +319,6 @@ def main() -> None:
         },
     }
 
-    metadata_path = args.output_dir / "metadata.json"
-
     with metadata_path.open("w") as file:
         json.dump(
             metadata,
@@ -267,6 +328,13 @@ def main() -> None:
 
     print()
     print("Dataset generated successfully.")
+    print(f"Output directory:   {args.output_dir}")
+    print("Stored files:")
+    print(f"  train:        {train_path}")
+    print(f"  validation:   {validation_path}")
+    print(f"  same-layout:  {same_layout_path}")
+    print(f"  test:         {test_path}")
+    print(f"  metadata:     {metadata_path}")
     print(
         f"Train layouts:      {train_layouts.shape}"
     )

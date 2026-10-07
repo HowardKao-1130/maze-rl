@@ -4,6 +4,16 @@ import argparse
 import hashlib
 from pathlib import Path
 import subprocess
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(
+        0,
+        str(REPO_ROOT),
+    )
+
+from scripts.experiment_naming import DEFAULT_EXPERIMENT_OUTPUT_ROOT
 
 
 EVENT_FILE_PREFIX = "events.out.tfevents."
@@ -11,8 +21,16 @@ EVENT_FILE_PREFIX = "events.out.tfevents."
 
 def default_tensorboard_dir(
     algorithm: str,
-    runs_dir: Path = Path("runs"),
+    runs_dir: Path | None = None,
 ) -> Path:
+    if runs_dir is None:
+        return (
+            DEFAULT_EXPERIMENT_OUTPUT_ROOT
+            / f"final_{algorithm}_best"
+            / algorithm
+            / "tensorboard"
+        )
+
     return runs_dir / algorithm / "tensorboard"
 
 
@@ -115,7 +133,7 @@ def parse_args():
     parser.add_argument(
         "--runs-dir",
         type=Path,
-        default=Path("runs"),
+        default=None,
     )
 
     parser.add_argument(
@@ -124,7 +142,7 @@ def parse_args():
         default=None,
         help=(
             "TensorBoard directory to inspect. Defaults to "
-            "runs/<algorithm>/tensorboard."
+            "runs/dnn/final_<algorithm>_best/<algorithm>/tensorboard."
         ),
     )
 

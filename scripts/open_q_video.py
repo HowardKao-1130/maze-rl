@@ -6,6 +6,15 @@ from pathlib import Path
 import subprocess
 import sys
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(
+        0,
+        str(REPO_ROOT),
+    )
+
+from scripts.experiment_naming import DEFAULT_TABULAR_OUTPUT_ROOT
+
 
 def q_video_path(
     algorithm: str,
@@ -40,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--runs-dir",
         type=Path,
-        default=Path("runs"),
+        default=DEFAULT_TABULAR_OUTPUT_ROOT,
     )
     parser.add_argument(
         "--video",

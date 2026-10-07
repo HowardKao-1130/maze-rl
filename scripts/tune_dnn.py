@@ -33,20 +33,33 @@ from scripts.train import (
     NEURAL_ALGORITHMS,
     NEURAL_HYPERPARAMETERS,
 )
+from scripts.experiment_naming import (
+    DEFAULT_DATA_OUTPUT_ROOT,
+    DEFAULT_EXPERIMENT_OUTPUT_ROOT,
+    experiment_dataset_name_for_path,
+)
 
 SUMMARY_SPLITS = [
+    "train_greedy",
     "validation",
     "same_layout",
 ]
 SUMMARY_SPLIT_LABELS = {
+    "train_greedy": "train-greedy",
     "validation": "val",
-    "same_layout": "val_with_same_layout",
+    "same_layout": "same-val",
 }
 SUMMARY_SPLIT_ALIASES = {
+    "train": "train_greedy",
+    "train_greedy": "train_greedy",
+    "greedy_train": "train_greedy",
+    "train_eval": "train_greedy",
     "val": "validation",
     "validation": "validation",
     "same_layout": "same_layout",
     "val_with_same_layout": "same_layout",
+    "same-val": "same_layout",
+    "same_val": "same_layout",
 }
 SUMMARY_MONTAGE_X_LIMIT = (
     0,
@@ -73,9 +86,14 @@ SUMMARY_SERIES_STYLES = {
         "linestyle": "-",
     },
     "same_layout": {
-        "label": "same",
+        "label": "same-val",
         "color": "#ff7f0e",
         "linestyle": "-",
+    },
+    "train_greedy": {
+        "label": "train-greedy",
+        "color": "#d62728",
+        "linestyle": "--",
     },
     "train": {
         "label": "train",
@@ -84,6 +102,7 @@ SUMMARY_SERIES_STYLES = {
     },
 }
 SUMMARY_SCORE_LABELS = {
+    "train_greedy": "tg",
     "validation": "v",
     "same_layout": "s",
     "train": "t",
@@ -402,6 +421,7 @@ TUNING_ARGUMENT_FIELDS = [
     "rollouts_per_task",
     "max_steps",
     "seed",
+    "dataset",
     "train_dataset",
     "validation_dataset",
     "same_layout_dataset",
@@ -414,14 +434,14 @@ TUNING_ARGUMENT_FIELDS = [
     "early_stopping_min_delta",
     "tensorboard",
     "keep_plots",
-    "resume_training_state",
 ]
 TUNING_OPTIONAL_ARGUMENT_DEFAULTS = {
+    "dataset": None,
     "q_snapshot_count": 11,
     "sampler": "random",
-    "resume_training_state": False,
 }
 TUNING_PATH_ARGUMENT_FIELDS = {
+    "dataset",
     "train_dataset",
     "validation_dataset",
     "same_layout_dataset",
@@ -456,7 +476,7 @@ def parse_summarize_args(
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("runs") / "tuning",
+        required=True,
         help=(
             "Tuning output directory containing trials."
         ),
@@ -570,42 +590,80 @@ def parse_args(
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("runs") / "tuning",
+        default=None,
+        help=(
+            "Optional tuning output directory override. When "
+            "--dataset is a dataset directory, the default is "
+            "runs/dnn/<dataset-directory>/tuning."
+        ),
+    )
+    parser.add_argument(
+        "--experiment-name",
+        default=None,
+        help=(
+            "Optional prefix for automatically named experiment "
+            "output under --experiment-root. The train dataset "
+            "metadata provides the size and seed suffix."
+        ),
+    )
+    parser.add_argument(
+        "--experiment-root",
+        type=Path,
+        default=DEFAULT_EXPERIMENT_OUTPUT_ROOT,
+        help=(
+            "Root directory for automatically named experiment "
+            "tuning outputs."
+        ),
+    )
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=None,
+        help=(
+            "Dataset bundle name under data/datasets, containing "
+            "train.npz, validation.npz, same_layout_new_goals.npz, "
+            "and optionally test.npz. Also determines the tuning "
+            "output directory unless --output-dir or "
+            "--experiment-name is provided."
+        ),
     )
     parser.add_argument(
         "--train-dataset",
         type=Path,
-        default=Path("data") / "train.npz",
+        default=None,
         help=(
-            "Pre-generated training dataset path."
+            "Explicit training split path. Prefer --dataset for "
+            "standard dataset bundles."
         ),
     )
     parser.add_argument(
         "--validation-dataset",
         type=Path,
-        default=Path("data") / "validation.npz",
+        default=None,
         help=(
-            "Pre-generated validation dataset path used for "
-            "selecting the best hyperparameter combination."
+            "Explicit validation split path used for selecting the "
+            "best hyperparameter combination. Prefer --dataset for "
+            "standard dataset bundles."
         ),
     )
     parser.add_argument(
         "--same-layout-dataset",
         type=Path,
-        default=Path("data")
-        / "same_layout_new_goals.npz",
+        default=None,
         help=(
-            "Pre-generated same-layout new-task dataset to monitor "
-            "beside validation performance."
+            "Explicit same-layout new-task split path to monitor "
+            "beside validation performance. Prefer --dataset for "
+            "standard dataset bundles."
         ),
     )
     parser.add_argument(
         "--test-dataset",
         type=Path,
-        default=Path("data") / "test.npz",
+        default=None,
         help=(
-            "Pre-generated test dataset path. Used only with "
-            "--evaluate-best-on-test."
+            "Explicit test split path. Used only with "
+            "--evaluate-best-on-test. Prefer --dataset for standard "
+            "dataset bundles."
         ),
     )
     parser.add_argument(
@@ -682,21 +740,12 @@ def parse_args(
             "recorded in tuning_results.csv and recover complete "
             "combination artifacts that were written before the "
             "tuner was interrupted. Incomplete combinations are "
-            "rerun with their original sampled seed and "
+            "continued from training_state.pt when available, "
+            "otherwise rerun with their original sampled seed and "
             "hyperparameters. Existing tuning history uses the "
             "stored tuning arguments except explicit CLI "
             "overrides such as --hyperparameter-combinations "
             "and --[no-]tensorboard."
-        ),
-    )
-    parser.add_argument(
-        "--resume-training-state",
-        action="store_true",
-        help=(
-            "For incomplete combinations, ask the child training "
-            "run to restore its full training_state.pt. This is "
-            "separate from --resume, which controls tuner-level "
-            "combination skipping and recovery."
         ),
     )
     parser.add_argument(
@@ -714,20 +763,12 @@ def parse_args(
         args.hyperparameter_combinations is not None
     )
     args.tensorboard_from_cli = args.tensorboard is not None
-    args.resume_training_state_from_cli = (
-        args.resume_training_state
-    )
 
     if args.hyperparameter_combinations is None:
         args.hyperparameter_combinations = 100
 
     if args.tensorboard is None:
         args.tensorboard = False
-
-    if args.resume_training_state and not args.resume:
-        parser.error(
-            "--resume-training-state requires --resume for tuning."
-        )
 
     return args
 
@@ -1201,16 +1242,6 @@ def apply_tuning_config(
         ):
             continue
 
-        if (
-            name == "resume_training_state"
-            and getattr(
-                args,
-                "resume_training_state_from_cli",
-                False,
-            )
-        ):
-            continue
-
         argument_name = name
 
         if (
@@ -1368,16 +1399,18 @@ def build_training_command(
     if (
         getattr(
             args,
-            "resume_training_state",
+            "resume",
             False,
         )
         and training_state_path.exists()
     ):
         command.append(
-            "--resume-training-state"
+            "--resume"
         )
 
-    if not args.keep_plots:
+    if args.keep_plots:
+        command.append("--plot")
+    else:
         command.append("--no-plot")
 
     command.append("--validation-all-tasks")
@@ -1438,6 +1471,137 @@ def build_training_command(
         )
 
     return command
+
+
+def default_experiment_tuning_output_dir(
+    *,
+    experiment_name: str,
+    train_dataset: Path,
+    experiment_root: Path = DEFAULT_EXPERIMENT_OUTPUT_ROOT,
+) -> Path:
+    return (
+        experiment_root
+        / experiment_dataset_name_for_path(
+            experiment_name,
+            train_dataset,
+        )
+        / "tuning"
+    )
+
+
+def dataset_bundle_tuning_output_dir(
+    *,
+    dataset_dir: Path,
+    experiment_root: Path = DEFAULT_EXPERIMENT_OUTPUT_ROOT,
+) -> Path:
+    return (
+        experiment_root
+        / dataset_dir.name
+        / "tuning"
+    )
+
+
+def dataset_bundle_dir_for_reference(
+    dataset: Path,
+) -> Path:
+    if dataset.is_absolute() or len(dataset.parts) > 1:
+        return dataset
+
+    return DEFAULT_DATA_OUTPUT_ROOT / dataset
+
+
+def resolve_dataset_bundle_args(
+    args: argparse.Namespace,
+) -> None:
+    if args.dataset is None:
+        return
+
+    dataset_dir = dataset_bundle_dir_for_reference(
+        Path(args.dataset)
+    )
+
+    if not dataset_dir.is_dir():
+        raise ValueError(
+            "--dataset must name a dataset bundle under "
+            f"{DEFAULT_DATA_OUTPUT_ROOT} containing train.npz: "
+            f"{args.dataset}"
+        )
+
+    train_dataset = dataset_dir / "train.npz"
+    validation_dataset = dataset_dir / "validation.npz"
+    same_layout_dataset = (
+        dataset_dir / "same_layout_new_goals.npz"
+    )
+    test_dataset = dataset_dir / "test.npz"
+
+    if not train_dataset.exists():
+        raise ValueError(
+            "Dataset directory must contain train.npz: "
+            f"{dataset_dir}"
+        )
+
+    if args.train_dataset is None:
+        args.train_dataset = train_dataset
+
+    if args.validation_dataset is None:
+        args.validation_dataset = validation_dataset
+
+    if args.same_layout_dataset is None:
+        args.same_layout_dataset = same_layout_dataset
+
+    if args.test_dataset is None and test_dataset.exists():
+        args.test_dataset = test_dataset
+
+    if (
+        args.output_dir is None
+        and args.experiment_name is None
+    ):
+        args.output_dir = dataset_bundle_tuning_output_dir(
+            dataset_dir=dataset_dir,
+            experiment_root=args.experiment_root,
+        )
+
+
+def validate_tuning_paths(
+    args: argparse.Namespace,
+) -> None:
+    missing_options = [
+        option
+        for option, value in [
+            ("--train-dataset", args.train_dataset),
+            (
+                "--validation-dataset",
+                args.validation_dataset,
+            ),
+            (
+                "--same-layout-dataset",
+                args.same_layout_dataset,
+            ),
+        ]
+        if value is None
+    ]
+
+    if missing_options:
+        raise ValueError(
+            "Pass --dataset or explicit split paths for "
+            + ", ".join(missing_options)
+            + "."
+        )
+
+    if (
+        args.evaluate_best_on_test
+        and args.test_dataset is None
+    ):
+        raise ValueError(
+            "--evaluate-best-on-test requires --dataset with "
+            "test.npz or an explicit --test-dataset."
+        )
+
+    if args.output_dir is None:
+        raise ValueError(
+            "Pass --dataset, --output-dir, or --experiment-name "
+            "so tuning has an explicit output directory."
+        )
 
 
 def build_evaluation_command(
@@ -4441,6 +4605,29 @@ def main() -> None:
         summarize_tuning(args)
         return
 
+    resolve_dataset_bundle_args(args)
+
+    if args.output_dir is None:
+        if args.experiment_name is None:
+            raise ValueError(
+                "Pass --dataset, --output-dir, or "
+                "--experiment-name so tuning has an explicit "
+                "output directory."
+            )
+
+        if args.train_dataset is None:
+            raise ValueError(
+                "--experiment-name requires --dataset or "
+                "--train-dataset so the output directory can be "
+                "derived from dataset metadata."
+            )
+
+        args.output_dir = default_experiment_tuning_output_dir(
+            experiment_name=args.experiment_name,
+            train_dataset=args.train_dataset,
+            experiment_root=args.experiment_root,
+        )
+
     args.output_dir.mkdir(
         parents=True,
         exist_ok=True,
@@ -4508,6 +4695,8 @@ def main() -> None:
                 f"{tuning_config_path}.",
                 flush=True,
             )
+
+            resolve_dataset_bundle_args(args)
         elif has_tuning_history(
             output_dir=args.output_dir,
             results_path=results_path,
@@ -4532,6 +4721,8 @@ def main() -> None:
             "with the stored tuning arguments, or choose a "
             "new --output-dir."
         )
+
+    validate_tuning_paths(args)
 
     if not args.dry_run:
         for dataset_path in [

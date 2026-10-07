@@ -51,7 +51,7 @@ SERIES_STYLES = {
         "linestyle": "-",
     },
     "same_layout": {
-        "label": "same",
+        "label": "same-val",
         "color": "#ff7f0e",
         "linestyle": "-",
     },
@@ -60,7 +60,29 @@ SERIES_STYLES = {
         "color": "#2ca02c",
         "linestyle": "-",
     },
+    "train_greedy": {
+        "label": "train (greedy)",
+        "color": "#d62728",
+        "linestyle": "--",
+    },
 }
+SPLIT_ALIASES = {
+    "validation": "validation",
+    "val": "validation",
+    "same_layout": "same_layout",
+    "val_with_same_layout": "same_layout",
+    "same-val": "same_layout",
+    "same_val": "same_layout",
+    "train": "train_greedy",
+    "train_greedy": "train_greedy",
+    "greedy_train": "train_greedy",
+    "train_eval": "train_greedy",
+}
+PLOTTED_EVALUATION_SPLITS = (
+    "validation",
+    "same_layout",
+    "train_greedy",
+)
 
 
 @dataclass(frozen=True)
@@ -102,7 +124,7 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=["tuning"],
         help=(
-            "Top-level directory under --runs-dir to exclude. Can be "
+            "Directory name under --runs-dir to exclude. Can be "
             "passed more than once. Defaults to tuning."
         ),
     )
@@ -169,6 +191,17 @@ def validation_metric_column(
     return canonical
 
 
+def canonical_split(
+    split: str | None,
+) -> str | None:
+    if split is None:
+        return None
+
+    return SPLIT_ALIASES.get(
+        split,
+    )
+
+
 def run_label(
     metrics_path: Path,
     runs_dir: Path,
@@ -194,8 +227,7 @@ def is_excluded_metrics_path(
         return False
 
     return bool(
-        relative_path.parts
-        and relative_path.parts[0] in excluded_dirs
+        set(relative_path.parts).intersection(excluded_dirs)
     )
 
 
@@ -332,10 +364,15 @@ def load_validation_run_series(
             if epoch_value is None:
                 continue
 
-            split = row.get(
-                "split",
-                "validation",
+            split = canonical_split(
+                row.get(
+                    "split",
+                    "validation",
+                )
             )
+            if split is None:
+                continue
+
             values_by_split_epoch.setdefault(
                 split,
                 {},
@@ -582,10 +619,7 @@ def plot_training_run_summary(
             label=train_style["label"],
         )
 
-        for split in (
-            "validation",
-            "same_layout",
-        ):
+        for split in PLOTTED_EVALUATION_SPLITS:
             points = item.validation_points_by_split.get(
                 split
             )

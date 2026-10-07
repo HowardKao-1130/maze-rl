@@ -2,12 +2,24 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(
+        0,
+        str(REPO_ROOT),
+    )
 
 from maze_rl.training.plots import (
     plot_task_training_metrics,
     plot_training_metrics,
     write_task_training_metrics_html,
 )
+from scripts.experiment_naming import DEFAULT_TABULAR_OUTPUT_ROOT
+
+
+DEFAULT_METRICS_DIR = DEFAULT_TABULAR_OUTPUT_ROOT / "mc"
 
 
 def parse_args() -> argparse.Namespace:
@@ -18,13 +30,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--metrics",
         type=Path,
-        default=Path("runs/mc/metrics.csv"),
+        default=DEFAULT_METRICS_DIR / "metrics.csv",
     )
 
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("runs/mc/training_metrics.png"),
+        default=DEFAULT_METRICS_DIR / "training_metrics.png",
     )
 
     parser.add_argument(
@@ -40,14 +52,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--task-output",
         type=Path,
-        default=Path("runs/mc/task_training_metrics.png"),
+        default=DEFAULT_METRICS_DIR / "task_training_metrics.png",
         help="Per-task training plot path.",
     )
 
     parser.add_argument(
         "--task-html-output",
         type=Path,
-        default=Path("runs/mc/task_training_metrics.html"),
+        default=DEFAULT_METRICS_DIR / "task_training_metrics.html",
         help="Interactive per-task training plot path.",
     )
 

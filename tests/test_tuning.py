@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+from pathlib import Path
 import signal
 import subprocess
 import sys
@@ -25,6 +26,9 @@ from scripts.tune_dnn import (
     build_training_command,
     collect_heatmap_cells,
     collect_parallel_coordinate_trials,
+    dataset_bundle_dir_for_reference,
+    dataset_bundle_tuning_output_dir,
+    default_experiment_tuning_output_dir,
     discover_validation_metric_artifacts,
     load_search_space,
     metric_series_by_split,
@@ -35,6 +39,7 @@ from scripts.tune_dnn import (
     plot_validation_metric_montage,
     read_completed_results,
     result_matches_trial,
+    resolve_dataset_bundle_args,
     run_command,
     sample_hyperparameters,
     sample_hyperparameters_with_optuna,
@@ -45,6 +50,22 @@ from scripts.tune_dnn import (
     write_result_row,
     write_tuning_config,
 )
+
+
+def write_dataset_bundle(
+    root: Path,
+    name: str = "dataset_3x2x1_t1_seed42",
+) -> Path:
+    dataset_dir = root / name
+    dataset_dir.mkdir(parents=True)
+    for split in [
+        "train.npz",
+        "validation.npz",
+        "same_layout_new_goals.npz",
+        "test.npz",
+    ]:
+        (dataset_dir / split).write_bytes(b"")
+    return dataset_dir
 
 
 def test_sample_hyperparameters_uses_space_distributions():
@@ -170,7 +191,7 @@ def test_ordered_search_space_restores_default_order_from_sorted_config():
     assert actual == expected
 
 
-def test_parse_args_uses_tuning_run_defaults(monkeypatch):
+def test_parse_args_has_no_default_read_or_save_dirs(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -190,6 +211,116 @@ def test_parse_args_uses_tuning_run_defaults(monkeypatch):
     assert args.tensorboard_from_cli is False
     assert args.sampler == "random"
     assert args.resume is False
+    assert args.dataset is None
+    assert args.train_dataset is None
+    assert args.validation_dataset is None
+    assert args.same_layout_dataset is None
+    assert args.test_dataset is None
+    assert args.output_dir is None
+
+
+def test_tuning_experiment_output_dir_uses_train_metadata(
+    tmp_path,
+):
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    train_dataset = dataset_dir / "train.npz"
+    train_dataset.write_bytes(b"")
+    (
+        dataset_dir / "metadata.json"
+    ).write_text(
+        json.dumps(
+            {
+                "train_mazes": 5000,
+                "validation_mazes": 500,
+                "test_mazes": 500,
+                "tasks_per_maze": 5,
+                "master_seed": 42,
+            }
+        )
+    )
+
+    assert default_experiment_tuning_output_dir(
+        experiment_name="generalization_followup",
+        train_dataset=train_dataset,
+        experiment_root=tmp_path / "runs",
+    ) == (
+        tmp_path
+        / "runs"
+        / "generalization_followup_5000x500x500_t5_seed42"
+        / "tuning"
+    )
+
+
+def test_dataset_bundle_resolution_infers_splits_and_output(
+    tmp_path,
+    monkeypatch,
+):
+    dataset_dir = write_dataset_bundle(
+        tmp_path / "data" / "datasets",
+        "tuning_200x50x50_t5_seed42",
+    )
+    monkeypatch.chdir(tmp_path)
+    args = SimpleNamespace(
+        dataset=dataset_dir.name,
+        train_dataset=None,
+        validation_dataset=None,
+        same_layout_dataset=None,
+        test_dataset=None,
+        output_dir=None,
+        experiment_name=None,
+        experiment_root=tmp_path / "runs",
+    )
+
+    resolve_dataset_bundle_args(args)
+
+    resolved_dataset_dir = (
+        Path("data")
+        / "datasets"
+        / "tuning_200x50x50_t5_seed42"
+    )
+    assert args.train_dataset == (
+        resolved_dataset_dir / "train.npz"
+    )
+    assert args.validation_dataset == (
+        resolved_dataset_dir / "validation.npz"
+    )
+    assert args.same_layout_dataset == (
+        resolved_dataset_dir / "same_layout_new_goals.npz"
+    )
+    assert args.test_dataset == (
+        resolved_dataset_dir / "test.npz"
+    )
+    assert args.output_dir == (
+        tmp_path
+        / "runs"
+        / "tuning_200x50x50_t5_seed42"
+        / "tuning"
+    )
+
+
+def test_dataset_bundle_dir_for_reference_expands_dataset_name():
+    assert dataset_bundle_dir_for_reference(
+        Path("tuning_200x50x50_t5_seed42")
+    ) == (
+        Path("data")
+        / "datasets"
+        / "tuning_200x50x50_t5_seed42"
+    )
+
+
+def test_dataset_bundle_tuning_output_dir_uses_dataset_name(
+    tmp_path,
+):
+    assert dataset_bundle_tuning_output_dir(
+        dataset_dir=tmp_path / "tuning_200x50x50_t5_seed42",
+        experiment_root=tmp_path / "runs",
+    ) == (
+        tmp_path
+        / "runs"
+        / "tuning_200x50x50_t5_seed42"
+        / "tuning"
+    )
 
 
 def test_parse_args_accepts_optuna_sampler(
@@ -276,7 +407,7 @@ def test_parse_args_accepts_summarize_command(
             "tune_dnn.py",
             "summarize",
             "--output-dir",
-            "runs/tuning",
+            "runs/dnn/tuning",
         ],
     )
 
@@ -384,28 +515,7 @@ def test_parse_args_accepts_resume(monkeypatch):
     assert args.resume is True
 
 
-def test_parse_args_accepts_resume_training_state_with_resume(
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        "sys.argv",
-        [
-            "tune_dnn.py",
-            "--algorithm",
-            "ppo",
-            "--resume",
-            "--resume-training-state",
-        ],
-    )
-
-    args = parse_args()
-
-    assert args.resume is True
-    assert args.resume_training_state is True
-    assert args.resume_training_state_from_cli is True
-
-
-def test_parse_args_rejects_resume_training_state_without_resume(
+def test_parse_args_rejects_removed_resume_training_state_flag(
     monkeypatch,
 ):
     monkeypatch.setattr(
@@ -589,6 +699,7 @@ def test_other_algorithm_history_does_not_block_new_sweep(
     monkeypatch,
     capsys,
 ):
+    dataset_dir = write_dataset_bundle(tmp_path)
     write_tuning_config(
         tmp_path / "tuning_configs" / "reinforce.json",
         SimpleNamespace(
@@ -643,6 +754,8 @@ def test_other_algorithm_history_does_not_block_new_sweep(
             "--dry-run",
             "--output-dir",
             str(tmp_path),
+            "--dataset",
+            str(dataset_dir),
             "--hyperparameter-combinations",
             "1",
         ],
@@ -663,6 +776,7 @@ def test_other_algorithm_legacy_config_does_not_block_new_sweep(
     monkeypatch,
     capsys,
 ):
+    dataset_dir = write_dataset_bundle(tmp_path)
     write_tuning_config(
         tmp_path / "tuning_config.json",
         SimpleNamespace(
@@ -709,6 +823,8 @@ def test_other_algorithm_legacy_config_does_not_block_new_sweep(
             "--dry-run",
             "--output-dir",
             str(tmp_path),
+            "--dataset",
+            str(dataset_dir),
             "--hyperparameter-combinations",
             "1",
         ],
@@ -727,6 +843,7 @@ def test_optuna_sampler_dry_run_uses_optional_study(
     monkeypatch,
     capsys,
 ):
+    dataset_dir = write_dataset_bundle(tmp_path)
     class FakeSampler:
         def __init__(
             self,
@@ -848,6 +965,8 @@ def test_optuna_sampler_dry_run_uses_optional_study(
             "--dry-run",
             "--output-dir",
             str(tmp_path),
+            "--dataset",
+            str(dataset_dir),
             "--search-space",
             str(search_space_path),
             "--hyperparameter-combinations",
@@ -1127,7 +1246,36 @@ def test_training_command_includes_trial_hyperparameters(tmp_path):
     ] == "7"
 
 
-def test_training_command_can_request_training_state_resume(
+def test_training_command_keeps_plots_when_requested(tmp_path):
+    args = SimpleNamespace(
+        algorithm="ppo",
+        rollouts_per_task=3,
+        max_steps=7,
+        validation_dataset=tmp_path / "validation.npz",
+        same_layout_dataset=None,
+        validation_interval=2,
+        early_stopping_patience=4,
+        early_stopping_min_delta=0.0,
+        q_snapshot_count=7,
+        tensorboard=False,
+        keep_plots=True,
+    )
+
+    command = build_training_command(
+        args=args,
+        trial_dir=tmp_path / "trial",
+        train_dataset=tmp_path / "train.npz",
+        trial_seed=11,
+        hyperparameters={
+            "learning_rate": 0.0003,
+        },
+    )
+
+    assert "--plot" in command
+    assert "--no-plot" not in command
+
+
+def test_training_command_can_request_resume_when_state_exists(
     tmp_path,
 ):
     state_dir = tmp_path / "trial" / "ppo"
@@ -1150,7 +1298,7 @@ def test_training_command_can_request_training_state_resume(
         q_snapshot_count=7,
         tensorboard=False,
         keep_plots=False,
-        resume_training_state=True,
+        resume=True,
     )
 
     command = build_training_command(
@@ -1163,10 +1311,10 @@ def test_training_command_can_request_training_state_resume(
         },
     )
 
-    assert "--resume-training-state" in command
+    assert "--resume" in command
 
 
-def test_training_command_skips_training_state_resume_without_state(
+def test_training_command_skips_resume_without_state(
     tmp_path,
 ):
     args = SimpleNamespace(
@@ -1182,7 +1330,7 @@ def test_training_command_skips_training_state_resume_without_state(
         q_snapshot_count=7,
         tensorboard=False,
         keep_plots=False,
-        resume_training_state=True,
+        resume=True,
     )
 
     command = build_training_command(
@@ -1195,7 +1343,7 @@ def test_training_command_skips_training_state_resume_without_state(
         },
     )
 
-    assert "--resume-training-state" not in command
+    assert "--resume" not in command
 
 
 def test_training_command_passes_grpo_task_and_group_sizes(tmp_path):
@@ -1504,12 +1652,16 @@ def write_fake_validation_artifacts(
     *,
     validation_score,
     same_layout_score,
+    train_greedy_score=None,
     training_score=None,
     hyperparameters=None,
     task_batch_size=4,
     rollout_group_size=2,
     write_training_plot=True,
 ):
+    if train_greedy_score is None:
+        train_greedy_score = validation_score
+
     run_dir.mkdir(
         parents=True,
     )
@@ -1521,6 +1673,12 @@ def write_fake_validation_artifacts(
             "split,dataset_epoch,episodes,success_rate,"
             "average_episode_return,mean_path_efficiency,"
             "average_successful_path_efficiency\n"
+            "train_greedy,1,2,1.0,2.0,"
+            f"{train_greedy_score},"
+            f"{train_greedy_score}\n"
+            "train_greedy,200,2,1.0,2.0,"
+            f"{train_greedy_score},"
+            f"{train_greedy_score}\n"
             "validation,1,2,1.0,2.0,"
             f"{validation_score},"
             f"{validation_score}\n"
@@ -1725,6 +1883,12 @@ def test_summarize_tuning_writes_heatmap_trial_grids_and_parallel_coordinates(
         (
             "dqn",
             1,
+            "train_greedy",
+            0.25,
+        ),
+        (
+            "dqn",
+            1,
             "validation",
             0.25,
         ),
@@ -1737,6 +1901,12 @@ def test_summarize_tuning_writes_heatmap_trial_grids_and_parallel_coordinates(
         (
             "dqn",
             2,
+            "train_greedy",
+            0.5,
+        ),
+        (
+            "dqn",
+            2,
             "validation",
             0.5,
         ),
@@ -1745,6 +1915,12 @@ def test_summarize_tuning_writes_heatmap_trial_grids_and_parallel_coordinates(
             2,
             "same_layout",
             0.4,
+        ),
+        (
+            "ppo",
+            1,
+            "train_greedy",
+            0.75,
         ),
         (
             "ppo",
@@ -1770,7 +1946,7 @@ def test_summarize_tuning_writes_heatmap_trial_grids_and_parallel_coordinates(
     assert artifact_title_score_text(
         dqn_trial,
         metric="mean_path_efficiency",
-    ) == "v 0.25  s 0.20  t 0.40"
+    ) == "tg 0.25  v 0.25  s 0.20  t 0.40"
 
     parallel_trials = collect_parallel_coordinate_trials(
         artifacts,
@@ -2512,6 +2688,10 @@ def test_metric_series_by_split_reads_epoch_points(tmp_path):
         "mean_path_efficiency",
     )
 
+    assert series["train_greedy"] == [
+        (1, 0.5),
+        (200, 0.5),
+    ]
     assert series["validation"] == [
         (1, 0.5),
         (200, 0.5),

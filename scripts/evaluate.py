@@ -10,6 +10,12 @@ import sys
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
 
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(
+        0,
+        str(REPO_ROOT),
+    )
+
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(
         0,
@@ -40,6 +46,10 @@ from maze_rl.training.plots import (
     plot_training_metrics,
     write_task_training_metrics_html,
 )
+from scripts.experiment_naming import (
+    DEFAULT_EXPERIMENT_OUTPUT_ROOT,
+    DEFAULT_TABULAR_OUTPUT_ROOT,
+)
 
 
 TABULAR_ALGORITHMS = {
@@ -53,16 +63,18 @@ TABULAR_ALGORITHMS = {
 def default_checkpoint_path(
     algorithm: str,
 ) -> Path:
-    suffix = (
-        ".pkl"
-        if algorithm in TABULAR_ALGORITHMS
-        else ".pt"
-    )
+    if algorithm in TABULAR_ALGORITHMS:
+        return (
+            DEFAULT_TABULAR_OUTPUT_ROOT
+            / algorithm
+            / "checkpoint.pkl"
+        )
 
     return (
-        Path("runs")
+        DEFAULT_EXPERIMENT_OUTPUT_ROOT
+        / f"final_{algorithm}_best"
         / algorithm
-        / f"checkpoint{suffix}"
+        / "checkpoint.pt"
     )
 
 
@@ -73,7 +85,11 @@ def default_rollout_animation_output_dir(
 
 
 def default_tuning_results_path() -> Path:
-    return Path("runs") / "tuning" / "tuning_results.csv"
+    return (
+        DEFAULT_EXPERIMENT_OUTPUT_ROOT
+        / "tuning"
+        / "tuning_results.csv"
+    )
 
 
 def infer_dataset_label(
@@ -218,8 +234,10 @@ def parse_args():
         default=None,
         help=(
             "Checkpoint path. Defaults to "
-            "runs/<algorithm>/checkpoint.pkl for tabular agents "
-            "and runs/<algorithm>/checkpoint.pt for neural agents."
+            "runs/tabular/<algorithm>/checkpoint.pkl for tabular "
+            "agents and "
+            "runs/dnn/final_<algorithm>_best/<algorithm>/"
+            "checkpoint.pt for neural agents."
         ),
     )
 
@@ -238,7 +256,7 @@ def parse_args():
         default=default_tuning_results_path(),
         help=(
             "CSV index used by --best-trial. Defaults to "
-            "runs/tuning/tuning_results.csv."
+            "runs/dnn/tuning/tuning_results.csv."
         ),
     )
 
@@ -426,7 +444,7 @@ def parse_args():
         default=None,
         help=(
             "Evaluation CSV path. Defaults to "
-            "runs/<algorithm>/evaluation.csv."
+            "the checkpoint directory's evaluation.csv."
         ),
     )
 
@@ -736,11 +754,7 @@ def main():
     evaluation_path = (
         args.evaluation_output
         if args.evaluation_output is not None
-        else (
-            Path("runs")
-            / args.algorithm
-            / "evaluation.csv"
-        )
+        else args.checkpoint.parent / "evaluation.csv"
     )
 
     evaluation_path.parent.mkdir(

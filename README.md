@@ -39,16 +39,19 @@ python scripts/train.py --algorithm q_learning --rollouts-per-task 20
 Plot aggregate training curves:
 
 ```bash
-python scripts/plot_training_metrics.py --metrics runs/q_learning/metrics.csv --output runs/q_learning/training_metrics.png
+python scripts/plot_training_metrics.py --metrics runs/tabular/q_learning/metrics.csv --output runs/tabular/q_learning/training_metrics.png
 ```
 
 Plot all non-tuning neural-agent training histories discovered under `runs/`
 into one image. When validation metrics are available, the plot includes train,
-validation, and same-layout validation curves:
+validation, same-layout validation, and greedy train-evaluation curves:
 
 ```bash
 python scripts/summarize_training_runs.py --output runs/training_history_summary.png
 ```
+
+Greedy train-evaluation points are read from `validation_metrics.csv` rows with
+split `train`, `train_greedy`, or `greedy_train`.
 
 The plot shows separate rows for dataset-epoch mean rollout return, success
 rate, env steps per rollout, and, for TD methods, dataset-epoch mean absolute TD
@@ -60,17 +63,18 @@ internal-update column.
 
 Training writes `metrics.csv`, `training_state.pt`, a `checkpoint.pkl` for
 tabular algorithms or `checkpoint.pt` for neural algorithms, and this plot
-automatically at the end of each run. Existing `metrics.csv` files are replaced
-by default; pass `--resume` to append to an existing metrics file. The separate
-`--resume-training-state` mode restores `training_state.pt`, including model,
-optimizer, sampler, RNG, counter, pending-metric, and validation state.
-When restoring full training state, omitted run-identity arguments such as the
+automatically at the end of each run. If an output directory already contains
+training artifacts, starting a fresh run warns and requires interactive
+confirmation before deleting or overwriting them. Pass `--resume` to restore
+`training_state.pt`, including model, optimizer, sampler, RNG, counter,
+pending-metric, and validation state. When restoring full training state,
+omitted run-identity arguments such as the
 dataset, seed, rollout budget, batch shape, and validation settings default to
 the values recorded in `training_state.pt`; explicit incompatible values are
 rejected by the metadata check. Explicit future-run settings such as a larger
 rollout budget, validation cadence, validation episode sampling, and
 early-stopping thresholds can override the stored values.
-Pass `--retroactive-early-stop` with `--resume-training-state` to allow
+Pass `--retroactive-early-stop` with `--resume` to allow
 early-stopping patience and min-delta to differ from the stored state, replay
 the existing `validation_metrics.csv`, and stop immediately when that history
 already satisfies the requested early-stopping rule. This mode changes the
@@ -92,7 +96,7 @@ enabled, logs are written to `<run directory>/tensorboard`. Open the latest
 event file for one algorithm with:
 
 ```bash
-python scripts/open_tensorboard.py --logdir runs/final_dqn_best/dqn/tensorboard
+python scripts/open_tensorboard.py --logdir runs/dnn/final_dqn_best/dqn/tensorboard
 ```
 
 By default, the launcher shows only the newest
@@ -188,28 +192,37 @@ python scripts/generate_dataset.py --train-mazes 200 --validation-mazes 50 --tes
 ```
 
 Use a separate output directory for larger final-training datasets so tuning
-and experiment datasets remain intact:
+and experiment datasets remain intact. Pass an experiment name to derive the
+directory from the actual split sizes, task count, and seed:
 
 ```bash
-python scripts/generate_dataset.py --train-mazes 2000 --validation-mazes 200 --test-mazes 200 --tasks-per-maze 5 --output-dir data/generalization
+python scripts/generate_dataset.py --experiment-name generalization_followup --train-mazes 5000 --validation-mazes 500 --test-mazes 500 --tasks-per-maze 5
 ```
 
-Then tune against the pre-generated train and validation sets:
+Without `--output-dir`, generated splits are stored under
+`data/datasets/<name>_<train>x<validation>x<test>_t<tasks>_seed<seed>`. If
+`--experiment-name` is omitted, the prefix defaults to `dataset`.
+
+Then tune against the pre-generated dataset bundle:
 
 ```bash
-python scripts/tune_dnn.py --algorithm ppo
+python scripts/tune_dnn.py --algorithm ppo --dataset generalization_followup_5000x500x500_t5_seed42
 ```
 
-By default, the tuner reads `data/train.npz`, `data/validation.npz`, and
-`data/same_layout_new_goals.npz`, samples 100 hyperparameter combinations with
-a random-search sampler and a 200 rollouts-per-task maximum budget per
-combination, stores per-combination
-trial directories under `runs/tuning/trials`, evaluates every validation task,
-appends `runs/tuning/tuning_results.csv`, and writes the current best
-combination to `runs/tuning/best_config.json`. Pass `--tensorboard` to write
+The tuner requires an explicit dataset or split paths. With a dataset
+name, it reads `data/datasets/<dataset>/train.npz`,
+`validation.npz`, and `same_layout_new_goals.npz`, samples 100 hyperparameter
+combinations with a random-search sampler and a 200 rollouts-per-task maximum
+budget per combination, stores per-combination trial directories under the
+matching
+`runs/dnn/<dataset>/tuning/trials`, evaluates every
+validation task, appends `tuning_results.csv`, and writes the current best
+combination to `best_config.json`. Pass `--tensorboard` to write
 per-combination TensorBoard event logs during tuning. It also writes
-`runs/tuning/tuning_configs/<algorithm>.json`, which records each algorithm's
-tuning arguments and effective search space for controlled resumes. Pass
+`tuning_configs/<algorithm>.json`, which records each algorithm's tuning
+arguments and effective search space for controlled resumes. Pass
+`--output-dir` only when you need an explicit save-location override, or
+`--experiment-name` to derive the output directory from dataset metadata. Pass
 `--hyperparameter-combinations` to change the number of sampled combinations,
 or pass
 `--search-space path/to/search_space.json` to override the default search space.
@@ -220,9 +233,8 @@ If a sweep is interrupted, rerun the same command with `--resume` to skip
 completed hyperparameter combinations recorded in `tuning_results.csv`, recover
 finished combination directories that were interrupted before their result row
 was appended, and rerun only incomplete combinations with the same sampled seed
-and hyperparameters. Add `--resume-training-state` with `--resume` to ask
-incomplete child training runs to restore their saved `training_state.pt`
-instead of starting that combination over. When `--resume` finds the
+and hyperparameters. Incomplete child training runs restore their saved
+`training_state.pt` when one exists. When `--resume` finds the
 algorithm's stored tuning config, it ignores new conflicting tuning arguments
 and continues with the stored arguments, including the combination count,
 rollout budget, datasets, seed, validation settings, and search space. If
@@ -240,39 +252,46 @@ combination selection. The ordinary `checkpoint.pt` remains the final training
 state.
 
 After tuning, train a longer final run from the stored best hyperparameter
-combination instead of copying values by hand:
+combination instead of copying values by hand. `--dataset` may point at a
+dataset directory; training then uses its `train.npz`, `validation.npz`, and
+`same_layout_new_goals.npz` files and writes under the matching
+`runs/dnn/<dataset-directory>/<algorithm>` directory:
 
 ```bash
-python scripts/train.py --algorithm ppo --best-config --dataset data/generalization/train.npz --validation-dataset data/generalization/validation.npz --same-layout-dataset data/generalization/same_layout_new_goals.npz --validation-interval 5 --validation-all-tasks --rollouts-per-task 1000
+python scripts/train.py --algorithm ppo --best-config runs/dnn/tuning_200x50x50_t5_seed42/tuning/best_config_ppo.json --dataset data/datasets/generalization_followup_5000x500x500_t5_seed42 --validation-interval 5 --validation-all-tasks --rollouts-per-task 1000
 ```
 
-`--best-config` reads `runs/tuning/best_config_<algorithm>.json` by default,
-and training writes to `runs/final_<algorithm>_best/<algorithm>` unless
-`--output-dir` is provided. Explicit training flags still override loaded
-values.
+`--best-config` reads `runs/dnn/tuning/best_config_<algorithm>.json` by default.
+Tabular training writes to `runs/tabular/<algorithm>`, and DNN training writes
+to `runs/dnn/final_<algorithm>_best/<algorithm>` unless `--output-dir`,
+`--experiment-name`, or a dataset directory is provided. With
+`--experiment-name`, training reads the dataset metadata and writes under
+`runs/dnn/<name>_<train>x<validation>x<test>_t<tasks>_seed<seed>/<algorithm>`.
+Explicit training flags still override loaded values.
 
 Training writes `validation_metrics.png` beside `validation_metrics.csv`; the
-plot overlays validation-layout performance with same-layout new-task
-performance when both splits are available. Tuning and training progress logs
-show combination percentages and task-selection-pass percentages at validation
-checks.
+plot overlays greedy train-evaluation, validation-layout performance, and
+same-layout new-task performance when those splits are available. Tuning and
+training progress logs show combination percentages and task-selection-pass
+percentages at validation checks.
 
 Summarize completed DNN sweeps across agents with:
 
 ```bash
-python scripts/tune_dnn.py summarize --output-dir runs/tuning
+python scripts/tune_dnn.py summarize --output-dir runs/dnn/tuning
 ```
 
-The command writes `runs/tuning/summary_plots/mean_path_efficiency_heatmap.png`
-for best validation and same-layout performance across trials, plus
+The command writes `runs/dnn/tuning/summary_plots/mean_path_efficiency_heatmap.png`
+for best greedy train-evaluation, validation, and same-layout performance
+across trials, plus
 `mean_path_efficiency_training_progress_by_agent.png`, which shows full
 `metrics.csv` training curves for every completed DNN trial grouped by agent
 and highlights the trial(s) with the best validation score. It also writes one
 `<algorithm>_validation_metrics_trials.png` grid per neural agent containing
-per-trial validation and same-layout validation curves overlaid with the
-matching epoch-aligned training curve when `metrics.csv` is available. Trial
-subplot titles show the best performance for the plotted curves, and the best
-validation score for that agent is highlighted, including ties. DNN summary
+per-trial train-greedy, validation, and same-layout validation curves overlaid
+with the matching epoch-aligned training curve when `metrics.csv` is available.
+Trial subplot titles show the best performance for the plotted curves, and the
+best validation score for that agent is highlighted, including ties. DNN summary
 grids use a single 5x4 sheet with display-safe dimensions and extra row height
 so 20-trial sweeps fit in one readable overview, and bounded metrics use a
 fixed 0-to-1 y scale so trials remain directly comparable. The command also
@@ -305,8 +324,8 @@ mean to the aggregate plot.
 
 Evaluation also writes the training plot automatically when it can find
 `metrics.csv` next to the checkpoint. The checkpoint path defaults to
-`runs/<algorithm>/checkpoint.pkl` for tabular agents and
-`runs/<algorithm>/checkpoint.pt` for neural agents:
+`runs/tabular/<algorithm>/checkpoint.pkl` for tabular agents and
+`runs/dnn/final_<algorithm>_best/<algorithm>/checkpoint.pt` for neural agents:
 
 ```bash
 python scripts/evaluate.py --algorithm q_learning --dataset data/train.npz
@@ -316,31 +335,32 @@ By default, evaluation runs every task in the dataset exactly once with a fixed
 seed for deterministic tie-breaking. For `validation.npz`, evaluation also
 looks for a sibling `same_layout_new_goals.npz` split and renders rollout videos
 for both validation views when MP4 support is installed. Use `--best-trial` to
-evaluate the best checkpoint recorded in `runs/tuning/tuning_results.csv`, or
+evaluate the best checkpoint recorded in `runs/dnn/tuning/tuning_results.csv`, or
 `--no-rollout-animations` to skip rollout videos.
 Legacy sampling flags remain accepted: use `--episodes N` to sample random
 tasks, `--fixed-index I` to repeat one task, or `--all-tasks` to request the
 default all-task pass explicitly.
 
-By default this writes `runs/q_learning/training_metrics.png`,
-`runs/q_learning/task_training_metrics.png`, and
-`runs/q_learning/task_training_metrics.html`. Use `--plot-output`,
-`--task-plot-output`, and `--task-html-output` to choose different paths, or
-`--no-plot` to skip training-metric plots.
+Training skips final training-metric plots by default to avoid large memory
+spikes on long runs. Pass `--plot` to write
+`runs/tabular/q_learning/training_metrics.png`,
+`runs/tabular/q_learning/task_training_metrics.png`, and
+`runs/tabular/q_learning/task_training_metrics.html`. Use `--plot-output`,
+`--task-plot-output`, and `--task-html-output` to choose different paths.
 
 For tabular checkpoints trained with the current script, evaluation also writes
 Q-value maze plots from evenly spaced training snapshots:
 
 ```bash
-python scripts/evaluate.py --algorithm q_learning --checkpoint runs/q_learning/checkpoint.pkl --dataset data/train.npz
+python scripts/evaluate.py --algorithm q_learning --checkpoint runs/tabular/q_learning/checkpoint.pkl --dataset data/train.npz
 ```
 
 By default, training stores 101 Q-table snapshots in the checkpoint, starting at
 epoch 1 and ending at the final epoch. Use `--q-snapshot-count 11` for a smaller
 set. Evaluation saves Q-value plots under
-`runs/q_learning/q_value_plots/task_XXXXX/frames/snapshot_XXX.png` for the tasks
+`runs/tabular/q_learning/q_value_plots/task_XXXXX/frames/snapshot_XXX.png` for the tasks
 visited during evaluation, and writes
-`runs/q_learning/q_value_plots/task_XXXXX/task_XXXXX_q_values.mp4` beside the
+`runs/tabular/q_learning/q_value_plots/task_XXXXX/task_XXXXX_q_values.mp4` beside the
 `frames` directory when MP4 support is installed. The plot title still shows the
 actual epoch. Use `--no-q-videos` to skip MP4s, or `--no-q-plots` to skip Q
 plots entirely.

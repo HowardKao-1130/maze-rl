@@ -11,6 +11,13 @@ import pickle
 import random
 import sys
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(
+        0,
+        str(REPO_ROOT),
+    )
+
 import numpy as np
 
 os.environ.setdefault(
@@ -47,6 +54,11 @@ from maze_rl.training.trainers import (
     train_q_learning_episode,
     train_reinforce_round,
     train_sarsa_episode,
+)
+from scripts.experiment_naming import (
+    DEFAULT_EXPERIMENT_OUTPUT_ROOT,
+    DEFAULT_TABULAR_OUTPUT_ROOT,
+    experiment_dataset_name_for_path,
 )
 
 
@@ -186,17 +198,92 @@ BEST_CONFIG_DEFAULT_SENTINEL = Path(
 def default_best_config_path(
     algorithm: str,
 ) -> Path:
-    return Path(
-        f"runs/tuning/best_config_{algorithm}.json"
+    return (
+        DEFAULT_EXPERIMENT_OUTPUT_ROOT
+        / "tuning"
+        / f"best_config_{algorithm}.json"
     )
 
 
 def default_output_dir(
     algorithm: str,
 ) -> Path:
-    return Path(
-        f"runs/final_{algorithm}_best"
+    if algorithm in TABULAR_ALGORITHMS:
+        return DEFAULT_TABULAR_OUTPUT_ROOT
+
+    return (
+        DEFAULT_EXPERIMENT_OUTPUT_ROOT
+        / f"final_{algorithm}_best"
     )
+
+
+def default_experiment_output_dir(
+    *,
+    experiment_name: str,
+    dataset_path: Path,
+    algorithm: str,
+    experiment_root: Path = DEFAULT_EXPERIMENT_OUTPUT_ROOT,
+) -> Path:
+    return (
+        experiment_root
+        / experiment_dataset_name_for_path(
+            experiment_name,
+            dataset_path,
+        )
+    )
+
+
+def dataset_bundle_output_dir(
+    *,
+    dataset_dir: Path,
+    algorithm: str,
+    experiment_root: Path = DEFAULT_EXPERIMENT_OUTPUT_ROOT,
+) -> Path:
+    return (
+        experiment_root
+        / dataset_dir.name
+    )
+
+
+def resolve_dataset_bundle_args(args) -> None:
+    dataset_path = Path(args.dataset)
+
+    if not dataset_path.is_dir():
+        args.dataset = dataset_path
+        return
+
+    dataset_dir = dataset_path
+    train_dataset = dataset_dir / "train.npz"
+    validation_dataset = dataset_dir / "validation.npz"
+    same_layout_dataset = (
+        dataset_dir / "same_layout_new_goals.npz"
+    )
+
+    if not train_dataset.exists():
+        raise ValueError(
+            "Dataset directory must contain train.npz: "
+            f"{dataset_dir}"
+        )
+
+    args.dataset = train_dataset
+
+    if args.validation_dataset is None:
+        if validation_dataset.exists():
+            args.validation_dataset = validation_dataset
+
+    if args.same_layout_dataset is None:
+        if same_layout_dataset.exists():
+            args.same_layout_dataset = same_layout_dataset
+
+    if (
+        args.output_dir is None
+        and args.experiment_name is None
+    ):
+        args.output_dir = dataset_bundle_output_dir(
+            dataset_dir=dataset_dir,
+            algorithm=args.algorithm,
+            experiment_root=args.experiment_root,
+        )
 
 
 RESUME_METADATA_CLI_OPTIONS = {
@@ -443,7 +530,13 @@ def parse_args():
 
     parser.add_argument(
         "--dataset",
-        default="data/train.npz",
+        type=Path,
+        default=Path("data/train.npz"),
+        help=(
+            "Training dataset .npz file, or a dataset directory "
+            "containing train.npz, validation.npz, and "
+            "same_layout_new_goals.npz."
+        ),
     )
 
     parser.add_argument(
@@ -484,22 +577,36 @@ def parse_args():
         default=None,
         help=(
             "Parent directory for training artifacts. Defaults to "
-            "runs/final_<algorithm>_best."
+            "runs/tabular for tabular algorithms and "
+            "runs/dnn/final_<algorithm>_best for DNN algorithms."
+        ),
+    )
+    parser.add_argument(
+        "--experiment-name",
+        default=None,
+        help=(
+            "Optional prefix for automatically named experiment "
+            "output under --experiment-root. The dataset metadata "
+            "provides the size and seed suffix."
+        ),
+    )
+    parser.add_argument(
+        "--experiment-root",
+        type=Path,
+        default=DEFAULT_EXPERIMENT_OUTPUT_ROOT,
+        help=(
+            "Root directory for automatically named experiment "
+            "training outputs."
         ),
     )
 
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Append to an existing metrics file instead of starting fresh.",
-    )
-    parser.add_argument(
-        "--resume-training-state",
-        action="store_true",
         help=(
-            "Restore the full training_state.pt state for this run. "
-            "This is separate from --resume, which only preserves "
-            "existing metric files."
+            "Restore the full training_state.pt state for this run, "
+            "including model, optimizer, sampler, RNG, counters, "
+            "pending metrics, and validation state."
         ),
     )
 
@@ -523,10 +630,24 @@ def parse_args():
         ),
     )
 
+    parser.set_defaults(no_plot=True)
+    parser.add_argument(
+        "--plot",
+        dest="no_plot",
+        action="store_false",
+        help=(
+            "Generate training-metric plots at the end of training. "
+            "Disabled by default."
+        ),
+    )
     parser.add_argument(
         "--no-plot",
+        dest="no_plot",
         action="store_true",
-        help="Skip training plot generation.",
+        help=(
+            "Skip training-metric plots at the end of training. "
+            "This is the default."
+        ),
     )
     parser.add_argument(
         "--no-progress",
@@ -594,8 +715,8 @@ def parse_args():
         help=(
             "Load the tuned best hyperparameter combination for "
             "--algorithm. Omitting the path reads "
-            "runs/tuning/best_config_<algorithm>.json. Explicit CLI "
-            "hyperparameters override loaded values."
+            "runs/dnn/tuning/best_config_<algorithm>.json. Explicit "
+            "CLI hyperparameters override loaded values."
         ),
     )
 
@@ -677,7 +798,7 @@ def parse_args():
         "--retroactive-early-stop",
         action="store_true",
         help=(
-            "Only with --resume-training-state: allow early-stopping "
+            "Only with --resume: allow early-stopping "
             "patience/min-delta to differ from the stored state, "
             "replay existing validation_metrics.csv with the requested "
             "rule, and stop immediately if that history already meets "
@@ -812,7 +933,11 @@ def parse_args():
             args.algorithm
         )
 
-    if args.output_dir is None:
+    if (
+        args.output_dir is None
+        and args.experiment_name is None
+        and not args.dataset.is_dir()
+    ):
         args.output_dir = default_output_dir(
             args.algorithm
         )
@@ -1578,7 +1703,7 @@ def load_training_state_metadata(
 ) -> dict:
     if not path.exists():
         raise RuntimeError(
-            "--resume-training-state requested, but "
+            "--resume requested, but "
             f"{path} does not exist."
         )
 
@@ -1598,6 +1723,83 @@ def load_training_state_metadata(
         )
 
     return metadata
+
+
+def existing_training_output_paths(
+    paths,
+) -> list[Path]:
+    return [
+        path
+        for path in paths
+        if path.exists()
+    ]
+
+
+def confirm_overwrite_existing_training_output(
+    existing_paths,
+    *,
+    interactive: bool | None = None,
+    input_fn=input,
+    output_stream=None,
+) -> None:
+    existing_paths = list(
+        existing_paths
+    )
+
+    if not existing_paths:
+        return
+
+    if output_stream is None:
+        output_stream = sys.stderr
+
+    print(
+        "WARNING: existing training outputs were found and this "
+        "run was not started with --resume.",
+        file=output_stream,
+    )
+    print(
+        "Starting fresh will delete or overwrite:",
+        file=output_stream,
+    )
+
+    for path in existing_paths:
+        print(
+            f"  - {path}",
+            file=output_stream,
+        )
+
+    print(
+        "Use --resume to continue from training_state.pt instead.",
+        file=output_stream,
+    )
+
+    if interactive is None:
+        interactive = sys.stdin.isatty()
+
+    if not interactive:
+        raise RuntimeError(
+            "Refusing to overwrite existing training outputs without "
+            "interactive confirmation."
+        )
+
+    response = input_fn(
+        "Type OVERWRITE to delete/overwrite these files and start "
+        "fresh: "
+    )
+
+    if response != "OVERWRITE":
+        raise RuntimeError(
+            "Aborted fresh training run; existing outputs were left "
+            "unchanged."
+        )
+
+
+def remove_existing_training_output(
+    existing_paths,
+) -> None:
+    for path in existing_paths:
+        if path.exists():
+            path.unlink()
 
 
 def optional_metadata_path(
@@ -1877,6 +2079,51 @@ def parse_validation_csv_row(
     }
 
 
+TRAIN_GREEDY_VALIDATION_SPLITS = {
+    "train",
+    "train_greedy",
+    "greedy_train",
+    "train_eval",
+}
+
+
+def validation_metrics_have_train_greedy_split(
+    path: Path,
+) -> bool:
+    if not path.exists():
+        return False
+
+    with path.open(
+        newline="",
+    ) as file:
+        reader = csv.DictReader(file)
+
+        for row in reader:
+            if (
+                row.get(
+                    "split",
+                    "validation",
+                )
+                in TRAIN_GREEDY_VALIDATION_SPLITS
+            ):
+                return True
+
+    return False
+
+
+def should_record_train_greedy_validation(
+    *,
+    resuming: bool,
+    validation_metrics_path: Path,
+) -> bool:
+    if not resuming:
+        return True
+
+    return validation_metrics_have_train_greedy_split(
+        validation_metrics_path
+    )
+
+
 def replay_early_stopping_from_validation_metrics(
     path: Path,
     *,
@@ -2060,10 +2307,62 @@ def format_progress_message(
     return message
 
 
+def format_task_selection_pass_progress_prefix(
+    dataset_epoch: int,
+    task_selection_pass_budget: int,
+) -> str:
+    progress_percent = (
+        dataset_epoch
+        / task_selection_pass_budget
+        * 100.0
+    )
+    return (
+        "pass "
+        f"{dataset_epoch:>{len(str(task_selection_pass_budget))}d}/"
+        f"{task_selection_pass_budget} "
+        f"[{progress_percent:.1f}%] | "
+    )
+
+
+def format_task_selection_pass_task_progress_message(
+    dataset_epoch: int,
+    task_selection_pass_budget: int,
+    completed_tasks: int,
+    total_tasks: int,
+) -> str:
+    task_progress_percent = (
+        100.0
+        if total_tasks <= 0
+        else completed_tasks / total_tasks * 100.0
+    )
+    return (
+        format_task_selection_pass_progress_prefix(
+            dataset_epoch,
+            task_selection_pass_budget,
+        )
+        + "task "
+        f"{completed_tasks}/{total_tasks} "
+        f"[{task_progress_percent:.1f}%]"
+    )
+
+
+def format_progress_continuation_prefix(
+    dataset_epoch: int,
+    task_selection_pass_budget: int,
+) -> str:
+    return " " * len(
+        format_task_selection_pass_progress_prefix(
+            dataset_epoch,
+            task_selection_pass_budget,
+        )
+    )
+
+
 def format_training_epoch_progress_message(
     dataset_epoch: int,
     task_selection_pass_budget: int,
     epoch_metrics,
+    total_tasks: int | None = None,
     early_stopping_counter: int | None = None,
     early_stopping_patience: int | None = None,
 ) -> str:
@@ -2099,13 +2398,35 @@ def format_training_epoch_progress_message(
         )
         else f"{early_stopping_counter}/{early_stopping_patience}"
     )
+    completed_tasks = (
+        len(
+            {
+                int(metrics.task_index)
+                for metrics in epoch_metrics
+            }
+        )
+        if total_tasks is None
+        else total_tasks
+    )
+    pass_task_count = (
+        max(completed_tasks, 1)
+        if total_tasks is None
+        else total_tasks
+    )
 
     return (
-        "pass "
-        f"{dataset_epoch:>{len(str(task_selection_pass_budget))}d}/"
-        f"{task_selection_pass_budget} "
-        f"{dataset_epoch / task_selection_pass_budget:>3.0%} | "
-        f"train eff={mean_path_efficiency:.3f} "
+        format_task_selection_pass_task_progress_message(
+            dataset_epoch,
+            task_selection_pass_budget,
+            completed_tasks,
+            pass_task_count,
+        )
+        + "\n"
+        + format_progress_continuation_prefix(
+            dataset_epoch,
+            task_selection_pass_budget,
+        )
+        + f"{'train':<12s} eff={mean_path_efficiency:.3f} "
         f"succ={success_rate:.3f} "
         f"steps={mean_steps:.1f} "
         f"es={early_stopping_status}"
@@ -2120,22 +2441,17 @@ def format_validation_progress_message(
     success_rate: float | None = None,
     best_score: float | None = None,
 ) -> str:
-    progress_prefix_width = (
-        len("pass ")
-        + len(str(task_selection_pass_budget))
-        + 1
-        + len(str(task_selection_pass_budget))
-        + 1
-        + 4
-        + len(" | ")
-    )
     split_label = {
         "validation": "val",
         "same_layout": "same-val",
+        "train_greedy": "train-greedy",
     }.get(split, split)
     message = (
-        f"{'':{progress_prefix_width + 4}s}"
-        f"{split_label:<8s} eff={validation_score:.3f}"
+        format_progress_continuation_prefix(
+            dataset_epoch,
+            task_selection_pass_budget,
+        )
+        + f"{split_label:<12s} eff={validation_score:.3f}"
     )
 
     if success_rate is not None:
@@ -2668,20 +2984,29 @@ def optimization_epochs_for_round(
 
 def main():
     args = parse_args()
+    resolve_dataset_bundle_args(args)
+
+    if args.output_dir is None:
+        args.output_dir = default_experiment_output_dir(
+            experiment_name=args.experiment_name,
+            dataset_path=args.dataset,
+            algorithm=args.algorithm,
+            experiment_root=args.experiment_root,
+        )
 
     if (
         args.retroactive_early_stop
-        and not args.resume_training_state
+        and not args.resume
     ):
         raise ValueError(
             "--retroactive-early-stop requires "
-            "--resume-training-state."
+            "--resume."
         )
 
     resume_training_metadata = None
     retroactive_resume_metadata = None
 
-    if args.resume_training_state:
+    if args.resume:
         training_state_path = (
             args.output_dir
             / args.algorithm
@@ -2837,25 +3162,36 @@ def main():
         run_dir / "training_summary.json"
     )
 
-    if (
-        metrics_path.exists()
-        and not args.resume
-        and not args.resume_training_state
-    ):
-        metrics_path.unlink()
+    checkpoint_suffix = (
+        ".pkl"
+        if args.algorithm
+        in TABULAR_ALGORITHMS
+        else ".pt"
+    )
 
-    if (
-        validation_metrics_path.exists()
-        and not args.resume
-        and not args.resume_training_state
-    ):
-        validation_metrics_path.unlink()
+    checkpoint_path = (
+        run_dir
+        / f"checkpoint{checkpoint_suffix}"
+    )
 
-    if (
-        training_state_path.exists()
-        and not args.resume_training_state
-    ):
-        training_state_path.unlink()
+    existing_output_paths = existing_training_output_paths(
+        [
+            metrics_path,
+            validation_metrics_path,
+            training_state_path,
+            checkpoint_path,
+            best_checkpoint_path,
+            training_summary_path,
+        ]
+    )
+
+    if existing_output_paths and not args.resume:
+        confirm_overwrite_existing_training_output(
+            existing_output_paths
+        )
+        remove_existing_training_output(
+            existing_output_paths
+        )
 
     validation_envs = {}
 
@@ -2974,6 +3310,66 @@ def main():
             cumulative_transitions,
         )
 
+    task_progress_line_active = False
+
+    def completed_task_count_for_epoch(
+        epoch_metrics,
+    ) -> int:
+        return len(
+            {
+                int(metrics.task_index)
+                for metrics in epoch_metrics
+            }
+        )
+
+    def write_task_progress_line(
+        dataset_epoch: int,
+        epoch_metrics_by_epoch,
+    ) -> None:
+        nonlocal task_progress_line_active
+
+        if args.no_progress or not sys.stdout.isatty():
+            return
+
+        completed_tasks = completed_task_count_for_epoch(
+            epoch_metrics_by_epoch.get(
+                dataset_epoch,
+                [],
+            )
+        )
+        message = format_task_selection_pass_task_progress_message(
+            dataset_epoch,
+            task_selection_pass_budget,
+            completed_tasks,
+            sampler.total_task_count,
+        )
+        print(
+            f"\r{message}\033[K",
+            end="",
+            flush=True,
+        )
+        task_progress_line_active = True
+
+    def print_progress_summary(
+        message: str,
+    ) -> None:
+        nonlocal task_progress_line_active
+
+        if (
+            task_progress_line_active
+            and sys.stdout.isatty()
+        ):
+            lines = message.splitlines()
+            lines[0] = f"\r{lines[0]}\033[K"
+            print(
+                "\n".join(lines),
+                flush=True,
+            )
+        else:
+            print(message)
+
+        task_progress_line_active = False
+
     sampler = HierarchicalTaskSampler(
         task_indices=task_indices,
         layout_indices=env.layout_indices,
@@ -2992,10 +3388,10 @@ def main():
         )
     )
 
-    if args.resume_training_state:
+    if args.resume:
         if not training_state_path.exists():
             raise RuntimeError(
-                "--resume-training-state requested, but "
+                "--resume requested, but "
                 f"{training_state_path} does not exist."
             )
 
@@ -3172,6 +3568,19 @@ def main():
                     "early stopping; continuing training."
                 )
 
+    if validation_envs and should_record_train_greedy_validation(
+        resuming=(
+            args.resume
+        ),
+        validation_metrics_path=validation_metrics_path,
+    ):
+        validation_envs[
+            "train_greedy"
+        ] = MazeEnv(
+            dataset_path=args.dataset,
+            max_steps=args.max_steps,
+        )
+
     def build_rollout_groups(
         rollout_specs,
     ):
@@ -3280,11 +3689,12 @@ def main():
         nonlocal validation_checks_without_improvement
 
         if not args.no_progress and epoch_metrics:
-            print(
+            print_progress_summary(
                 format_training_epoch_progress_message(
                     dataset_epoch,
                     task_selection_pass_budget,
                     epoch_metrics,
+                    total_tasks=sampler.total_task_count,
                     early_stopping_counter=(
                         validation_checks_without_improvement
                     ),
@@ -3344,11 +3754,37 @@ def main():
             task_selection_pass_budget,
             args.validation_interval,
         ):
-            for split, validation_env in validation_envs.items():
+            ordered_validation_splits = [
+                split
+                for split in (
+                    "train_greedy",
+                    "validation",
+                    "same_layout",
+                )
+                if split in validation_envs
+            ] + [
+                split
+                for split in validation_envs
+                if split
+                not in {
+                    "train_greedy",
+                    "validation",
+                    "same_layout",
+                }
+            ]
+
+            for split in ordered_validation_splits:
+                validation_env = validation_envs[
+                    split
+                ]
                 validation_task_indices = (
-                    list(
-                        range(
-                            validation_env.num_tasks
+                    (
+                        list(task_indices)
+                        if split == "train_greedy"
+                        else list(
+                            range(
+                                validation_env.num_tasks
+                            )
                         )
                     )
                     if args.validation_all_tasks
@@ -3573,6 +4009,10 @@ def main():
                 ).append(metrics)
 
                 record_episode_metrics(metrics)
+                write_task_progress_line(
+                    metrics.epoch,
+                    epoch_metrics_by_epoch,
+                )
 
             record_training_round(
                 round_metrics
@@ -3634,6 +4074,10 @@ def main():
                 ).append(metrics)
 
                 record_episode_metrics(metrics)
+                write_task_progress_line(
+                    metrics.epoch,
+                    epoch_metrics_by_epoch,
+                )
 
             record_training_round(
                 round_metrics
@@ -3724,13 +4168,15 @@ def main():
                     )
 
                 round_metrics.append(metrics)
-
-            for metrics in round_metrics:
                 record_episode_metrics(metrics)
                 epoch_metrics_by_epoch.setdefault(
                     metrics.epoch,
                     [],
                 ).append(metrics)
+                write_task_progress_line(
+                    metrics.epoch,
+                    epoch_metrics_by_epoch,
+                )
 
             record_training_round(
                 round_metrics
@@ -3750,18 +4196,6 @@ def main():
     save_training_progress_state(
         epoch_metrics_by_epoch,
         next_epoch_to_log,
-    )
-
-    checkpoint_suffix = (
-        ".pkl"
-        if args.algorithm
-        in TABULAR_ALGORITHMS
-        else ".pt"
-    )
-
-    checkpoint_path = (
-        run_dir
-        / f"checkpoint{checkpoint_suffix}"
     )
 
     save_checkpoint(

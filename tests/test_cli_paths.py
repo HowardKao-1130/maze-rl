@@ -41,7 +41,10 @@ from scripts.train import (
     agent_training_state_dict,
     apply_resume_training_state_defaults,
     apply_retroactive_resume_metadata,
+    confirm_overwrite_existing_training_output,
     configure_reproducibility,
+    default_experiment_output_dir,
+    format_task_selection_pass_task_progress_message,
     format_training_epoch_progress_message,
     format_validation_progress_message,
     load_best_config_overrides,
@@ -58,7 +61,10 @@ from scripts.train import (
     replay_early_stopping_from_validation_metrics,
     rollout_group_size_for_algorithm,
     resume_training_state_allowed_mismatches,
+    resolve_dataset_bundle_args,
+    remove_existing_training_output,
     save_training_state,
+    should_record_train_greedy_validation,
     should_validate_epoch,
     should_stop_early,
     task_batch_size_for_algorithm,
@@ -128,10 +134,12 @@ def make_metrics(
 def test_default_checkpoint_path_uses_algorithm_specific_suffix():
     assert default_checkpoint_path(
         "q_learning"
-    ) == Path("runs/q_learning/checkpoint.pkl")
+    ) == Path("runs/tabular/q_learning/checkpoint.pkl")
     assert default_checkpoint_path(
         "dqn"
-    ) == Path("runs/dqn/checkpoint.pt")
+    ) == Path(
+        "runs/dnn/final_dqn_best/dqn/checkpoint.pt"
+    )
 
 
 def test_evaluate_rollout_animation_defaults(monkeypatch):
@@ -149,7 +157,7 @@ def test_evaluate_rollout_animation_defaults(monkeypatch):
     args = parse_evaluate_args()
 
     assert args.checkpoint == Path(
-        "runs/q_learning/checkpoint.pkl"
+        "runs/tabular/q_learning/checkpoint.pkl"
     )
     assert args.dataset_label == "val"
     assert not args.no_rollout_animations
@@ -158,7 +166,7 @@ def test_evaluate_rollout_animation_defaults(monkeypatch):
     assert default_rollout_animation_output_dir(
         args.checkpoint
     ) == Path(
-        "runs/q_learning/rollout_animations"
+        "runs/tabular/q_learning/rollout_animations"
     )
 
 
@@ -308,16 +316,16 @@ def test_best_trial_checkpoint_path_selects_algorithm_best(tmp_path):
     )
     tuning_results_path.write_text(
         "trial,algorithm,objective,checkpoint_path\n"
-        "1,a2c,0.3,runs/tuning/trials/trial_001/a2c/best_checkpoint.pt\n"
-        "2,dqn,0.8,runs/tuning/trials/trial_002/dqn/best_checkpoint.pt\n"
-        "3,a2c,0.5,runs/tuning/trials/trial_003/a2c/best_checkpoint.pt\n"
+        "1,a2c,0.3,runs/dnn/tuning/trials/trial_001/a2c/best_checkpoint.pt\n"
+        "2,dqn,0.8,runs/dnn/tuning/trials/trial_002/dqn/best_checkpoint.pt\n"
+        "3,a2c,0.5,runs/dnn/tuning/trials/trial_003/a2c/best_checkpoint.pt\n"
     )
 
     assert best_trial_checkpoint_path(
         "a2c",
         tuning_results_path,
     ) == Path(
-        "runs/tuning/trials/trial_003/a2c/best_checkpoint.pt"
+        "runs/dnn/tuning/trials/trial_003/a2c/best_checkpoint.pt"
     )
 
 
@@ -327,7 +335,7 @@ def test_best_trial_checkpoint_path_rejects_missing_algorithm(tmp_path):
     )
     tuning_results_path.write_text(
         "trial,algorithm,objective,checkpoint_path\n"
-        "1,dqn,0.8,runs/tuning/trials/trial_001/dqn/best_checkpoint.pt\n"
+        "1,dqn,0.8,runs/dnn/tuning/trials/trial_001/dqn/best_checkpoint.pt\n"
     )
 
     with pytest.raises(
@@ -349,8 +357,8 @@ def test_evaluate_best_trial_uses_tuning_results_csv(
     )
     tuning_results_path.write_text(
         "trial,algorithm,objective,checkpoint_path\n"
-        "1,a2c,0.2,runs/tuning/trials/trial_001/a2c/best_checkpoint.pt\n"
-        "2,a2c,0.7,runs/tuning/trials/trial_002/a2c/best_checkpoint.pt\n"
+        "1,a2c,0.2,runs/dnn/tuning/trials/trial_001/a2c/best_checkpoint.pt\n"
+        "2,a2c,0.7,runs/dnn/tuning/trials/trial_002/a2c/best_checkpoint.pt\n"
     )
 
     monkeypatch.setattr(
@@ -370,7 +378,7 @@ def test_evaluate_best_trial_uses_tuning_results_csv(
     assert args.best_trial
     assert args.tuning_results == tuning_results_path
     assert args.checkpoint == Path(
-        "runs/tuning/trials/trial_002/a2c/best_checkpoint.pt"
+        "runs/dnn/tuning/trials/trial_002/a2c/best_checkpoint.pt"
     )
 
 
@@ -385,7 +393,7 @@ def test_evaluate_best_trial_rejects_explicit_checkpoint(
             "a2c",
             "--best-trial",
             "--checkpoint",
-            "runs/a2c/checkpoint.pt",
+            "runs/dnn/final_a2c_best/a2c/checkpoint.pt",
         ],
     )
 
@@ -395,7 +403,7 @@ def test_evaluate_best_trial_rejects_explicit_checkpoint(
 
 def test_default_tuning_results_path_uses_tuning_run_csv():
     assert default_tuning_results_path() == Path(
-        "runs/tuning/tuning_results.csv"
+        "runs/dnn/tuning/tuning_results.csv"
     )
 
 
@@ -514,6 +522,53 @@ def test_training_progress_messages_enabled_by_default(monkeypatch):
     assert args.no_progress is False
 
 
+def test_training_plots_disabled_by_default(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "dqn",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.no_plot is True
+
+
+def test_training_accepts_plot_opt_in(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "dqn",
+            "--plot",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.no_plot is False
+
+
+def test_training_accepts_no_plot(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "dqn",
+            "--no-plot",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.no_plot is True
+
+
 def test_training_tensorboard_disabled_by_default(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
@@ -562,7 +617,25 @@ def test_training_accepts_no_progress(monkeypatch):
     assert args.no_progress is True
 
 
-def test_training_accepts_resume_training_state(
+def test_training_resume_restores_training_state(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "dqn",
+            "--resume",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.resume is True
+
+
+def test_training_rejects_removed_resume_training_state_flag(
     monkeypatch,
 ):
     monkeypatch.setattr(
@@ -575,10 +648,53 @@ def test_training_accepts_resume_training_state(
         ],
     )
 
-    args = parse_train_args()
+    with pytest.raises(SystemExit):
+        parse_train_args()
 
-    assert args.resume is False
-    assert args.resume_training_state is True
+
+def test_fresh_training_requires_confirmation_before_overwrite(
+    tmp_path,
+):
+    metrics_path = tmp_path / "metrics.csv"
+    metrics_path.write_text("old metrics\n")
+
+    with pytest.raises(
+        RuntimeError,
+        match="Refusing to overwrite",
+    ):
+        confirm_overwrite_existing_training_output(
+            [metrics_path],
+            interactive=False,
+        )
+
+    assert metrics_path.exists()
+
+
+def test_fresh_training_confirmation_can_remove_existing_outputs(
+    tmp_path,
+):
+    metrics_path = tmp_path / "metrics.csv"
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    metrics_path.write_text("old metrics\n")
+    checkpoint_path.write_text("old checkpoint\n")
+
+    confirm_overwrite_existing_training_output(
+        [
+            metrics_path,
+            checkpoint_path,
+        ],
+        interactive=True,
+        input_fn=lambda _prompt: "OVERWRITE",
+    )
+    remove_existing_training_output(
+        [
+            metrics_path,
+            checkpoint_path,
+        ]
+    )
+
+    assert not metrics_path.exists()
+    assert not checkpoint_path.exists()
 
 
 def test_resume_training_state_defaults_to_stored_metadata(
@@ -591,7 +707,7 @@ def test_resume_training_state_defaults_to_stored_metadata(
             "train.py",
             "--algorithm",
             "ppo",
-            "--resume-training-state",
+            "--resume",
             "--rollouts-per-task",
             "300",
         ],
@@ -654,7 +770,7 @@ def test_training_accepts_retroactive_early_stop(
             "train.py",
             "--algorithm",
             "ppo",
-            "--resume-training-state",
+            "--resume",
             "--retroactive-early-stop",
         ],
     )
@@ -674,8 +790,34 @@ def test_validation_progress_formats_best_in_parentheses():
             success_rate=0.625,
             best_score=0.439,
         )
-        == "                        val      eff=0.419 "
+        == "                       val          eff=0.419 "
         "succ=0.625 (best=0.439)"
+    )
+
+
+def test_validation_progress_formats_train_greedy_label():
+    assert (
+        format_validation_progress_message(
+            "train_greedy",
+            dataset_epoch=5,
+            task_selection_pass_budget=1000,
+            validation_score=0.512,
+            success_rate=0.6,
+        )
+        == "                        train-greedy eff=0.512 "
+        "succ=0.600"
+    )
+
+
+def test_task_selection_pass_progress_formats_task_counter():
+    assert (
+        format_task_selection_pass_task_progress_message(
+            dataset_epoch=63,
+            task_selection_pass_budget=1000,
+            completed_tasks=7,
+            total_tasks=35,
+        )
+        == "pass   63/1000 [6.3%] | task 7/35 [20.0%]"
     )
 
 
@@ -697,7 +839,8 @@ def test_training_epoch_progress_includes_success_and_efficiency():
             early_stopping_counter=7,
             early_stopping_patience=35,
         )
-        == "pass 2/4 50% | train eff=0.714 "
+        == "pass 2/4 [50.0%] | task 1/1 [100.0%]\n"
+        "                   train        eff=0.714 "
         "succ=1.000 steps=7.0 es=7/35"
     )
 
@@ -738,7 +881,8 @@ def test_training_epoch_progress_formats_epoch_summary():
             early_stopping_counter=3,
             early_stopping_patience=10,
         )
-        == "pass    5/1000  0% | train eff=0.400 "
+        == "pass    5/1000 [0.5%] | task 2/2 [100.0%]\n"
+        "                        train        eff=0.400 "
         "succ=0.500 steps=16.0 es=3/10"
     )
 
@@ -786,6 +930,83 @@ def test_same_layout_dataset_matches_validation_size(monkeypatch, tmp_path):
         )
 
 
+def test_generate_dataset_experiment_name_derives_output_dir(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "generate_dataset.py",
+            "--train",
+            "7",
+            "--validation",
+            "3",
+            "--test",
+            "2",
+            "--tasks-per-maze",
+            "4",
+            "--seed",
+            "99",
+            "--experiment-name",
+            "Generalization Followup",
+        ],
+    )
+
+    args = parse_dataset_args()
+
+    assert args.output_dir == Path(
+        "data/datasets/generalization_followup_7x3x2_t4_seed99"
+    )
+
+
+def test_generate_dataset_default_output_dir_is_derived(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "generate_dataset.py",
+            "--train",
+            "7",
+            "--validation",
+            "3",
+            "--test",
+            "2",
+            "--tasks-per-maze",
+            "4",
+            "--seed",
+            "99",
+        ],
+    )
+
+    args = parse_dataset_args()
+
+    assert args.output_dir == Path(
+        "data/datasets/dataset_7x3x2_t4_seed99"
+    )
+
+
+def test_generate_dataset_explicit_output_dir_wins(
+    monkeypatch,
+    tmp_path,
+):
+    output_dir = tmp_path / "custom"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "generate_dataset.py",
+            "--experiment-name",
+            "ignored",
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    args = parse_dataset_args()
+
+    assert args.output_dir == output_dir
+
+
 def test_neural_hyperparameters_filter_unset_values():
     args = SimpleNamespace(
         batch_size=32,
@@ -831,7 +1052,7 @@ def test_parse_train_args_accepts_best_config_shorthand(monkeypatch):
     args = parse_train_args()
 
     assert args.best_config == Path(
-        "runs/tuning/best_config_ppo.json"
+        "runs/dnn/tuning/best_config_ppo.json"
     )
 
 
@@ -850,7 +1071,170 @@ def test_parse_train_args_uses_algorithm_output_dir_by_default(
     args = parse_train_args()
 
     assert args.output_dir == Path(
-        "runs/final_ppo_best"
+        "runs/dnn/final_ppo_best"
+    )
+
+
+def test_parse_train_args_uses_tabular_output_root_by_default(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "q_learning",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.output_dir == Path("runs/tabular")
+
+
+def test_parse_train_args_leaves_dataset_directory_output_for_resolution(
+    monkeypatch,
+    tmp_path,
+):
+    dataset_dir = tmp_path / "dataset_bundle"
+    dataset_dir.mkdir()
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "ppo",
+            "--dataset",
+            str(dataset_dir),
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.dataset == dataset_dir
+    assert args.output_dir is None
+
+
+def test_resolve_dataset_bundle_args_infers_splits_and_output(
+    tmp_path,
+):
+    dataset_dir = tmp_path / "generalization_followup_seed7"
+    dataset_dir.mkdir()
+    train_path = dataset_dir / "train.npz"
+    validation_path = dataset_dir / "validation.npz"
+    same_layout_path = dataset_dir / "same_layout_new_goals.npz"
+
+    train_path.write_bytes(b"train")
+    validation_path.write_bytes(b"validation")
+    same_layout_path.write_bytes(b"same-layout")
+
+    args = SimpleNamespace(
+        algorithm="ppo",
+        dataset=dataset_dir,
+        validation_dataset=None,
+        same_layout_dataset=None,
+        output_dir=None,
+        experiment_name=None,
+        experiment_root=tmp_path / "runs",
+    )
+
+    resolve_dataset_bundle_args(args)
+
+    assert args.dataset == train_path
+    assert args.validation_dataset == validation_path
+    assert args.same_layout_dataset == same_layout_path
+    assert args.output_dir == (
+        tmp_path
+        / "runs"
+        / "generalization_followup_seed7"
+    )
+
+
+def test_resolve_dataset_bundle_args_preserves_explicit_paths(
+    tmp_path,
+):
+    dataset_dir = tmp_path / "dataset_bundle"
+    dataset_dir.mkdir()
+    (dataset_dir / "train.npz").write_bytes(b"train")
+    (dataset_dir / "validation.npz").write_bytes(b"validation")
+    (dataset_dir / "same_layout_new_goals.npz").write_bytes(
+        b"same-layout"
+    )
+    explicit_validation = tmp_path / "custom_validation.npz"
+    explicit_same_layout = tmp_path / "custom_same_layout.npz"
+    explicit_output = tmp_path / "custom_output"
+
+    args = SimpleNamespace(
+        algorithm="dqn",
+        dataset=dataset_dir,
+        validation_dataset=explicit_validation,
+        same_layout_dataset=explicit_same_layout,
+        output_dir=explicit_output,
+        experiment_name=None,
+        experiment_root=tmp_path / "runs",
+    )
+
+    resolve_dataset_bundle_args(args)
+
+    assert args.dataset == dataset_dir / "train.npz"
+    assert args.validation_dataset == explicit_validation
+    assert args.same_layout_dataset == explicit_same_layout
+    assert args.output_dir == explicit_output
+
+
+def test_resolve_dataset_bundle_args_requires_train_split(
+    tmp_path,
+):
+    dataset_dir = tmp_path / "dataset_bundle"
+    dataset_dir.mkdir()
+
+    args = SimpleNamespace(
+        algorithm="ppo",
+        dataset=dataset_dir,
+        validation_dataset=None,
+        same_layout_dataset=None,
+        output_dir=None,
+        experiment_name=None,
+        experiment_root=tmp_path / "runs",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="must contain train.npz",
+    ):
+        resolve_dataset_bundle_args(args)
+
+
+def test_train_experiment_output_dir_uses_dataset_metadata(
+    tmp_path,
+):
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    dataset_path = dataset_dir / "train.npz"
+    dataset_path.write_bytes(b"")
+    (
+        dataset_dir / "metadata.json"
+    ).write_text(
+        json.dumps(
+            {
+                "train_mazes": 2000,
+                "validation_mazes": 200,
+                "test_mazes": 200,
+                "tasks_per_maze": 5,
+                "master_seed": 42,
+            }
+        )
+    )
+
+    assert default_experiment_output_dir(
+        experiment_name="generalization_followup",
+        dataset_path=dataset_path,
+        algorithm="ppo",
+        experiment_root=tmp_path / "runs",
+    ) == (
+        tmp_path
+        / "runs"
+        / "generalization_followup_2000x200x200_t5_seed42"
     )
 
 
@@ -981,16 +1365,18 @@ def test_q_video_path_uses_task_directory_layout():
     assert q_video_path(
         algorithm="sarsa",
         task_index=7,
-        runs_dir=Path("runs"),
+        runs_dir=Path("runs/tabular"),
     ) == Path(
-        "runs/sarsa/q_value_plots/task_00007/task_00007_q_values.mp4"
+        "runs/tabular/sarsa/q_value_plots/task_00007/task_00007_q_values.mp4"
     )
 
 
 def test_default_tensorboard_dir_uses_algorithm_run_directory():
     assert default_tensorboard_dir(
         "ppo"
-    ) == Path("runs/ppo/tensorboard")
+    ) == Path(
+        "runs/dnn/final_ppo_best/ppo/tensorboard"
+    )
 
 
 def test_latest_event_file_uses_newest_tensorboard_file(tmp_path):
@@ -1329,6 +1715,53 @@ def test_replay_early_stopping_from_validation_metrics(
     assert replayed["latest_validation_by_split"][
         "same_layout"
     ]["mean_path_efficiency"] == 0.5
+
+
+def test_train_greedy_validation_recorded_for_new_runs(
+    tmp_path,
+):
+    assert should_record_train_greedy_validation(
+        resuming=False,
+        validation_metrics_path=(
+            tmp_path / "validation_metrics.csv"
+        ),
+    )
+
+
+def test_train_greedy_validation_skipped_for_legacy_resume(
+    tmp_path,
+):
+    metrics_path = tmp_path / "validation_metrics.csv"
+    metrics_path.write_text(
+        "split,dataset_epoch,episodes,success_rate,"
+        "average_episode_return,mean_path_efficiency,"
+        "average_successful_path_efficiency\n"
+        "validation,1,2,0.5,1.0,0.4,0.8\n"
+        "same_layout,1,2,0.5,1.0,0.5,0.8\n"
+    )
+
+    assert not should_record_train_greedy_validation(
+        resuming=True,
+        validation_metrics_path=metrics_path,
+    )
+
+
+def test_train_greedy_validation_continues_for_resume_with_split(
+    tmp_path,
+):
+    metrics_path = tmp_path / "validation_metrics.csv"
+    metrics_path.write_text(
+        "split,dataset_epoch,episodes,success_rate,"
+        "average_episode_return,mean_path_efficiency,"
+        "average_successful_path_efficiency\n"
+        "validation,1,2,0.5,1.0,0.4,0.8\n"
+        "train_greedy,1,2,0.75,1.0,0.7,0.9\n"
+    )
+
+    assert should_record_train_greedy_validation(
+        resuming=True,
+        validation_metrics_path=metrics_path,
+    )
 
 
 def test_plot_validation_metrics_writes_split_curve(tmp_path):
