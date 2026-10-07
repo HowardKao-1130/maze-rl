@@ -252,13 +252,13 @@ combination selection. The ordinary `checkpoint.pt` remains the final training
 state.
 
 After tuning, train a longer final run from the stored best hyperparameter
-combination instead of copying values by hand. `--dataset` may point at a
-dataset directory; training then uses its `train.npz`, `validation.npz`, and
-`same_layout_new_goals.npz` files and writes under the matching
-`runs/dnn/<dataset-directory>/<algorithm>` directory:
+combination instead of copying values by hand. `--dataset` may name a bundle
+under `data/datasets` or point at a dataset directory; training then uses its
+`train.npz`, `validation.npz`, and `same_layout_new_goals.npz` files and writes
+under the matching `runs/dnn/<dataset-directory>/<algorithm>` directory:
 
 ```bash
-python scripts/train.py --algorithm ppo --best-config runs/dnn/tuning_200x50x50_t5_seed42/tuning/best_config_ppo.json --dataset data/datasets/generalization_followup_5000x500x500_t5_seed42 --validation-interval 5 --validation-all-tasks --rollouts-per-task 1000
+python scripts/train.py --algorithm ppo --best-config runs/dnn/tuning_200x50x50_t5_seed42/tuning/best_config_ppo.json --dataset generalization_followup_5000x500x500_t5_seed42 --validation-interval 5 --rollouts-per-task 1000
 ```
 
 `--best-config` reads `runs/dnn/tuning/best_config_<algorithm>.json` by default.

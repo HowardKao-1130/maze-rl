@@ -56,6 +56,7 @@ from maze_rl.training.trainers import (
     train_sarsa_episode,
 )
 from scripts.experiment_naming import (
+    DEFAULT_DATA_OUTPUT_ROOT,
     DEFAULT_EXPERIMENT_OUTPUT_ROOT,
     DEFAULT_TABULAR_OUTPUT_ROOT,
     experiment_dataset_name_for_path,
@@ -245,8 +246,19 @@ def dataset_bundle_output_dir(
     )
 
 
+def dataset_bundle_dir_for_reference(
+    dataset: Path,
+) -> Path:
+    if dataset.is_absolute() or len(dataset.parts) > 1:
+        return dataset
+
+    return DEFAULT_DATA_OUTPUT_ROOT / dataset
+
+
 def resolve_dataset_bundle_args(args) -> None:
-    dataset_path = Path(args.dataset)
+    dataset_path = dataset_bundle_dir_for_reference(
+        Path(args.dataset)
+    )
 
     if not dataset_path.is_dir():
         args.dataset = dataset_path
@@ -533,8 +545,9 @@ def parse_args():
         type=Path,
         default=Path("data/train.npz"),
         help=(
-            "Training dataset .npz file, or a dataset directory "
-            "containing train.npz, validation.npz, and "
+            "Training dataset .npz file, dataset directory, or "
+            "dataset bundle name under data/datasets containing "
+            "train.npz, validation.npz, and "
             "same_layout_new_goals.npz."
         ),
     )
@@ -936,7 +949,9 @@ def parse_args():
     if (
         args.output_dir is None
         and args.experiment_name is None
-        and not args.dataset.is_dir()
+        and not dataset_bundle_dir_for_reference(
+            args.dataset
+        ).is_dir()
     ):
         args.output_dir = default_output_dir(
             args.algorithm

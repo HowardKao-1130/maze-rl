@@ -43,6 +43,7 @@ from scripts.train import (
     apply_retroactive_resume_metadata,
     confirm_overwrite_existing_training_output,
     configure_reproducibility,
+    dataset_bundle_dir_for_reference,
     default_experiment_output_dir,
     format_task_selection_pass_task_progress_message,
     format_training_epoch_progress_message,
@@ -597,6 +598,7 @@ def test_training_matches_tuning_early_stopping_defaults(monkeypatch):
     args = parse_train_args()
 
     assert args.validation_interval == 1
+    assert args.validation_all_tasks is True
     assert args.early_stopping_patience == 35
     assert args.early_stopping_min_delta == 0.0
 
@@ -1115,6 +1117,37 @@ def test_parse_train_args_leaves_dataset_directory_output_for_resolution(
     assert args.output_dir is None
 
 
+def test_parse_train_args_leaves_dataset_name_output_for_resolution(
+    monkeypatch,
+    tmp_path,
+):
+    dataset_dir = (
+        tmp_path
+        / "data"
+        / "datasets"
+        / "generalization_followup_seed7"
+    )
+    dataset_dir.mkdir(
+        parents=True,
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "ppo",
+            "--dataset",
+            dataset_dir.name,
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.dataset == Path("generalization_followup_seed7")
+    assert args.output_dir is None
+
+
 def test_resolve_dataset_bundle_args_infers_splits_and_output(
     tmp_path,
 ):
@@ -1143,6 +1176,80 @@ def test_resolve_dataset_bundle_args_infers_splits_and_output(
     assert args.dataset == train_path
     assert args.validation_dataset == validation_path
     assert args.same_layout_dataset == same_layout_path
+    assert args.output_dir == (
+        tmp_path
+        / "runs"
+        / "generalization_followup_seed7"
+    )
+
+
+def test_train_dataset_bundle_dir_for_reference_expands_dataset_name():
+    assert dataset_bundle_dir_for_reference(
+        Path("generalization_followup_seed7")
+    ) == (
+        Path("data")
+        / "datasets"
+        / "generalization_followup_seed7"
+    )
+
+
+def test_train_dataset_bundle_dir_for_reference_preserves_paths(
+    tmp_path,
+):
+    explicit_relative = Path("data/train.npz")
+    explicit_absolute = tmp_path / "train.npz"
+
+    assert (
+        dataset_bundle_dir_for_reference(explicit_relative)
+        == explicit_relative
+    )
+    assert (
+        dataset_bundle_dir_for_reference(explicit_absolute)
+        == explicit_absolute
+    )
+
+
+def test_resolve_dataset_bundle_args_accepts_dataset_name(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    dataset_dir = (
+        tmp_path
+        / "data"
+        / "datasets"
+        / "generalization_followup_seed7"
+    )
+    dataset_dir.mkdir(
+        parents=True,
+    )
+    train_path = dataset_dir / "train.npz"
+    validation_path = dataset_dir / "validation.npz"
+    same_layout_path = dataset_dir / "same_layout_new_goals.npz"
+
+    train_path.write_bytes(b"train")
+    validation_path.write_bytes(b"validation")
+    same_layout_path.write_bytes(b"same-layout")
+
+    args = SimpleNamespace(
+        algorithm="ppo",
+        dataset=Path("generalization_followup_seed7"),
+        validation_dataset=None,
+        same_layout_dataset=None,
+        output_dir=None,
+        experiment_name=None,
+        experiment_root=tmp_path / "runs",
+    )
+
+    resolve_dataset_bundle_args(args)
+
+    assert args.dataset == train_path.relative_to(tmp_path)
+    assert args.validation_dataset == validation_path.relative_to(
+        tmp_path
+    )
+    assert args.same_layout_dataset == same_layout_path.relative_to(
+        tmp_path
+    )
     assert args.output_dir == (
         tmp_path
         / "runs"
