@@ -207,6 +207,7 @@ def test_parse_args_has_no_default_read_or_save_dirs(monkeypatch):
     assert args.rollouts_per_task == 200
     assert args.early_stopping_patience == 35
     assert args.q_snapshot_count == 11
+    assert args.validation_all_tasks is True
     assert args.tensorboard is False
     assert args.tensorboard_from_cli is False
     assert args.sampler == "random"
@@ -217,6 +218,24 @@ def test_parse_args_has_no_default_read_or_save_dirs(monkeypatch):
     assert args.same_layout_dataset is None
     assert args.test_dataset is None
     assert args.output_dir is None
+
+
+def test_parse_args_accepts_validation_sampling_opt_out(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "tune_dnn.py",
+            "--algorithm",
+            "ppo",
+            "--no-validation-all-tasks",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.validation_all_tasks is False
 
 
 def test_tuning_experiment_output_dir_uses_train_metadata(
@@ -457,6 +476,7 @@ def test_resume_config_allows_tensorboard_cli_override():
     assert args.hyperparameter_combinations == 20
     assert args.tensorboard is False
     assert args.sampler == "random"
+    assert args.validation_all_tasks is True
 
 
 def test_resume_config_uses_stored_tensorboard_without_cli_override():
@@ -1223,7 +1243,7 @@ def test_training_command_includes_trial_hyperparameters(tmp_path):
     assert command[
         command.index("--validation-interval") + 1
     ] == "2"
-    assert "--validation-all-tasks" in command
+    assert "--validation-all-tasks" not in command
     assert "--no-validation-all-tasks" not in command
     assert "--validation-episodes" not in command
     assert command[
@@ -1244,6 +1264,38 @@ def test_training_command_includes_trial_hyperparameters(tmp_path):
     assert command[
         command.index("--q-snapshot-count") + 1
     ] == "7"
+
+
+def test_training_command_can_opt_out_of_all_validation_tasks(
+    tmp_path,
+):
+    args = SimpleNamespace(
+        algorithm="ppo",
+        rollouts_per_task=3,
+        max_steps=7,
+        validation_dataset=tmp_path / "validation.npz",
+        same_layout_dataset=None,
+        validation_interval=2,
+        validation_all_tasks=False,
+        early_stopping_patience=4,
+        early_stopping_min_delta=0.0,
+        q_snapshot_count=7,
+        tensorboard=False,
+        keep_plots=False,
+    )
+
+    command = build_training_command(
+        args=args,
+        trial_dir=tmp_path / "trial",
+        train_dataset=tmp_path / "train.npz",
+        trial_seed=11,
+        hyperparameters={
+            "learning_rate": 0.0003,
+        },
+    )
+
+    assert "--no-validation-all-tasks" in command
+    assert "--validation-all-tasks" not in command
 
 
 def test_training_command_keeps_plots_when_requested(tmp_path):

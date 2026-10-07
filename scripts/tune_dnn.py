@@ -429,6 +429,7 @@ TUNING_ARGUMENT_FIELDS = [
     "evaluate_best_on_test",
     "search_space",
     "validation_interval",
+    "validation_all_tasks",
     "q_snapshot_count",
     "early_stopping_patience",
     "early_stopping_min_delta",
@@ -439,6 +440,7 @@ TUNING_OPTIONAL_ARGUMENT_DEFAULTS = {
     "dataset": None,
     "q_snapshot_count": 11,
     "sampler": "random",
+    "validation_all_tasks": True,
 }
 TUNING_PATH_ARGUMENT_FIELDS = {
     "dataset",
@@ -691,6 +693,16 @@ def parse_args(
         help=(
             "Task-selection-pass interval for validation during "
             "each hyperparameter combination."
+        ),
+    )
+    parser.add_argument(
+        "--validation-all-tasks",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Evaluate every validation task during tuning child "
+            "runs. This is the default; use "
+            "--no-validation-all-tasks to sample validation tasks."
         ),
     )
     parser.add_argument(
@@ -1413,7 +1425,12 @@ def build_training_command(
     else:
         command.append("--no-plot")
 
-    command.append("--validation-all-tasks")
+    if not getattr(
+        args,
+        "validation_all_tasks",
+        True,
+    ):
+        command.append("--no-validation-all-tasks")
 
     if args.early_stopping_patience is not None:
         command.extend(
