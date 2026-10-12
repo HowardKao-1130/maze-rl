@@ -26,7 +26,6 @@ def default_tensorboard_dir(
     if runs_dir is None:
         return (
             DEFAULT_EXPERIMENT_OUTPUT_ROOT
-            / f"final_{algorithm}_best"
             / algorithm
             / "tensorboard"
         )
@@ -142,7 +141,7 @@ def parse_args():
         default=None,
         help=(
             "TensorBoard directory to inspect. Defaults to "
-            "runs/dnn/final_<algorithm>_best/<algorithm>/tensorboard."
+            "runs/dnn/training/<algorithm>/tensorboard."
         ),
     )
 

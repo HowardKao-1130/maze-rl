@@ -4,8 +4,8 @@ from pathlib import Path
 
 from scripts.summarize_training_runs import (
     collect_training_run_series,
-    discover_metrics_paths,
     plot_training_run_summary,
+    resolve_summary_paths,
 )
 
 
@@ -63,34 +63,25 @@ def write_validation_metrics_csv(
     )
 
 
-def test_discover_metrics_paths_excludes_tuning_runs(
+def test_resolve_summary_paths_uses_dataset_name(
     tmp_path,
 ):
-    runs_dir = tmp_path / "runs"
-    training_metrics = (
-        runs_dir / "final_ppo_best" / "ppo" / "metrics.csv"
-    )
-    tuning_metrics = (
-        runs_dir
-        / "tuning"
-        / "trials"
-        / "trial_001"
-        / "ppo"
-        / "metrics.csv"
-    )
-    write_metrics_csv(
-        training_metrics,
-        [(1, 0.2, True)],
-    )
-    write_metrics_csv(
-        tuning_metrics,
-        [(1, 0.9, True)],
-    )
+    args = type(
+        "Args",
+        (),
+        {
+            "dataset": tmp_path / "dataset_alpha",
+            "runs_dir": None,
+            "output_dir": None,
+        },
+    )()
 
-    assert discover_metrics_paths(
-        runs_dir,
-        excluded_dirs={"tuning"},
-    ) == [training_metrics]
+    resolve_summary_paths(args)
+
+    assert args.runs_dir == (
+        Path("runs") / "dnn" / "training" / "dataset_alpha"
+    )
+    assert args.output_dir == args.runs_dir / "summary_plots"
 
 
 def test_collect_training_run_series_averages_by_epoch(
@@ -119,7 +110,6 @@ def test_collect_training_run_series_averages_by_epoch(
     series = collect_training_run_series(
         runs_dir,
         metric="path_efficiency",
-        excluded_dirs={"tuning"},
     )
 
     assert len(series) == 1
@@ -153,28 +143,16 @@ def test_plot_training_run_summary_writes_one_image(
 ):
     runs_dir = tmp_path / "runs"
     write_metrics_csv(
-        runs_dir / "final_ppo_best" / "ppo" / "metrics.csv",
+        runs_dir / "ppo" / "metrics.csv",
         [(1, 0.2, True), (2, 0.5, True)],
     )
     write_metrics_csv(
         runs_dir / "tabular" / "q_learning" / "metrics.csv",
         [(1, 0.1, False), (2, 0.3, True)],
     )
-    write_metrics_csv(
-        runs_dir
-        / "dnn"
-        / "dataset"
-        / "tuning"
-        / "trials"
-        / "trial_001"
-        / "ppo"
-        / "metrics.csv",
-        [(1, 0.9, True)],
-    )
     series = collect_training_run_series(
         runs_dir,
         metric="mean_path_efficiency",
-        excluded_dirs={"tuning"},
     )
     output_path = tmp_path / "summary.png"
 

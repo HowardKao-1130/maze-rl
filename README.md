@@ -42,12 +42,12 @@ Plot aggregate training curves:
 python scripts/plot_training_metrics.py --metrics runs/tabular/q_learning/metrics.csv --output runs/tabular/q_learning/training_metrics.png
 ```
 
-Plot all non-tuning neural-agent training histories discovered under `runs/`
-into one image. When validation metrics are available, the plot includes train,
-validation, same-layout validation, and greedy train-evaluation curves:
+Plot DNN training histories for a dataset into one image. When validation
+metrics are available, the plot includes train, validation, same-layout
+validation, and greedy train-evaluation curves:
 
 ```bash
-python scripts/summarize_training_runs.py --output runs/training_history_summary.png
+python scripts/summarize_training_runs.py --dataset generalization_followup_5000x500x500_t5_seed42
 ```
 
 Greedy train-evaluation points are read from `validation_metrics.csv` rows with
@@ -84,7 +84,7 @@ training-set mean path efficiency and success rate. When validation datasets are
 enabled, validation progress also prints mean path efficiency and success rate.
 Pass `--no-progress` to hide those training progress messages. Hyperparameter
 tuning child runs show the same compact training and validation progress so
-sweeps can be monitored with the same metrics as final training.
+sweeps can be monitored with the same metrics as training.
 
 Training enables deterministic Torch algorithms, disables cuDNN benchmarking and
 TF32, and configures cuBLAS workspace determinism before importing Torch. This
@@ -96,7 +96,7 @@ enabled, logs are written to `<run directory>/tensorboard`. Open the latest
 event file for one algorithm with:
 
 ```bash
-python scripts/open_tensorboard.py --logdir runs/dnn/final_dqn_best/dqn/tensorboard
+python scripts/open_tensorboard.py --logdir runs/dnn/training/dqn/tensorboard
 ```
 
 By default, the launcher shows only the newest
@@ -191,7 +191,7 @@ Generate datasets first:
 python scripts/generate_dataset.py --train-mazes 200 --validation-mazes 50 --test-mazes 50 --tasks-per-maze 5
 ```
 
-Use a separate output directory for larger final-training datasets so tuning
+Use a separate output directory for larger training datasets so tuning
 and experiment datasets remain intact. Pass an experiment name to derive the
 directory from the actual split sizes, task count, and seed:
 
@@ -215,7 +215,7 @@ name, it reads `data/datasets/<dataset>/train.npz`,
 combinations with a random-search sampler and a 200 rollouts-per-task maximum
 budget per combination, stores per-combination trial directories under the
 matching
-`runs/dnn/<dataset>/tuning/trials`, evaluates every
+`runs/dnn/tuning/<dataset>/trials`, evaluates every
 validation task, appends `tuning_results.csv`, and writes the current best
 combination to `best_config.json`. Pass `--tensorboard` to write
 per-combination TensorBoard event logs during tuning. It also writes
@@ -244,29 +244,31 @@ instead of guessing the old arguments.
 Keep `--rollouts-per-task` as the training budget for comparable combinations.
 Increasing it usually improves final performance but also changes compute cost,
 so it is best treated as a generous fixed maximum budget for the sweep. The
-tuner asks training to evaluate validation mean path efficiency every
-`--validation-interval` internal task-selection passes, also evaluates
+tuner asks training to evaluate validation mean path efficiency after every
+internal task-selection pass, also evaluates
 `--same-layout-dataset` when provided, saves each combination's
 `best_checkpoint.pt`, and uses the best validation-layout checkpoint for
-combination selection. The ordinary `checkpoint.pt` remains the final training
+combination selection. The ordinary `checkpoint.pt` remains the training
 state.
 
 After tuning, train a longer final run from the stored best hyperparameter
 combination instead of copying values by hand. `--dataset` may name a bundle
 under `data/datasets` or point at a dataset directory; training then uses its
 `train.npz`, `validation.npz`, and `same_layout_new_goals.npz` files and writes
-under the matching `runs/dnn/<dataset-directory>/<algorithm>` directory:
+under the matching `runs/dnn/training/<dataset-directory>/<algorithm>` directory:
 
 ```bash
-python scripts/train.py --algorithm ppo --best-config runs/dnn/tuning_200x50x50_t5_seed42/tuning/best_config_ppo.json --dataset generalization_followup_5000x500x500_t5_seed42 --validation-interval 5 --rollouts-per-task 1000
+python scripts/train.py --algorithm ppo --best-config --dataset generalization_followup_5000x500x500_t5_seed42 --rollouts-per-task 1000
 ```
 
-`--best-config` reads `runs/dnn/tuning/best_config_<algorithm>.json` by default.
+`--best-config` reads
+`runs/dnn/tuning/<dataset>/best_config_<algorithm>.json` when `--dataset` names
+a bundle.
 Tabular training writes to `runs/tabular/<algorithm>`, and DNN training writes
-to `runs/dnn/final_<algorithm>_best/<algorithm>` unless `--output-dir`,
-`--experiment-name`, or a dataset directory is provided. With
+to `runs/dnn/training/<algorithm>` unless `--output-dir`, `--experiment-name`, or
+a dataset directory is provided. With
 `--experiment-name`, training reads the dataset metadata and writes under
-`runs/dnn/<name>_<train>x<validation>x<test>_t<tasks>_seed<seed>/<algorithm>`.
+`runs/dnn/training/<name>_<train>x<validation>x<test>_t<tasks>_seed<seed>/<algorithm>`.
 Explicit training flags still override loaded values.
 
 Training writes `validation_metrics.png` beside `validation_metrics.csv`; the
@@ -278,12 +280,13 @@ percentages at validation checks.
 Summarize completed DNN sweeps across agents with:
 
 ```bash
-python scripts/tune_dnn.py summarize --output-dir runs/dnn/tuning
+python scripts/summarize_tuning_runs.py --dataset generalization_followup_5000x500x500_t5_seed42
 ```
 
-The command writes `runs/dnn/tuning/summary_plots/mean_path_efficiency_heatmap.png`
-for best greedy train-evaluation, validation, and same-layout performance
-across trials, plus
+The command writes
+`runs/dnn/tuning/<dataset>/summary_plots/mean_path_efficiency_heatmap.png` for
+best greedy train-evaluation, validation, and same-layout performance across
+trials, plus
 `mean_path_efficiency_training_progress_by_agent.png`, which shows full
 `metrics.csv` training curves for every completed DNN trial grouped by agent
 and highlights the trial(s) with the best validation score. It also writes one
@@ -325,7 +328,7 @@ mean to the aggregate plot.
 Evaluation also writes the training plot automatically when it can find
 `metrics.csv` next to the checkpoint. The checkpoint path defaults to
 `runs/tabular/<algorithm>/checkpoint.pkl` for tabular agents and
-`runs/dnn/final_<algorithm>_best/<algorithm>/checkpoint.pt` for neural agents:
+`runs/dnn/training/<algorithm>/checkpoint.pt` for neural agents:
 
 ```bash
 python scripts/evaluate.py --algorithm q_learning --dataset data/train.npz
@@ -341,7 +344,7 @@ Legacy sampling flags remain accepted: use `--episodes N` to sample random
 tasks, `--fixed-index I` to repeat one task, or `--all-tasks` to request the
 default all-task pass explicitly.
 
-Training skips final training-metric plots by default to avoid large memory
+Training skips training-metric plots by default to avoid large memory
 spikes on long runs. Pass `--plot` to write
 `runs/tabular/q_learning/training_metrics.png`,
 `runs/tabular/q_learning/task_training_metrics.png`, and

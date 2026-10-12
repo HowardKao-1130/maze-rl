@@ -5,8 +5,21 @@ import csv
 import os
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 
 import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(
+        0,
+        str(REPO_ROOT),
+    )
+
+from scripts.experiment_naming import (
+    DEFAULT_DATA_OUTPUT_ROOT,
+    DEFAULT_EXPERIMENT_OUTPUT_ROOT,
+)
 
 
 NEURAL_ALGORITHMS = [
@@ -97,36 +110,43 @@ class TrainingRunSeries:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Plot training history for all non-tuning runs under a runs "
-            "directory."
+            "Plot DNN training histories under a runs directory."
         )
+    )
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=None,
+        help=(
+            "Dataset bundle name under data/datasets or a dataset "
+            "directory. Defaults --runs-dir to "
+            "runs/dnn/training/<dataset>."
+        ),
     )
     parser.add_argument(
         "--runs-dir",
         type=Path,
-        default=Path("runs"),
-        help="Directory to scan for training run metrics.csv files.",
+        default=None,
+        help=(
+            "Directory to scan for training run metrics.csv files. "
+            "Defaults to runs/dnn/training, or "
+            "runs/dnn/training/<dataset> when --dataset is provided."
+        ),
     )
     parser.add_argument(
-        "--output",
+        "--output-dir",
         type=Path,
-        default=Path("runs/training_history_summary.png"),
-        help="Output PNG path.",
+        default=None,
+        help=(
+            "Directory for summary plots. Defaults to "
+            "<runs-dir>/summary_plots."
+        ),
     )
     parser.add_argument(
         "--metric",
         choices=sorted(TRAIN_METRIC_ALIASES),
         default="mean_path_efficiency",
         help="Training metric to average by dataset epoch.",
-    )
-    parser.add_argument(
-        "--exclude-dir",
-        action="append",
-        default=["tuning"],
-        help=(
-            "Directory name under --runs-dir to exclude. Can be "
-            "passed more than once. Defaults to tuning."
-        ),
     )
     parser.add_argument(
         "--rolling-window",
@@ -137,7 +157,34 @@ def parse_args() -> argparse.Namespace:
             "plot raw epoch means."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    resolve_summary_paths(args)
+    return args
+
+
+def dataset_dir_for_reference(
+    dataset: Path,
+) -> Path:
+    if dataset.is_absolute() or len(dataset.parts) > 1:
+        return dataset
+
+    return DEFAULT_DATA_OUTPUT_ROOT / dataset
+
+
+def resolve_summary_paths(
+    args: argparse.Namespace,
+) -> None:
+    if args.runs_dir is None:
+        args.runs_dir = DEFAULT_EXPERIMENT_OUTPUT_ROOT
+
+        if args.dataset is not None:
+            args.runs_dir = (
+                args.runs_dir
+                / dataset_dir_for_reference(args.dataset).name
+            )
+
+    if args.output_dir is None:
+        args.output_dir = args.runs_dir / "summary_plots"
 
 
 def parse_float(value: str | None) -> float | None:
@@ -214,27 +261,8 @@ def run_label(
         return metrics_path.parent.as_posix()
 
 
-def is_excluded_metrics_path(
-    metrics_path: Path,
-    runs_dir: Path,
-    excluded_dirs: set[str],
-) -> bool:
-    try:
-        relative_path = metrics_path.relative_to(
-            runs_dir
-        )
-    except ValueError:
-        return False
-
-    return bool(
-        set(relative_path.parts).intersection(excluded_dirs)
-    )
-
-
 def discover_metrics_paths(
     runs_dir: Path,
-    *,
-    excluded_dirs: set[str],
 ) -> list[Path]:
     if not runs_dir.exists():
         return []
@@ -243,11 +271,6 @@ def discover_metrics_paths(
         path
         for path in sorted(
             runs_dir.rglob("metrics.csv")
-        )
-        if not is_excluded_metrics_path(
-            path,
-            runs_dir,
-            excluded_dirs,
         )
     ]
 
@@ -519,13 +542,11 @@ def collect_training_run_series(
     runs_dir: Path,
     *,
     metric: str,
-    excluded_dirs: set[str],
 ) -> list[TrainingRunSeries]:
     series = []
 
     for metrics_path in discover_metrics_paths(
         runs_dir,
-        excluded_dirs=excluded_dirs,
     ):
         run_series = load_training_run_series(
             metrics_path,
@@ -548,7 +569,7 @@ def plot_training_run_summary(
 ) -> None:
     if not series:
         raise RuntimeError(
-            "No non-tuning neural training metrics found to plot."
+            "No DNN training metrics found to plot."
         )
 
     os.environ.setdefault(
@@ -694,7 +715,7 @@ def plot_training_run_summary(
         )
 
     title = (
-        "Neural training metrics across non-tuning runs: "
+        "DNN training metrics: "
         f"{label}"
     )
 
@@ -746,25 +767,24 @@ def plot_training_run_summary(
 
 def main() -> None:
     args = parse_args()
-    runs_dir = args.runs_dir
-    excluded_dirs = set(
-        args.exclude_dir
-    )
     series = collect_training_run_series(
-        runs_dir,
+        args.runs_dir,
         metric=args.metric,
-        excluded_dirs=excluded_dirs,
+    )
+    output_path = (
+        args.output_dir
+        / f"{canonical_metric(args.metric)}_training_history_summary.png"
     )
 
     plot_training_run_summary(
         series,
         metric=args.metric,
-        output_path=args.output,
+        output_path=output_path,
         rolling_window=args.rolling_window,
     )
 
     print(
-        f"Saved {len(series)} training run curve(s) to {args.output}"
+        f"Saved {len(series)} training run curve(s) to {output_path}"
     )
 
 

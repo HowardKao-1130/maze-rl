@@ -60,6 +60,7 @@ from scripts.train import (
     optimization_epochs_for_round,
     parse_args as parse_train_args,
     replay_early_stopping_from_validation_metrics,
+    resolve_best_config_path,
     rollout_group_size_for_algorithm,
     resume_training_state_allowed_mismatches,
     resolve_dataset_bundle_args,
@@ -139,7 +140,7 @@ def test_default_checkpoint_path_uses_algorithm_specific_suffix():
     assert default_checkpoint_path(
         "dqn"
     ) == Path(
-        "runs/dnn/final_dqn_best/dqn/checkpoint.pt"
+        "runs/dnn/training/dqn/checkpoint.pt"
     )
 
 
@@ -394,7 +395,7 @@ def test_evaluate_best_trial_rejects_explicit_checkpoint(
             "a2c",
             "--best-trial",
             "--checkpoint",
-            "runs/dnn/final_a2c_best/a2c/checkpoint.pt",
+            "runs/dnn/training/a2c/checkpoint.pt",
         ],
     )
 
@@ -597,7 +598,6 @@ def test_training_matches_tuning_early_stopping_defaults(monkeypatch):
 
     args = parse_train_args()
 
-    assert args.validation_interval == 1
     assert args.validation_all_tasks is True
     assert args.early_stopping_patience == 35
     assert args.early_stopping_min_delta == 0.0
@@ -647,6 +647,24 @@ def test_training_rejects_removed_resume_training_state_flag(
             "--algorithm",
             "dqn",
             "--resume-training-state",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        parse_train_args()
+
+
+def test_training_rejects_removed_validation_interval_flag(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "dqn",
+            "--validation-interval",
+            "5",
         ],
     )
 
@@ -751,7 +769,6 @@ def test_resume_training_state_defaults_to_stored_metadata(
     assert args.rollouts_per_task == 300
     assert args.task_batch_size == 32
     assert args.validation_dataset == tmp_path / "validation.npz"
-    assert args.validation_interval == 5
     assert args.validation_all_tasks is False
     assert args.early_stopping_patience == 9
     assert args.early_stopping_min_delta == 0.01
@@ -1040,22 +1057,68 @@ def test_neural_hyperparameters_filter_unset_values():
     }
 
 
-def test_parse_train_args_accepts_best_config_shorthand(monkeypatch):
+def test_parse_train_args_accepts_best_config_shorthand(
+    monkeypatch,
+    tmp_path,
+):
+    dataset_dir = tmp_path / "training_bundle"
+    dataset_dir.mkdir()
+    (dataset_dir / "train.npz").write_bytes(b"")
+
     monkeypatch.setattr(
         "sys.argv",
         [
             "train.py",
             "--algorithm",
             "ppo",
+            "--dataset",
+            str(dataset_dir),
             "--best-config",
         ],
     )
 
     args = parse_train_args()
+    resolve_dataset_bundle_args(args)
+
+    if args.best_config.name == "__algorithm_default_best_config__":
+        from scripts.train import default_best_config_path
+
+        args.best_config = default_best_config_path(
+            args.algorithm,
+            dataset_name=args.dataset_bundle_name,
+        )
 
     assert args.best_config == Path(
-        "runs/dnn/tuning/best_config_ppo.json"
+        "runs/dnn/tuning/training_bundle/best_config_ppo.json"
     )
+
+
+def test_resolve_best_config_path_uses_bare_tuning_name():
+    assert resolve_best_config_path(
+        Path("tuning_200x50x50_t5_seed42"),
+        "dqn",
+    ) == Path(
+        "runs/dnn/tuning/tuning_200x50x50_t5_seed42/best_config_dqn.json"
+    )
+
+
+def test_resolve_best_config_path_uses_tuning_directory(
+    tmp_path,
+):
+    tuning_dir = tmp_path / "tuning_200x50x50_t5_seed42"
+    tuning_dir.mkdir()
+
+    assert resolve_best_config_path(
+        tuning_dir,
+        "dqn",
+    ) == tuning_dir / "best_config_dqn.json"
+
+
+def test_resolve_best_config_path_keeps_explicit_json_file():
+    assert resolve_best_config_path(
+        Path("configs/dqn_best.json"),
+        "dqn",
+    ) == Path("configs/dqn_best.json")
 
 
 def test_parse_train_args_uses_algorithm_output_dir_by_default(
@@ -1073,7 +1136,7 @@ def test_parse_train_args_uses_algorithm_output_dir_by_default(
     args = parse_train_args()
 
     assert args.output_dir == Path(
-        "runs/dnn/final_ppo_best"
+        "runs/dnn/training"
     )
 
 
@@ -1482,7 +1545,7 @@ def test_default_tensorboard_dir_uses_algorithm_run_directory():
     assert default_tensorboard_dir(
         "ppo"
     ) == Path(
-        "runs/dnn/final_ppo_best/ppo/tensorboard"
+        "runs/dnn/training/ppo/tensorboard"
     )
 
 
@@ -1739,21 +1802,18 @@ def test_task_batch_size_rejects_non_positive_values():
         )
 
 
-def test_validation_schedule_includes_interval_and_final_epoch():
+def test_validation_schedule_runs_every_epoch():
     assert should_validate_epoch(
         epoch=4,
         final_epoch=10,
-        validation_interval=2,
     )
     assert should_validate_epoch(
         epoch=10,
         final_epoch=10,
-        validation_interval=3,
     )
     assert not should_validate_epoch(
-        epoch=5,
+        epoch=11,
         final_epoch=10,
-        validation_interval=2,
     )
 
 
@@ -2087,7 +2147,6 @@ def test_training_state_metadata_rejects_changed_hyperparameters(
         rollouts_per_task=10,
         validation_dataset=tmp_path / "validation.npz",
         same_layout_dataset=None,
-        validation_interval=5,
         validation_episodes=1,
         validation_all_tasks=False,
         early_stopping_patience=None,
@@ -2143,7 +2202,6 @@ def test_training_state_metadata_allows_early_stopping_override(
         rollouts_per_task=10,
         validation_dataset=tmp_path / "validation.npz",
         same_layout_dataset=None,
-        validation_interval=5,
         validation_episodes=1,
         validation_all_tasks=False,
         early_stopping_patience=35,
@@ -2196,7 +2254,6 @@ def test_training_state_metadata_allows_explicit_budget_override(
         rollouts_per_task=10,
         validation_dataset=tmp_path / "validation.npz",
         same_layout_dataset=None,
-        validation_interval=5,
         validation_episodes=1,
         validation_all_tasks=False,
         early_stopping_patience=None,
@@ -2245,7 +2302,6 @@ def test_apply_retroactive_resume_metadata_reuses_stored_config(
         rollout_group_size=None,
         validation_dataset=Path("data/validation.npz"),
         same_layout_dataset=None,
-        validation_interval=1,
         validation_episodes=200,
         validation_all_tasks=True,
         early_stopping_patience=35,
@@ -2291,6 +2347,5 @@ def test_apply_retroactive_resume_metadata_reuses_stored_config(
     assert args.same_layout_dataset == Path(
         "data/generalization/same_layout_new_goals.npz"
     )
-    assert args.validation_interval == 5
     assert args.validation_episodes == 500
     assert args.early_stopping_patience == 35

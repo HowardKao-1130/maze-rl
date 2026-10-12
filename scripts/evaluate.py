@@ -47,6 +47,7 @@ from maze_rl.training.plots import (
     write_task_training_metrics_html,
 )
 from scripts.experiment_naming import (
+    DEFAULT_DNN_TUNING_OUTPUT_ROOT,
     DEFAULT_EXPERIMENT_OUTPUT_ROOT,
     DEFAULT_TABULAR_OUTPUT_ROOT,
 )
@@ -72,7 +73,6 @@ def default_checkpoint_path(
 
     return (
         DEFAULT_EXPERIMENT_OUTPUT_ROOT
-        / f"final_{algorithm}_best"
         / algorithm
         / "checkpoint.pt"
     )
@@ -86,8 +86,7 @@ def default_rollout_animation_output_dir(
 
 def default_tuning_results_path() -> Path:
     return (
-        DEFAULT_EXPERIMENT_OUTPUT_ROOT
-        / "tuning"
+        DEFAULT_DNN_TUNING_OUTPUT_ROOT
         / "tuning_results.csv"
     )
 
@@ -236,7 +235,7 @@ def parse_args():
             "Checkpoint path. Defaults to "
             "runs/tabular/<algorithm>/checkpoint.pkl for tabular "
             "agents and "
-            "runs/dnn/final_<algorithm>_best/<algorithm>/"
+            "runs/dnn/training/<algorithm>/"
             "checkpoint.pt for neural agents."
         ),
     )

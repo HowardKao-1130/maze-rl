@@ -57,6 +57,7 @@ from maze_rl.training.trainers import (
 )
 from scripts.experiment_naming import (
     DEFAULT_DATA_OUTPUT_ROOT,
+    DEFAULT_DNN_TUNING_OUTPUT_ROOT,
     DEFAULT_EXPERIMENT_OUTPUT_ROOT,
     DEFAULT_TABULAR_OUTPUT_ROOT,
     experiment_dataset_name_for_path,
@@ -198,12 +199,36 @@ BEST_CONFIG_DEFAULT_SENTINEL = Path(
 
 def default_best_config_path(
     algorithm: str,
+    *,
+    dataset_name: str,
 ) -> Path:
     return (
-        DEFAULT_EXPERIMENT_OUTPUT_ROOT
-        / "tuning"
+        DEFAULT_DNN_TUNING_OUTPUT_ROOT
+        / dataset_name
         / f"best_config_{algorithm}.json"
     )
+
+
+def resolve_best_config_path(
+    path: Path,
+    algorithm: str,
+) -> Path:
+    if path.exists():
+        if path.is_dir():
+            return path / f"best_config_{algorithm}.json"
+
+        return path
+
+    if path.suffix:
+        return path
+
+    if len(path.parts) == 1:
+        return default_best_config_path(
+            algorithm,
+            dataset_name=path.name,
+        )
+
+    return path / f"best_config_{algorithm}.json"
 
 
 def default_output_dir(
@@ -212,10 +237,7 @@ def default_output_dir(
     if algorithm in TABULAR_ALGORITHMS:
         return DEFAULT_TABULAR_OUTPUT_ROOT
 
-    return (
-        DEFAULT_EXPERIMENT_OUTPUT_ROOT
-        / f"final_{algorithm}_best"
-    )
+    return DEFAULT_EXPERIMENT_OUTPUT_ROOT
 
 
 def default_experiment_output_dir(
@@ -256,6 +278,7 @@ def dataset_bundle_dir_for_reference(
 
 
 def resolve_dataset_bundle_args(args) -> None:
+    args.dataset_bundle_name = None
     dataset_path = dataset_bundle_dir_for_reference(
         Path(args.dataset)
     )
@@ -265,6 +288,7 @@ def resolve_dataset_bundle_args(args) -> None:
         return
 
     dataset_dir = dataset_path
+    args.dataset_bundle_name = dataset_dir.name
     train_dataset = dataset_dir / "train.npz"
     validation_dataset = dataset_dir / "validation.npz"
     same_layout_dataset = (
@@ -320,9 +344,6 @@ RESUME_METADATA_CLI_OPTIONS = {
     ),
     "same_layout_dataset": (
         "--same-layout-dataset",
-    ),
-    "validation_interval": (
-        "--validation-interval",
     ),
     "validation_episodes": (
         "--validation-episodes",
@@ -591,7 +612,7 @@ def parse_args():
         help=(
             "Parent directory for training artifacts. Defaults to "
             "runs/tabular for tabular algorithms and "
-            "runs/dnn/final_<algorithm>_best for DNN algorithms."
+            "runs/dnn/training for DNN algorithms."
         ),
     )
     parser.add_argument(
@@ -728,8 +749,10 @@ def parse_args():
         help=(
             "Load the tuned best hyperparameter combination for "
             "--algorithm. Omitting the path reads "
-            "runs/dnn/tuning/best_config_<algorithm>.json. Explicit "
-            "CLI hyperparameters override loaded values."
+            "runs/dnn/tuning/<dataset>/best_config_<algorithm>.json. "
+            "A provided directory or bare tuning run name resolves to "
+            "best_config_<algorithm>.json within that tuning output. "
+            "Explicit CLI hyperparameters override loaded values."
         ),
     )
 
@@ -763,15 +786,6 @@ def parse_args():
             "Optional same-layout new-task dataset to evaluate "
             "alongside validation during periodic neural-agent "
             "selection."
-        ),
-    )
-    parser.add_argument(
-        "--validation-interval",
-        type=int,
-        default=1,
-        help=(
-            "Task-selection-pass interval for validation when "
-            "--validation-dataset is provided."
         ),
     )
     parser.add_argument(
@@ -940,11 +954,6 @@ def parse_args():
             argv,
         )
     )
-
-    if args.best_config == BEST_CONFIG_DEFAULT_SENTINEL:
-        args.best_config = default_best_config_path(
-            args.algorithm
-        )
 
     if (
         args.output_dir is None
@@ -1656,7 +1665,6 @@ def training_state_metadata(
             if args.same_layout_dataset is None
             else str(args.same_layout_dataset)
         ),
-        "validation_interval": args.validation_interval,
         "validation_episodes": args.validation_episodes,
         "validation_all_tasks": args.validation_all_tasks,
         "early_stopping_patience": (
@@ -1685,6 +1693,14 @@ def validate_training_state_metadata(
     )
     comparable_expected = dict(
         expected_metadata
+    )
+    comparable_metadata.pop(
+        "validation_interval",
+        None,
+    )
+    comparable_expected.pop(
+        "validation_interval",
+        None,
     )
 
     for key in allowed_mismatches:
@@ -1868,9 +1884,6 @@ def apply_retroactive_resume_metadata(
         metadata,
         "same_layout_dataset",
     )
-    args.validation_interval = int(
-        metadata["validation_interval"]
-    )
     args.validation_episodes = int(
         metadata["validation_episodes"]
     )
@@ -1916,9 +1929,6 @@ def apply_resume_training_state_defaults(
             metadata,
             "same_layout_dataset",
         ),
-        "validation_interval": int(
-            metadata["validation_interval"]
-        ),
         "validation_episodes": int(
             metadata["validation_episodes"]
         ),
@@ -1954,9 +1964,6 @@ def resume_training_state_allowed_mismatches(
         "rollouts_per_task": {
             "rollouts_per_task",
             "task_selection_pass_budget",
-        },
-        "validation_interval": {
-            "validation_interval",
         },
         "validation_episodes": {
             "validation_episodes",
@@ -2040,15 +2047,8 @@ def load_training_state(
 def should_validate_epoch(
     epoch: int,
     final_epoch: int,
-    validation_interval: int,
 ) -> bool:
-    return (
-        validation_interval > 0
-        and (
-            epoch % validation_interval == 0
-            or epoch == final_epoch
-        )
-    )
+    return 0 < epoch <= final_epoch
 
 
 def should_stop_early(
@@ -3001,6 +3001,23 @@ def main():
     args = parse_args()
     resolve_dataset_bundle_args(args)
 
+    if args.best_config == BEST_CONFIG_DEFAULT_SENTINEL:
+        if args.dataset_bundle_name is None:
+            raise ValueError(
+                "Omitting the --best-config path requires "
+                "--dataset to name a dataset bundle."
+            )
+
+        args.best_config = default_best_config_path(
+            args.algorithm,
+            dataset_name=args.dataset_bundle_name,
+        )
+    elif args.best_config is not None:
+        args.best_config = resolve_best_config_path(
+            args.best_config,
+            args.algorithm,
+        )
+
     if args.output_dir is None:
         args.output_dir = default_experiment_output_dir(
             experiment_name=args.experiment_name,
@@ -3215,12 +3232,6 @@ def main():
             raise ValueError(
                 "Periodic validation checkpoints are only "
                 "supported for DNN agents."
-            )
-
-        if args.validation_interval <= 0:
-            raise ValueError(
-                "--validation-interval must be positive when "
-                "--validation-dataset is provided."
             )
 
         if (
@@ -3767,7 +3778,6 @@ def main():
         if validation_envs and should_validate_epoch(
             dataset_epoch,
             task_selection_pass_budget,
-            args.validation_interval,
         ):
             ordered_validation_splits = [
                 split

@@ -16,39 +16,42 @@ from scripts.tune_dnn import (
     DEFAULT_SEARCH_SPACES,
     REPO_ROOT,
     _terminate_child_process,
-    aligned_training_metric_series,
     apply_tuning_config,
-    artifact_title_score_text,
-    best_performing_trials,
     best_config_path_for_algorithm,
     build_evaluation_command,
     build_result_from_artifacts,
     build_training_command,
-    collect_heatmap_cells,
-    collect_parallel_coordinate_trials,
     dataset_bundle_dir_for_reference,
     dataset_bundle_tuning_output_dir,
     default_experiment_tuning_output_dir,
-    discover_validation_metric_artifacts,
     load_search_space,
-    metric_series_by_split,
     main,
     ordered_search_space,
     parse_args,
-    plot_all_agent_training_progress,
-    plot_validation_metric_montage,
     read_completed_results,
     result_matches_trial,
     resolve_dataset_bundle_args,
     run_command,
     sample_hyperparameters,
     sample_hyperparameters_with_optuna,
-    summarize_tuning,
     summarize_evaluation,
-    training_metric_series,
     write_best_config_index,
     write_result_row,
     write_tuning_config,
+)
+from scripts.summarize_tuning_runs import (
+    aligned_training_metric_series,
+    artifact_title_score_text,
+    best_performing_trials,
+    collect_heatmap_cells,
+    collect_parallel_coordinate_trials,
+    discover_validation_metric_artifacts,
+    metric_series_by_split,
+    parse_args as parse_summary_args,
+    plot_all_agent_training_progress,
+    plot_validation_metric_montage,
+    summarize_tuning_runs,
+    training_metric_series,
 )
 
 
@@ -267,7 +270,6 @@ def test_tuning_experiment_output_dir_uses_train_metadata(
         tmp_path
         / "runs"
         / "generalization_followup_5000x500x500_t5_seed42"
-        / "tuning"
     )
 
 
@@ -314,7 +316,6 @@ def test_dataset_bundle_resolution_infers_splits_and_output(
         tmp_path
         / "runs"
         / "tuning_200x50x50_t5_seed42"
-        / "tuning"
     )
 
 
@@ -338,7 +339,6 @@ def test_dataset_bundle_tuning_output_dir_uses_dataset_name(
         tmp_path
         / "runs"
         / "tuning_200x50x50_t5_seed42"
-        / "tuning"
     )
 
 
@@ -417,23 +417,45 @@ def test_parse_args_accepts_tensorboard_opt_out(
     assert args.tensorboard_from_cli is True
 
 
-def test_parse_args_accepts_summarize_command(
+def test_parse_args_rejects_removed_validation_interval_flag(
     monkeypatch,
 ):
     monkeypatch.setattr(
         "sys.argv",
         [
             "tune_dnn.py",
-            "summarize",
-            "--output-dir",
-            "runs/dnn/tuning",
+            "--algorithm",
+            "ppo",
+            "--validation-interval",
+            "5",
         ],
     )
 
-    args = parse_args()
+    with pytest.raises(SystemExit):
+        parse_args()
 
-    assert args.command == "summarize"
-    assert args.output_dir.name == "tuning"
+
+def test_summarize_parse_args_derives_paths_from_dataset(
+    monkeypatch,
+    tmp_path,
+):
+    dataset_dir = tmp_path / "dataset_alpha"
+    dataset_dir.mkdir()
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "summarize_tuning_runs.py",
+            "--dataset",
+            str(dataset_dir),
+        ],
+    )
+
+    args = parse_summary_args()
+
+    assert args.runs_dir == (
+        Path("runs") / "dnn" / "tuning" / "dataset_alpha"
+    )
+    assert args.output_dir == args.runs_dir / "summary_plots"
     assert args.metric == "mean_path_efficiency"
 
 
@@ -453,7 +475,6 @@ def test_resume_config_allows_tensorboard_cli_override():
             "test_dataset": "data/test.npz",
             "evaluate_best_on_test": False,
             "search_space": None,
-            "validation_interval": 1,
             "early_stopping_patience": 35,
             "early_stopping_min_delta": 0.0,
             "tensorboard": True,
@@ -495,7 +516,6 @@ def test_resume_config_uses_stored_tensorboard_without_cli_override():
             "test_dataset": "data/test.npz",
             "evaluate_best_on_test": False,
             "search_space": None,
-            "validation_interval": 1,
             "early_stopping_patience": 35,
             "early_stopping_min_delta": 0.0,
             "tensorboard": True,
@@ -590,7 +610,6 @@ def test_resume_uses_stored_tuning_arguments(
             test_dataset=tmp_path / "old_test.npz",
             evaluate_best_on_test=False,
             search_space=None,
-            validation_interval=2,
             early_stopping_patience=4,
             early_stopping_min_delta=0.01,
             tensorboard=False,
@@ -664,7 +683,6 @@ def test_resume_allows_hyperparameter_combination_override(
             test_dataset=tmp_path / "old_test.npz",
             evaluate_best_on_test=False,
             search_space=None,
-            validation_interval=2,
             early_stopping_patience=4,
             early_stopping_min_delta=0.01,
             tensorboard=False,
@@ -736,7 +754,6 @@ def test_other_algorithm_history_does_not_block_new_sweep(
             test_dataset=tmp_path / "old_test.npz",
             evaluate_best_on_test=False,
             search_space=None,
-            validation_interval=2,
             early_stopping_patience=4,
             early_stopping_min_delta=0.01,
             tensorboard=False,
@@ -813,7 +830,6 @@ def test_other_algorithm_legacy_config_does_not_block_new_sweep(
             test_dataset=tmp_path / "old_test.npz",
             evaluate_best_on_test=False,
             search_space=None,
-            validation_interval=2,
             early_stopping_patience=4,
             early_stopping_min_delta=0.01,
             tensorboard=False,
@@ -1088,7 +1104,6 @@ def test_resume_keeps_completed_result_on_sample_mismatch(
             test_dataset=tmp_path / "test.npz",
             evaluate_best_on_test=False,
             search_space=None,
-            validation_interval=2,
             early_stopping_patience=4,
             early_stopping_min_delta=0.01,
             tensorboard=False,
@@ -1202,7 +1217,6 @@ def test_training_command_includes_trial_hyperparameters(tmp_path):
         validation_dataset=tmp_path / "validation.npz",
         same_layout_dataset=tmp_path
         / "same_layout_new_goals.npz",
-        validation_interval=2,
         early_stopping_patience=4,
         early_stopping_min_delta=0.01,
         q_snapshot_count=7,
@@ -1240,9 +1254,7 @@ def test_training_command_includes_trial_hyperparameters(tmp_path):
     ] == str(
         tmp_path / "same_layout_new_goals.npz"
     )
-    assert command[
-        command.index("--validation-interval") + 1
-    ] == "2"
+    assert "--validation-interval" not in command
     assert "--validation-all-tasks" not in command
     assert "--no-validation-all-tasks" not in command
     assert "--validation-episodes" not in command
@@ -1275,7 +1287,6 @@ def test_training_command_can_opt_out_of_all_validation_tasks(
         max_steps=7,
         validation_dataset=tmp_path / "validation.npz",
         same_layout_dataset=None,
-        validation_interval=2,
         validation_all_tasks=False,
         early_stopping_patience=4,
         early_stopping_min_delta=0.0,
@@ -1305,7 +1316,6 @@ def test_training_command_keeps_plots_when_requested(tmp_path):
         max_steps=7,
         validation_dataset=tmp_path / "validation.npz",
         same_layout_dataset=None,
-        validation_interval=2,
         early_stopping_patience=4,
         early_stopping_min_delta=0.0,
         q_snapshot_count=7,
@@ -1344,7 +1354,6 @@ def test_training_command_can_request_resume_when_state_exists(
         validation_dataset=tmp_path / "validation.npz",
         same_layout_dataset=tmp_path
         / "same_layout_new_goals.npz",
-        validation_interval=2,
         early_stopping_patience=4,
         early_stopping_min_delta=0.01,
         q_snapshot_count=7,
@@ -1376,7 +1385,6 @@ def test_training_command_skips_resume_without_state(
         validation_dataset=tmp_path / "validation.npz",
         same_layout_dataset=tmp_path
         / "same_layout_new_goals.npz",
-        validation_interval=2,
         early_stopping_patience=4,
         early_stopping_min_delta=0.01,
         q_snapshot_count=7,
@@ -1406,7 +1414,6 @@ def test_training_command_passes_grpo_task_and_group_sizes(tmp_path):
         validation_dataset=tmp_path / "validation.npz",
         same_layout_dataset=tmp_path
         / "same_layout_new_goals.npz",
-        validation_interval=2,
         early_stopping_patience=None,
         early_stopping_min_delta=0.0,
         q_snapshot_count=11,
@@ -1869,10 +1876,10 @@ def test_summarize_tuning_writes_heatmap_trial_grids_and_parallel_coordinates(
         tmp_path / "summary"
     )
 
-    summarize_tuning(
+    summarize_tuning_runs(
         SimpleNamespace(
-            output_dir=output_dir,
-            summary_output_dir=summary_output_dir,
+            runs_dir=output_dir,
+            output_dir=summary_output_dir,
             metric="mean_path_efficiency",
         )
     )
@@ -2332,10 +2339,10 @@ def test_summarize_tuning_removes_stale_paginated_trial_grids(tmp_path):
         / "ppo_validation_metrics_trials_page_02.png"
     ).write_bytes(b"stale")
 
-    summarize_tuning(
+    summarize_tuning_runs(
         SimpleNamespace(
-            output_dir=output_dir,
-            summary_output_dir=summary_output_dir,
+            runs_dir=output_dir,
+            output_dir=summary_output_dir,
             metric="mean_path_efficiency",
         )
     )
