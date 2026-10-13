@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
 import sys
+from typing import Any
 
 import numpy as np
 
@@ -79,6 +81,12 @@ SERIES_STYLES = {
         "linestyle": "--",
     },
 }
+SCORE_LABELS = {
+    "train": "t",
+    "validation": "v",
+    "same_layout": "vs",
+    "train_greedy": "tg",
+}
 SPLIT_ALIASES = {
     "validation": "validation",
     "val": "validation",
@@ -105,6 +113,7 @@ class TrainingRunSeries:
     metrics_path: Path
     train_points: list[tuple[int, float]]
     validation_points_by_split: dict[str, list[tuple[int, float]]]
+    is_incomplete: bool
 
 
 def parse_args() -> argparse.Namespace:
@@ -275,6 +284,115 @@ def discover_metrics_paths(
     ]
 
 
+def read_training_summary(
+    path: Path,
+) -> dict[str, Any]:
+    with path.open() as file:
+        return json.load(file)
+
+
+def training_summary_completed(
+    training_summary: dict[str, Any],
+) -> bool:
+    if training_summary.get("stopped_early") is True:
+        return True
+
+    completed = training_summary.get(
+        "task_selection_passes_completed",
+        training_summary.get(
+            "dataset_epochs_completed"
+        ),
+    )
+    requested = training_summary.get(
+        "task_selection_passes_requested",
+        training_summary.get(
+            "dataset_epochs_requested"
+        ),
+    )
+
+    if completed is None or requested is None:
+        return False
+
+    try:
+        return int(completed) >= int(requested)
+    except (TypeError, ValueError):
+        return False
+
+
+def run_activity_paths(
+    run_dir: Path,
+) -> list[Path]:
+    paths = [
+        run_dir / "metrics.csv",
+        run_dir / "validation_metrics.csv",
+        run_dir / "training_state.pt",
+        run_dir / "checkpoint.pt",
+        run_dir / "best_checkpoint.pt",
+        run_dir / "checkpoint.pkl",
+        run_dir / "best_checkpoint.pkl",
+    ]
+
+    return [
+        path
+        for path in paths
+        if path.exists()
+    ]
+
+
+def run_has_stale_completion_summary(
+    summary_path: Path,
+) -> bool:
+    summary_mtime_ns = summary_path.stat().st_mtime_ns
+
+    return any(
+        path.stat().st_mtime_ns > summary_mtime_ns
+        for path in run_activity_paths(
+            summary_path.parent
+        )
+    )
+
+
+def training_summary_completion_status(
+    path: Path,
+) -> bool | None:
+    if not path.exists():
+        return None
+
+    if run_has_stale_completion_summary(path):
+        return False
+
+    try:
+        training_summary = read_training_summary(
+            path
+        )
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(
+        training_summary,
+        dict,
+    ):
+        return None
+
+    return training_summary_completed(
+        training_summary
+    )
+
+
+def run_completion_status(
+    metrics_path: Path,
+) -> bool | None:
+    return training_summary_completion_status(
+        metrics_path.parent / "training_summary.json"
+    )
+
+
+def run_is_incomplete(
+    metrics_path: Path,
+) -> bool:
+    return run_completion_status(metrics_path) is not True
+
+
 def is_neural_training_run(
     metrics_path: Path,
 ) -> bool:
@@ -347,6 +465,7 @@ def load_training_run_series(
                 metric=metric,
             )
         ),
+        is_incomplete=run_is_incomplete(metrics_path),
     )
 
 
@@ -538,6 +657,171 @@ def plotted_max_epoch(
     )
 
 
+def value_at_epoch(
+    points: list[tuple[int, float]],
+    epoch: int,
+) -> float | None:
+    for point_epoch, value in points:
+        if point_epoch == epoch:
+            return value
+
+    return None
+
+
+def best_validation_epoch(
+    item: TrainingRunSeries,
+) -> int | None:
+    validation_points = item.validation_points_by_split.get(
+        "validation"
+    )
+
+    if not validation_points:
+        return None
+
+    return min(
+        validation_points,
+        key=lambda point: (
+            -point[1],
+            point[0],
+        ),
+    )[0]
+
+
+def selected_epoch_score_summary(
+    item: TrainingRunSeries,
+) -> str:
+    epoch = best_validation_epoch(item)
+
+    if epoch is None:
+        best_train = max(
+            value
+            for _, value in item.train_points
+        )
+        return f"best {SCORE_LABELS['train']} {best_train:.2f}"
+
+    scores = []
+    train_score = value_at_epoch(
+        item.train_points,
+        epoch,
+    )
+
+    if train_score is not None:
+        scores.append(
+            f"{SCORE_LABELS['train']} {train_score:.2f}"
+        )
+
+    for split in PLOTTED_EVALUATION_SPLITS:
+        score = value_at_epoch(
+            item.validation_points_by_split.get(
+                split,
+                [],
+            ),
+            epoch,
+        )
+
+        if score is None:
+            continue
+
+        scores.append(
+            f"{SCORE_LABELS[split]} {score:.2f}"
+        )
+
+    if not scores:
+        return f"{SCORE_LABELS['validation']} epoch {epoch}"
+
+    return "  ".join(scores)
+
+
+def subplot_title(
+    item: TrainingRunSeries,
+) -> str:
+    title = item.algorithm
+
+    title = (
+        f"{title}\n"
+        f"{selected_epoch_score_summary(item)}"
+    )
+
+    return title
+
+
+def draw_incomplete_label(axis) -> None:
+    axis.text(
+        0.02,
+        0.96,
+        "INCOMPLETE",
+        transform=axis.transAxes,
+        ha="left",
+        va="top",
+        color="#c62828",
+        fontsize=11,
+        fontweight="bold",
+        bbox={
+            "boxstyle": "round,pad=0.25",
+            "facecolor": "white",
+            "edgecolor": "#c62828",
+            "linewidth": 1.0,
+            "alpha": 0.92,
+        },
+    )
+
+
+def draw_best_epoch_marker(
+    axis,
+    epoch: int | None,
+) -> None:
+    if epoch is None:
+        return
+
+    x_min, x_max = axis.get_xlim()
+    x_mid = (x_min + x_max) / 2
+    horizontal_alignment = (
+        "right"
+        if epoch > x_mid
+        else "left"
+    )
+    point_offset = (
+        -3
+        if epoch > x_mid
+        else 3
+    )
+
+    axis.axvline(
+        epoch,
+        color="#808080",
+        linestyle=":",
+        linewidth=1.6,
+        alpha=1.0,
+        zorder=1,
+    )
+
+    import matplotlib.transforms as transforms
+
+    axis.text(
+        epoch,
+        0.03,
+        f"best val epoch {epoch}",
+        transform=(
+            axis.get_xaxis_transform()
+            + transforms.ScaledTranslation(
+                point_offset / 72,
+                0,
+                axis.figure.dpi_scale_trans,
+            )
+        ),
+        ha=horizontal_alignment,
+        va="bottom",
+        color="#666666",
+        fontsize=9,
+        bbox={
+            "boxstyle": "round,pad=0.18",
+            "facecolor": "white",
+            "edgecolor": "none",
+            "alpha": 0.9,
+        },
+    )
+
+
 def collect_training_run_series(
     runs_dir: Path,
     *,
@@ -661,19 +945,14 @@ def plot_training_run_summary(
                 label=style["label"],
             )
 
-        best_train = max(
-            value
-            for _, value in train_points
-        )
-        title = (
-            f"{item.algorithm}: {item.label}\n"
-            f"best train {best_train:.2f}"
-        )
         axis.set_title(
-            title,
+            subplot_title(item),
             fontsize=13,
             pad=8,
         )
+        if item.is_incomplete:
+            draw_incomplete_label(axis)
+
         axis.tick_params(
             labelsize=10,
         )
@@ -693,6 +972,10 @@ def plot_training_run_summary(
         )
         axis.set_xticks(
             summary_axis_ticks(max_epoch)
+        )
+        draw_best_epoch_marker(
+            axis,
+            best_validation_epoch(item),
         )
 
         if metric in BOUNDED_METRICS:

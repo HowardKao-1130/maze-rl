@@ -52,6 +52,9 @@ python scripts/summarize_training_runs.py --dataset generalization_followup_5000
 
 Greedy train-evaluation points are read from `validation_metrics.csv` rows with
 split `train`, `train_greedy`, or `greedy_train`.
+Subplot titles use short score labels (`t`, `v`, `vs`, `tg`) and red
+`INCOMPLETE` badges mark runs that cannot be confirmed complete from
+`training_summary.json`.
 
 The plot shows separate rows for dataset-epoch mean rollout return, success
 rate, env steps per rollout, and, for TD methods, dataset-epoch mean absolute TD
@@ -285,20 +288,23 @@ python scripts/summarize_tuning_runs.py --dataset generalization_followup_5000x5
 
 The command writes
 `runs/dnn/tuning/<dataset>/summary_plots/mean_path_efficiency_heatmap.png` for
-best greedy train-evaluation, validation, and same-layout performance across
-trials, plus
+best validation and same-layout performance across trials, plus
 `mean_path_efficiency_training_progress_by_agent.png`, which shows full
 `metrics.csv` training curves for every completed DNN trial grouped by agent
-and highlights the trial(s) with the best validation score. It also writes one
+and highlights the trial(s) with the best validation score. It also writes
+`mean_path_efficiency_best_trial_training_history_summary.png`, a single
+subplot summary of the best validation trial for each agent, and one
 `<algorithm>_validation_metrics_trials.png` grid per neural agent containing
-per-trial train-greedy, validation, and same-layout validation curves overlaid
-with the matching epoch-aligned training curve when `metrics.csv` is available.
-Trial subplot titles show the best performance for the plotted curves, and the
-best validation score for that agent is highlighted, including ties. DNN summary
-grids use a single 5x4 sheet with display-safe dimensions and extra row height
-so 20-trial sweeps fit in one readable overview, and bounded metrics use a
-fixed 0-to-1 y scale so trials remain directly comparable. The command also
-writes
+per-trial validation and same-layout validation curves overlaid with the
+matching epoch-aligned training curve when `metrics.csv` is available.
+Trial subplot titles show performance at the validation-selected checkpoint and
+use short score labels (`t`, `v`, `vs`). Red `INCOMPLETE` badges mark unfinished
+trials or missing grid slots when they cannot be confirmed complete from
+`training_summary.json`. The best validation score for that agent is
+highlighted, including ties. DNN summary grids use a single 5x4 sheet with
+display-safe dimensions and extra row height so 20-trial sweeps fit in one
+readable overview, and bounded metrics use a fixed 0-to-1 y scale so trials
+remain directly comparable. The command also writes
 `<algorithm>_mean_path_efficiency_parallel_coordinates.png` plots that place
 each trial's numeric hyperparameters and validation score on shared parallel
 axes, with better scores drawn in brighter colors and the best trial(s)

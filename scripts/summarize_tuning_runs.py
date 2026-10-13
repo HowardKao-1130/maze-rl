@@ -38,10 +38,58 @@ def read_training_summary(
         return json.load(file)
 
 
+def training_summary_completed(
+    training_summary: dict[str, Any],
+) -> bool:
+    if training_summary.get("stopped_early") is True:
+        return True
 
+    completed = training_summary.get(
+        "task_selection_passes_completed",
+        training_summary.get(
+            "dataset_epochs_completed"
+        ),
+    )
+    requested = training_summary.get(
+        "task_selection_passes_requested",
+        training_summary.get(
+            "dataset_epochs_requested"
+        ),
+    )
+
+    if completed is None or requested is None:
+        return False
+
+    try:
+        return int(completed) >= int(requested)
+    except (TypeError, ValueError):
+        return False
+
+
+def training_summary_completion_status(
+    path: Path,
+) -> bool | None:
+    if not path.exists():
+        return None
+
+    try:
+        training_summary = read_training_summary(
+            path
+        )
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(
+        training_summary,
+        dict,
+    ):
+        return None
+
+    return training_summary_completed(
+        training_summary
+    )
 
 SUMMARY_SPLITS = [
-    "train_greedy",
     "validation",
     "same_layout",
 ]
@@ -105,7 +153,7 @@ SUMMARY_SERIES_STYLES = {
 SUMMARY_SCORE_LABELS = {
     "train_greedy": "tg",
     "validation": "v",
-    "same_layout": "s",
+    "same_layout": "vs",
     "train": "t",
 }
 SUMMARY_METRIC_LABELS = {
@@ -584,6 +632,36 @@ def validation_metric_epochs(
     }
 
 
+def value_at_epoch(
+    series: list[tuple[int, float]],
+    epoch: int,
+) -> float | None:
+    for point_epoch, value in series:
+        if point_epoch == epoch:
+            return value
+
+    return None
+
+
+def best_validation_epoch(
+    series_by_split: dict[str, list[tuple[int, float]]],
+) -> int | None:
+    validation_series = series_by_split.get(
+        "validation"
+    )
+
+    if not validation_series:
+        return None
+
+    return min(
+        validation_series,
+        key=lambda point: (
+            -point[1],
+            point[0],
+        ),
+    )[0]
+
+
 def aligned_training_metric_series(
     metrics_path: Path,
     *,
@@ -722,20 +800,46 @@ def artifact_title_score_text(
     *,
     metric: str,
 ) -> str:
-    split_values = best_metric_by_split(
+    validation_series = validation_metric_series(
         artifact["metrics_path"],
-        metric,
+        metric=metric,
+    )
+    selected_epoch = best_validation_epoch(
+        validation_series
     )
     labels = []
 
-    for split in SUMMARY_SPLITS:
-        if split not in split_values:
-            continue
+    if selected_epoch is not None:
+        for split in SUMMARY_SPLITS:
+            value = value_at_epoch(
+                validation_series.get(
+                    split,
+                    [],
+                ),
+                selected_epoch,
+            )
 
-        labels.append(
-            f"{SUMMARY_SCORE_LABELS[split]} "
-            f"{split_values[split]:.2f}"
+            if value is None:
+                continue
+
+            labels.append(
+                f"{SUMMARY_SCORE_LABELS[split]} "
+                f"{value:.2f}"
+            )
+    else:
+        split_values = best_metric_by_split(
+            artifact["metrics_path"],
+            metric,
         )
+
+        for split in SUMMARY_SPLITS:
+            if split not in split_values:
+                continue
+
+            labels.append(
+                f"{SUMMARY_SCORE_LABELS[split]} "
+                f"{split_values[split]:.2f}"
+            )
 
     training_metrics_path = artifact.get(
         "training_metrics_path"
@@ -745,17 +849,29 @@ def artifact_title_score_text(
         training_metrics_path is not None
         and training_metrics_path.exists()
     ):
-        aligned_epochs = validation_metric_epochs(
-            validation_metric_series(
-                artifact["metrics_path"],
-                metric=metric,
+        train_score = None
+
+        if selected_epoch is not None:
+            train_score = value_at_epoch(
+                aligned_training_metric_series(
+                    artifact["training_metrics_path"],
+                    metric=metric,
+                    aligned_epochs={
+                        selected_epoch,
+                    },
+                ),
+                selected_epoch,
             )
-        )
-        train_score = best_train_metric(
-            artifact["training_metrics_path"],
-            metric=metric,
-            aligned_epochs=aligned_epochs,
-        )
+
+        if train_score is None:
+            aligned_epochs = validation_metric_epochs(
+                validation_series
+            )
+            train_score = best_train_metric(
+                artifact["training_metrics_path"],
+                metric=metric,
+                aligned_epochs=aligned_epochs,
+            )
 
         if train_score is not None:
             labels.append(
@@ -812,6 +928,54 @@ def best_performing_trials(
     }
 
 
+def best_artifacts_by_algorithm(
+    artifacts: list[dict[str, Any]],
+    *,
+    metric: str,
+) -> dict[str, dict[str, Any]]:
+    best_artifacts = {}
+
+    for algorithm in ordered_algorithms(
+        {
+            artifact["algorithm"]
+            for artifact in artifacts
+        }
+    ):
+        scored_artifacts = []
+
+        for artifact in artifacts:
+            if artifact["algorithm"] != algorithm:
+                continue
+
+            score = artifact_summary_score(
+                artifact,
+                metric=metric,
+            )
+
+            if score is None:
+                continue
+
+            scored_artifacts.append(
+                (
+                    artifact,
+                    score,
+                )
+            )
+
+        if not scored_artifacts:
+            continue
+
+        best_artifacts[algorithm] = min(
+            scored_artifacts,
+            key=lambda item: (
+                -item[1],
+                item[0]["trial"],
+            ),
+        )[0]
+
+    return best_artifacts
+
+
 def ordered_algorithms(
     algorithms: set[str],
 ) -> list[str]:
@@ -836,6 +1000,201 @@ def artifact_training_summary_path(
     return (
         artifact["metrics_path"].parent
         / "training_summary.json"
+    )
+
+
+def artifact_completion_status(
+    artifact: dict[str, Any],
+) -> bool | None:
+    training_summary_path = artifact_training_summary_path(
+        artifact
+    )
+
+    if artifact_has_stale_completion_summary(
+        artifact,
+        training_summary_path=training_summary_path,
+    ):
+        return False
+
+    return training_summary_completion_status(
+        training_summary_path
+    )
+
+
+def artifact_incomplete_label(
+    artifact: dict[str, Any],
+) -> str:
+    return "INCOMPLETE" if artifact_is_incomplete(artifact) else ""
+
+
+def artifact_is_incomplete(
+    artifact: dict[str, Any],
+) -> bool:
+    return artifact_completion_status(artifact) is not True
+
+
+def artifact_activity_paths(
+    artifact: dict[str, Any],
+) -> list[Path]:
+    run_dir = artifact["metrics_path"].parent
+    paths = [
+        artifact["metrics_path"],
+        artifact["training_metrics_path"],
+        run_dir / "checkpoint.pt",
+        run_dir / "best_checkpoint.pt",
+        run_dir / "checkpoint.pkl",
+        run_dir / "best_checkpoint.pkl",
+    ]
+
+    return [
+        path
+        for path in paths
+        if path.exists()
+    ]
+
+
+def artifact_completion_marker_mtime_ns(
+    artifact: dict[str, Any],
+    *,
+    training_summary_path: Path,
+) -> int | None:
+    run_dir = artifact["metrics_path"].parent
+    marker_paths = [
+        training_summary_path,
+        run_dir / "validation_evaluation.csv",
+    ]
+    marker_mtimes = [
+        path.stat().st_mtime_ns
+        for path in marker_paths
+        if path.exists()
+    ]
+
+    if not marker_mtimes:
+        return None
+
+    return max(marker_mtimes)
+
+
+def artifact_has_stale_completion_summary(
+    artifact: dict[str, Any],
+    *,
+    training_summary_path: Path,
+) -> bool:
+    marker_mtime_ns = artifact_completion_marker_mtime_ns(
+        artifact,
+        training_summary_path=training_summary_path,
+    )
+
+    if marker_mtime_ns is None:
+        return False
+
+    return any(
+        path.stat().st_mtime_ns > marker_mtime_ns
+        for path in artifact_activity_paths(artifact)
+    )
+
+
+def algorithm_is_incomplete(
+    artifacts: list[dict[str, Any]],
+    algorithm: str,
+) -> bool:
+    if any(
+        artifact["algorithm"] == algorithm
+        and artifact_is_incomplete(artifact)
+        for artifact in artifacts
+    ):
+        return True
+
+    trial_numbers = {
+        artifact["trial"]
+        for artifact in artifacts
+    }
+    algorithm_trials = {
+        artifact["trial"]
+        for artifact in artifacts
+        if artifact["algorithm"] == algorithm
+    }
+
+    return bool(
+        trial_numbers
+        and algorithm_trials != trial_numbers
+    )
+
+
+def draw_incomplete_label(axis) -> None:
+    axis.text(
+        0.02,
+        0.96,
+        "INCOMPLETE",
+        transform=axis.transAxes,
+        ha="left",
+        va="top",
+        color="#c62828",
+        fontsize=11,
+        fontweight="bold",
+        bbox={
+            "boxstyle": "round,pad=0.25",
+            "facecolor": "white",
+            "edgecolor": "#c62828",
+            "linewidth": 1.0,
+            "alpha": 0.92,
+        },
+    )
+
+
+def draw_best_epoch_marker(
+    axis,
+    epoch: int | None,
+) -> None:
+    if epoch is None:
+        return
+
+    x_min, x_max = axis.get_xlim()
+    x_mid = (x_min + x_max) / 2
+    horizontal_alignment = (
+        "right"
+        if epoch > x_mid
+        else "left"
+    )
+    point_offset = (
+        -3
+        if epoch > x_mid
+        else 3
+    )
+
+    axis.axvline(
+        epoch,
+        color="#808080",
+        linestyle=":",
+        linewidth=1.6,
+        alpha=1.0,
+        zorder=1,
+    )
+
+    import matplotlib.transforms as transforms
+
+    axis.text(
+        epoch,
+        0.03,
+        f"best val epoch {epoch}",
+        transform=(
+            axis.get_xaxis_transform()
+            + transforms.ScaledTranslation(
+                point_offset / 72,
+                0,
+                axis.figure.dpi_scale_trans,
+            )
+        ),
+        ha=horizontal_alignment,
+        va="bottom",
+        color="#666666",
+        fontsize=9,
+        bbox={
+            "boxstyle": "round,pad=0.18",
+            "facecolor": "white",
+            "edgecolor": "none",
+            "alpha": 0.9,
+        },
     )
 
 
@@ -1804,6 +2163,12 @@ def plot_all_agent_training_progress(
             ),
             fontsize=13,
         )
+        if algorithm_is_incomplete(
+            artifacts,
+            algorithm,
+        ):
+            draw_incomplete_label(axis)
+
         axis.set_xlabel("Dataset epoch")
         axis.set_ylabel(metric_label)
         axis.grid(
@@ -1883,6 +2248,227 @@ def plot_all_agent_training_progress(
     plt.close(figure)
 
     return len(series_by_artifact)
+
+
+def plot_best_trial_training_summary(
+    artifacts: list[dict[str, Any]],
+    *,
+    metric: str,
+    output_path: Path,
+) -> int:
+    best_artifacts = best_artifacts_by_algorithm(
+        artifacts,
+        metric=metric,
+    )
+    records = []
+
+    for algorithm in ordered_algorithms(
+        set(best_artifacts)
+    ):
+        artifact = best_artifacts[algorithm]
+        validation_series = validation_metric_series(
+            artifact["metrics_path"],
+            metric=metric,
+        )
+        training_series = training_metric_series(
+            artifact["training_metrics_path"],
+            metric=metric,
+        )
+
+        if not validation_series and not training_series:
+            continue
+
+        records.append(
+            (
+                algorithm,
+                artifact,
+                validation_series,
+                training_series,
+            )
+        )
+
+    if not records:
+        return 0
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    metric_label = SUMMARY_METRIC_LABELS.get(
+        metric,
+        metric,
+    )
+    column_count = min(
+        3,
+        len(records),
+    )
+    row_count = math.ceil(
+        len(records) / column_count
+    )
+    figure, axes = plt.subplots(
+        row_count,
+        column_count,
+        figsize=(
+            7.0 * column_count,
+            5.2 * row_count,
+        ),
+        sharey=False,
+        squeeze=False,
+    )
+
+    for axis in axes.reshape(-1):
+        axis.axis("off")
+
+    legend_handles = None
+    legend_labels = None
+
+    for axis, (
+        algorithm,
+        artifact,
+        validation_series,
+        training_series,
+    ) in zip(
+        axes.reshape(-1),
+        records,
+    ):
+        axis.axis("on")
+
+        if training_series:
+            style = SUMMARY_SERIES_STYLES["train"]
+            axis.plot(
+                [epoch for epoch, _ in training_series],
+                [value for _, value in training_series],
+                marker="o",
+                markersize=3.8,
+                linewidth=2.4,
+                color=style["color"],
+                linestyle=style["linestyle"],
+                label=style["label"],
+            )
+
+        for split in SUMMARY_SPLITS:
+            series = validation_series.get(split)
+
+            if not series:
+                continue
+
+            style = SUMMARY_SERIES_STYLES[split]
+            axis.plot(
+                [epoch for epoch, _ in series],
+                [value for _, value in series],
+                marker="o",
+                markersize=3.8,
+                linewidth=2.4,
+                color=style["color"],
+                linestyle=style["linestyle"],
+                label=style["label"],
+            )
+
+        score = artifact_summary_score(
+            artifact,
+            metric=metric,
+        )
+        title = algorithm
+        score_text = artifact_title_score_text(
+            artifact,
+            metric=metric,
+        )
+
+        if score_text:
+            title = f"{title}\n{score_text}"
+        elif score is not None:
+            title = f"{title}\nbest val {score:.2f}"
+
+        axis.set_title(
+            title,
+            fontsize=13,
+            pad=8,
+        )
+        if (
+            artifact_is_incomplete(artifact)
+            or algorithm_is_incomplete(
+                artifacts,
+                algorithm,
+            )
+        ):
+            draw_incomplete_label(axis)
+
+        axis.tick_params(
+            labelsize=10,
+        )
+        axis.grid(
+            True,
+            alpha=0.22,
+            linewidth=0.8,
+        )
+        set_summary_axis_y_limits(
+            axis,
+            metric=metric,
+        )
+        set_summary_axis_x_scale(
+            axis,
+            artifact,
+        )
+        draw_best_epoch_marker(
+            axis,
+            best_validation_epoch(validation_series),
+        )
+        axis.set_xlabel(
+            "Dataset epoch",
+            fontsize=11,
+        )
+        axis.set_ylabel(
+            metric_label,
+            fontsize=11,
+        )
+        legend_handles, legend_labels = (
+            axis.get_legend_handles_labels()
+        )
+
+    figure.suptitle(
+        f"DNN tuning best trial metrics: {metric_label}",
+        fontsize=16,
+        y=0.99,
+    )
+
+    if (
+        legend_handles is not None
+        and legend_labels is not None
+    ):
+        figure.legend(
+            legend_handles,
+            legend_labels,
+            loc="upper center",
+            ncol=len(legend_labels),
+            bbox_to_anchor=(0.5, 0.95),
+            frameon=False,
+            fontsize=11,
+        )
+
+    figure.tight_layout(
+        rect=(
+            0,
+            0,
+            1,
+            0.92,
+        )
+    )
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    figure.savefig(
+        output_path,
+        dpi=160,
+        facecolor="white",
+        edgecolor="white",
+        transparent=False,
+    )
+    rewrite_png_without_alpha(output_path)
+    plt.close(figure)
+
+    return len(records)
 
 
 def plot_validation_metric_montage(
@@ -1998,13 +2584,16 @@ def plot_validation_metric_montage(
                 title = f"{title} best"
 
             if score_text:
-                title = f"{title}: {score_text}"
+                title = f"{title}\n{score_text}"
 
             axis.set_title(
                 title,
                 fontsize=18,
                 pad=8,
             )
+            if artifact_is_incomplete(artifact):
+                draw_incomplete_label(axis)
+
             axis.tick_params(
                 labelsize=15,
             )
@@ -2024,6 +2613,15 @@ def plot_validation_metric_montage(
             set_summary_axis_x_scale(
                 axis,
                 artifact,
+            )
+            draw_best_epoch_marker(
+                axis,
+                best_validation_epoch(
+                    validation_metric_series(
+                        artifact["metrics_path"],
+                        metric=metric,
+                    )
+                ),
             )
 
             if plotted:
@@ -2058,12 +2656,13 @@ def plot_validation_metric_montage(
             axis.text(
                 0.5,
                 0.5,
-                "No completed trial",
+                "INCOMPLETE",
                 ha="center",
                 va="center",
                 transform=axis.transAxes,
-                color="#777777",
+                color="#c62828",
                 fontsize=18,
+                fontweight="bold",
             )
             for spine in axis.spines.values():
                 spine.set_color("#dddddd")
@@ -2250,6 +2849,32 @@ def summarize_tuning_runs(
             "Skipped all-agent training progress plot; no "
             "metrics.csv files with matching training metrics "
             "were found.",
+            flush=True,
+        )
+
+    best_trial_summary_path = (
+        args.output_dir
+        / f"{args.metric}_best_trial_training_history_summary.png"
+    )
+    best_trial_summary_count = (
+        plot_best_trial_training_summary(
+            artifacts,
+            metric=args.metric,
+            output_path=best_trial_summary_path,
+        )
+    )
+
+    if best_trial_summary_count:
+        print(
+            "Saved best-trial training summary plot to "
+            f"{best_trial_summary_path} "
+            f"({best_trial_summary_count} agent(s))",
+            flush=True,
+        )
+    else:
+        print(
+            "Skipped best-trial training summary plot; no "
+            "plottable best trials were found.",
             flush=True,
         )
 

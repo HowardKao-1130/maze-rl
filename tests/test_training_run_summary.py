@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from scripts.summarize_training_runs import (
     collect_training_run_series,
     plot_training_run_summary,
     resolve_summary_paths,
+    subplot_title,
 )
 
 
@@ -63,6 +65,24 @@ def write_validation_metrics_csv(
     )
 
 
+def write_training_summary(
+    path: Path,
+    *,
+    completed: bool,
+    stopped_early: bool = False,
+) -> None:
+    path.write_text(
+        (
+            "{"
+            '"task_selection_passes_requested": 3,'
+            f'"task_selection_passes_completed": {3 if completed else 2},'
+            f'"dataset_epochs_completed": {3 if completed else 2},'
+            f'"stopped_early": {str(stopped_early).lower()}'
+            "}"
+        )
+    )
+
+
 def test_resolve_summary_paths_uses_dataset_name(
     tmp_path,
 ):
@@ -101,10 +121,15 @@ def test_collect_training_run_series_averages_by_epoch(
         [
             ("validation", 1, 0.25),
             ("same_layout", 1, 0.35),
+            ("same_layout", 2, 0.55),
             ("train_greedy", 1, 0.45),
             ("train", 2, 0.90),
             ("validation", 2, 0.50),
         ],
+    )
+    write_training_summary(
+        runs_dir / "ppo_run" / "ppo" / "training_summary.json",
+        completed=True,
     )
 
     series = collect_training_run_series(
@@ -129,6 +154,7 @@ def test_collect_training_run_series_averages_by_epoch(
         "same_layout"
     ] == [
         (1, 0.35),
+        (2, 0.55),
     ]
     assert series[0].validation_points_by_split[
         "train_greedy"
@@ -136,6 +162,113 @@ def test_collect_training_run_series_averages_by_epoch(
         (1, 0.45),
         (2, 0.9),
     ]
+    assert series[0].is_incomplete is False
+    assert subplot_title(series[0]) == (
+        "ppo\n"
+        "t 0.80  "
+        "v 0.50  vs 0.55  "
+        "tg 0.90"
+    )
+
+
+def test_collect_training_run_series_marks_incomplete_runs(
+    tmp_path,
+):
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "ppo_run" / "ppo"
+    write_metrics_csv(
+        run_dir / "metrics.csv",
+        [(1, 0.2, True)],
+    )
+    write_training_summary(
+        run_dir / "training_summary.json",
+        completed=False,
+    )
+
+    series = collect_training_run_series(
+        runs_dir,
+        metric="path_efficiency",
+    )
+
+    assert len(series) == 1
+    assert series[0].is_incomplete is True
+
+
+def test_collect_training_run_series_treats_early_stop_as_complete(
+    tmp_path,
+):
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "ppo_run" / "ppo"
+    write_metrics_csv(
+        run_dir / "metrics.csv",
+        [(1, 0.2, True)],
+    )
+    write_training_summary(
+        run_dir / "training_summary.json",
+        completed=False,
+        stopped_early=True,
+    )
+
+    series = collect_training_run_series(
+        runs_dir,
+        metric="path_efficiency",
+    )
+
+    assert len(series) == 1
+    assert series[0].is_incomplete is False
+
+
+def test_collect_training_run_series_marks_stale_summary_incomplete(
+    tmp_path,
+):
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "ppo_run" / "ppo"
+    write_metrics_csv(
+        run_dir / "metrics.csv",
+        [(1, 0.2, True)],
+    )
+    write_training_summary(
+        run_dir / "training_summary.json",
+        completed=False,
+        stopped_early=True,
+    )
+    training_state_path = run_dir / "training_state.pt"
+    training_state_path.write_bytes(b"state")
+    os.utime(
+        run_dir / "training_summary.json",
+        ns=(2_000, 2_000),
+    )
+    os.utime(
+        training_state_path,
+        ns=(3_000, 3_000),
+    )
+
+    series = collect_training_run_series(
+        runs_dir,
+        metric="path_efficiency",
+    )
+
+    assert len(series) == 1
+    assert series[0].is_incomplete is True
+
+
+def test_collect_training_run_series_marks_missing_summary_incomplete(
+    tmp_path,
+):
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "ppo_run" / "ppo"
+    write_metrics_csv(
+        run_dir / "metrics.csv",
+        [(1, 0.2, True)],
+    )
+
+    series = collect_training_run_series(
+        runs_dir,
+        metric="path_efficiency",
+    )
+
+    assert len(series) == 1
+    assert series[0].is_incomplete is True
 
 
 def test_plot_training_run_summary_writes_one_image(
@@ -169,3 +302,75 @@ def test_plot_training_run_summary_writes_one_image(
 
     assert output_path.exists()
     assert output_path.stat().st_size > 0
+
+
+def test_plot_training_run_summary_labels_incomplete_runs(
+    tmp_path,
+    monkeypatch,
+):
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "ppo" / "ppo"
+    write_metrics_csv(
+        run_dir / "metrics.csv",
+        [(1, 0.2, True), (2, 0.5, True)],
+    )
+    write_training_summary(
+        run_dir / "training_summary.json",
+        completed=False,
+    )
+    series = collect_training_run_series(
+        runs_dir,
+        metric="mean_path_efficiency",
+    )
+    saved_figures = []
+
+    import matplotlib.figure
+
+    def fake_savefig(
+        self,
+        path,
+        *args,
+        **kwargs,
+    ):
+        saved_figures.append(
+            {
+                "title": self.axes[0].get_title(),
+                "texts": [
+                    text.get_text()
+                    for text in self.axes[0].texts
+                ],
+                "text_colors": [
+                    text.get_color()
+                    for text in self.axes[0].texts
+                ],
+                "vlines": [
+                    tuple(line.get_xdata())
+                    for line in self.axes[0].lines
+                    if line.get_linestyle() == ":"
+                ],
+            }
+        )
+
+    monkeypatch.setattr(
+        matplotlib.figure.Figure,
+        "savefig",
+        fake_savefig,
+    )
+
+    plot_training_run_summary(
+        series,
+        metric="mean_path_efficiency",
+        output_path=tmp_path / "summary.png",
+    )
+
+    assert saved_figures == [
+        {
+            "title": (
+                "ppo\n"
+                "best t 0.50"
+            ),
+            "texts": ["INCOMPLETE"],
+            "text_colors": ["#c62828"],
+            "vlines": [],
+        }
+    ]
