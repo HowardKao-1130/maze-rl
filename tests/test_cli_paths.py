@@ -59,6 +59,7 @@ from scripts.train import (
     log_tensorboard_training_round,
     neural_hyperparameters_from_args,
     optimization_epochs_for_round,
+    output_algorithm_name,
     parse_args as parse_train_args,
     replay_early_stopping_from_validation_metrics,
     resolve_best_config_path,
@@ -559,6 +560,17 @@ def test_training_uses_baseline_network_by_default(monkeypatch):
 
     assert args.network_architecture == "baseline"
     assert args.residual_layers == 2
+
+
+def test_output_algorithm_name_separates_residual_runs():
+    assert output_algorithm_name(
+        "ppo",
+        "baseline",
+    ) == "ppo"
+    assert output_algorithm_name(
+        "ppo",
+        "residual",
+    ) == "ppo_residual"
 
 
 def test_training_accepts_residual_network_configuration(

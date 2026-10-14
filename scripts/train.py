@@ -261,6 +261,16 @@ def default_experiment_output_dir(
     )
 
 
+def output_algorithm_name(
+    algorithm: str,
+    network_architecture: str,
+) -> str:
+    if network_architecture == "baseline":
+        return algorithm
+
+    return f"{algorithm}_{network_architecture}"
+
+
 def dataset_bundle_output_dir(
     *,
     dataset_dir: Path,
@@ -3156,7 +3166,10 @@ def main():
     if args.resume:
         training_state_path = (
             args.output_dir
-            / args.algorithm
+            / output_algorithm_name(
+                args.algorithm,
+                args.network_architecture,
+            )
             / "training_state.pt"
         )
         resume_training_metadata = (
@@ -3287,7 +3300,10 @@ def main():
 
     run_dir = (
         args.output_dir
-        / args.algorithm
+        / output_algorithm_name(
+            args.algorithm,
+            args.network_architecture,
+        )
     )
 
     tensorboard_writer = create_tensorboard_writer(
