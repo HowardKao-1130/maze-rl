@@ -67,6 +67,7 @@ from scripts.train import (
     resume_training_state_allowed_mismatches,
     resolve_dataset_bundle_args,
     remove_existing_training_output,
+    resolve_resume_training_state_path,
     save_training_state,
     should_record_train_greedy_validation,
     should_validate_epoch,
@@ -571,6 +572,35 @@ def test_output_algorithm_name_separates_residual_runs():
         "ppo",
         "residual",
     ) == "ppo_residual"
+
+
+def test_resume_finds_residual_state_without_architecture_cli_option(
+    tmp_path,
+):
+    residual_state_path = (
+        tmp_path
+        / "ppo_residual"
+        / "training_state.pt"
+    )
+    residual_state_path.parent.mkdir()
+    torch.save(
+        {
+            "metadata": {
+                "algorithm": "ppo",
+                "network_architecture": "residual",
+            },
+        },
+        residual_state_path,
+    )
+
+    resolved_path = resolve_resume_training_state_path(
+        output_dir=tmp_path,
+        algorithm="ppo",
+        network_architecture="baseline",
+        network_architecture_was_provided=False,
+    )
+
+    assert resolved_path == residual_state_path
 
 
 def test_training_accepts_residual_network_configuration(

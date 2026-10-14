@@ -271,6 +271,43 @@ def output_algorithm_name(
     return f"{algorithm}_{network_architecture}"
 
 
+def resolve_resume_training_state_path(
+    *,
+    output_dir: Path,
+    algorithm: str,
+    network_architecture: str,
+    network_architecture_was_provided: bool,
+) -> Path:
+    requested_path = (
+        output_dir
+        / output_algorithm_name(
+            algorithm,
+            network_architecture,
+        )
+        / "training_state.pt"
+    )
+
+    if (
+        network_architecture_was_provided
+        or requested_path.exists()
+    ):
+        return requested_path
+
+    for candidate_architecture in NETWORK_ARCHITECTURES:
+        candidate_path = (
+            output_dir
+            / output_algorithm_name(
+                algorithm,
+                candidate_architecture,
+            )
+            / "training_state.pt"
+        )
+        if candidate_path.exists():
+            return candidate_path
+
+    return requested_path
+
+
 def dataset_bundle_output_dir(
     *,
     dataset_dir: Path,
@@ -3164,13 +3201,14 @@ def main():
     retroactive_resume_metadata = None
 
     if args.resume:
-        training_state_path = (
-            args.output_dir
-            / output_algorithm_name(
-                args.algorithm,
-                args.network_architecture,
-            )
-            / "training_state.pt"
+        training_state_path = resolve_resume_training_state_path(
+            output_dir=args.output_dir,
+            algorithm=args.algorithm,
+            network_architecture=args.network_architecture,
+            network_architecture_was_provided=(
+                "network_architecture"
+                in args.resume_metadata_cli_fields
+            ),
         )
         resume_training_metadata = (
             load_training_state_metadata(
