@@ -23,6 +23,12 @@ from scripts.experiment_naming import (
     DEFAULT_DATA_OUTPUT_ROOT,
     DEFAULT_DNN_TUNING_OUTPUT_ROOT,
 )
+from scripts.summary_metrics import (
+    WEIGHTED_PATH_EFFICIENCY,
+    WEIGHTED_PATH_SUCCESS,
+    aggregate_episode_rows,
+    path_length_metrics,
+)
 from scripts.train import NEURAL_ALGORITHMS
 
 
@@ -174,6 +180,12 @@ SUMMARY_TRAIN_METRIC_ALIASES = {
     "success_rate": [
         "success",
     ],
+    WEIGHTED_PATH_SUCCESS: [
+        WEIGHTED_PATH_SUCCESS,
+    ],
+    WEIGHTED_PATH_EFFICIENCY: [
+        WEIGHTED_PATH_EFFICIENCY,
+    ],
 }
 SUMMARY_SERIES_STYLES = {
     "validation": {
@@ -208,11 +220,15 @@ SUMMARY_METRIC_LABELS = {
     "mean_path_efficiency": "Path efficiency",
     "average_successful_path_efficiency": "Successful path efficiency",
     "success_rate": "Success rate",
+    WEIGHTED_PATH_SUCCESS: "Weighted path success",
+    WEIGHTED_PATH_EFFICIENCY: "Weighted path efficiency",
 }
 SUMMARY_BOUNDED_METRICS = {
     "mean_path_efficiency",
     "success_rate",
     "average_successful_path_efficiency",
+    WEIGHTED_PATH_SUCCESS,
+    WEIGHTED_PATH_EFFICIENCY,
 }
 SUMMARY_MONTAGE_COLUMNS = 5
 SUMMARY_MONTAGE_ROWS = 4
@@ -553,6 +569,25 @@ def best_train_metric(
     if not metrics_path.exists():
         return None
 
+    if metric in {
+        WEIGHTED_PATH_SUCCESS,
+        WEIGHTED_PATH_EFFICIENCY,
+    }:
+        series = training_metric_series(
+            metrics_path,
+            metric=metric,
+        )
+        if aligned_epochs is not None:
+            series = [
+                point
+                for point in series
+                if point[0] in aligned_epochs
+            ]
+        return max(
+            (value for _, value in series),
+            default=None,
+        )
+
     with metrics_path.open(
         newline="",
     ) as file:
@@ -718,6 +753,19 @@ def aligned_training_metric_series(
     if not metrics_path.exists() or not aligned_epochs:
         return []
 
+    if metric in {
+        WEIGHTED_PATH_SUCCESS,
+        WEIGHTED_PATH_EFFICIENCY,
+    }:
+        return [
+            point
+            for point in training_metric_series(
+                metrics_path,
+                metric=metric,
+            )
+            if point[0] in aligned_epochs
+        ]
+
     with metrics_path.open(
         newline="",
     ) as file:
@@ -792,6 +840,27 @@ def training_metric_series(
         rows = list(
             csv.DictReader(file)
         )
+
+    if metric in {
+        WEIGHTED_PATH_SUCCESS,
+        WEIGHTED_PATH_EFFICIENCY,
+    }:
+        rows_by_epoch: dict[int, list[dict[str, str]]] = {}
+        for row in rows:
+            epoch = parse_summary_float(
+                row.get("epoch")
+            )
+            if epoch is None:
+                continue
+            rows_by_epoch.setdefault(int(epoch), []).append(row)
+
+        points = []
+        for epoch, epoch_rows in sorted(rows_by_epoch.items()):
+            summary = aggregate_episode_rows(epoch_rows)
+            if summary is None or metric not in summary:
+                continue
+            points.append((epoch, summary[metric]))
+        return points
 
     for candidate in train_metric_candidates(
         metric
@@ -1890,6 +1959,131 @@ def plot_summary_metric_series(
     return plotted
 
 
+def plot_path_length_summary(
+    artifacts: list[dict[str, Any]],
+    *,
+    metric: str,
+    output_path: Path,
+) -> int:
+    best_artifacts = best_artifacts_by_algorithm(
+        artifacts,
+        metric=metric,
+    )
+    records = []
+
+    for algorithm in ordered_algorithms(set(best_artifacts)):
+        artifact = best_artifacts[algorithm]
+        validation_path = (
+            artifact["metrics_path"].parent
+            / "validation_evaluation.csv"
+        )
+        source_path = (
+            validation_path
+            if validation_path.exists()
+            else artifact["training_metrics_path"]
+        )
+        if not source_path.exists():
+            continue
+
+        with source_path.open(newline="") as file:
+            rows = list(csv.DictReader(file))
+        metrics = path_length_metrics(rows)
+        if metrics:
+            source_label = (
+                "validation"
+                if source_path == validation_path
+                else "training"
+            )
+            records.append((algorithm, artifact, source_label, metrics))
+
+    if not records:
+        return 0
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    figure, axes = plt.subplots(
+        len(records),
+        3,
+        figsize=(18.0, 4.3 * len(records)),
+        squeeze=False,
+    )
+
+    for row_index, (algorithm, artifact, source_label, metrics) in enumerate(
+        records
+    ):
+        lengths = list(metrics)
+        counts = [metrics[length]["episodes"] for length in lengths]
+        success_rates = [
+            metrics[length].get("success_rate", 0.0)
+            for length in lengths
+        ]
+        efficiencies = [
+            metrics[length].get("mean_path_efficiency", 0.0)
+            for length in lengths
+        ]
+        distribution_axis, success_axis, efficiency_axis = axes[row_index]
+        title_prefix = (
+            f"{algorithm} trial {artifact['trial']} ({source_label})"
+        )
+
+        distribution_axis.bar(lengths, counts, color="#7f8c8d")
+        distribution_axis.set_title(
+            f"{title_prefix}: optimal path length distribution"
+        )
+        distribution_axis.set_xlabel("Optimal path length")
+        distribution_axis.set_ylabel("Episodes")
+
+        success_axis.plot(
+            lengths,
+            success_rates,
+            marker="o",
+            color="#1f77b4",
+        )
+        success_axis.set_title(f"{title_prefix}: success by length")
+        success_axis.set_xlabel("Optimal path length")
+        success_axis.set_ylabel("Mean success rate")
+        success_axis.set_ylim(0.0, 1.0)
+
+        efficiency_axis.plot(
+            lengths,
+            efficiencies,
+            marker="o",
+            color="#d62728",
+        )
+        efficiency_axis.set_title(f"{title_prefix}: efficiency by length")
+        efficiency_axis.set_xlabel("Optimal path length")
+        efficiency_axis.set_ylabel("Mean path efficiency")
+        efficiency_axis.set_ylim(0.0, 1.0)
+
+        for axis in (
+            distribution_axis,
+            success_axis,
+            efficiency_axis,
+        ):
+            axis.grid(True, alpha=0.22, linewidth=0.8)
+
+    figure.suptitle(
+        "Optimal path length diagnostics for best tuning trials",
+        fontsize=16,
+        y=0.995,
+    )
+    figure.tight_layout(rect=(0, 0, 1, 0.98))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(
+        output_path,
+        dpi=160,
+        facecolor="white",
+        edgecolor="white",
+        transparent=False,
+    )
+    rewrite_png_without_alpha(output_path)
+    plt.close(figure)
+    return len(records)
+
+
 def parse_summary_positive_int(
     value: Any,
 ) -> int | None:
@@ -2947,6 +3141,102 @@ def summarize_tuning_runs(
         print(
             "Skipped best-trial training summary plot; no "
             "plottable best trials were found.",
+            flush=True,
+        )
+
+    additional_metrics = [
+        "success_rate",
+        WEIGHTED_PATH_SUCCESS,
+        WEIGHTED_PATH_EFFICIENCY,
+    ]
+    for additional_metric in additional_metrics:
+        if additional_metric == args.metric:
+            continue
+
+        additional_cells = collect_heatmap_cells(
+            artifacts,
+            metric=additional_metric,
+        )
+        if not additional_cells:
+            print(
+                f"Skipped {additional_metric} summary; no matching "
+                "validation metrics were found.",
+                flush=True,
+            )
+            continue
+
+        additional_heatmap_path = (
+            args.output_dir
+            / f"{additional_metric}_heatmap.png"
+        )
+        plot_tuning_summary_heatmap(
+            additional_cells,
+            metric=additional_metric,
+            output_path=additional_heatmap_path,
+        )
+        print(
+            format_saved_file_message(
+                f"Saved {additional_metric} tuning heatmap to ",
+                additional_heatmap_path,
+            ),
+            flush=True,
+        )
+
+        additional_progress_path = (
+            args.output_dir
+            / f"{additional_metric}_training_progress_by_agent.png"
+        )
+        if plot_all_agent_training_progress(
+            artifacts,
+            metric=additional_metric,
+            output_path=additional_progress_path,
+        ):
+            print(
+                format_saved_file_message(
+                    f"Saved {additional_metric} training progress to ",
+                    additional_progress_path,
+                ),
+                flush=True,
+            )
+
+        additional_best_path = (
+            args.output_dir
+            / f"{additional_metric}_best_trial_training_history_summary.png"
+        )
+        if plot_best_trial_training_summary(
+            artifacts,
+            metric=additional_metric,
+            output_path=additional_best_path,
+        ):
+            print(
+                format_saved_file_message(
+                    f"Saved {additional_metric} best-trial summary to ",
+                    additional_best_path,
+                ),
+                flush=True,
+            )
+
+    path_length_output_path = (
+        args.output_dir / "optimal_path_length_summary.png"
+    )
+    path_length_count = plot_path_length_summary(
+        artifacts,
+        metric=args.metric,
+        output_path=path_length_output_path,
+    )
+    if path_length_count:
+        print(
+            format_saved_file_message(
+                "Saved optimal path length diagnostics to ",
+                path_length_output_path,
+                f" ({path_length_count} agent(s))",
+            ),
+            flush=True,
+        )
+    else:
+        print(
+            "Skipped optimal path length diagnostics; no raw episode "
+            "metrics were found.",
             flush=True,
         )
 

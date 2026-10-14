@@ -56,6 +56,12 @@ Subplot titles use short score labels (`t`, `v`, `vs`, `tg`) and red
 `INCOMPLETE` badges mark runs that cannot be confirmed complete from
 `training_summary.json`.
 
+The command also writes separate training-history plots for success rate,
+length-weighted path success, and length-weighted path efficiency. The
+`optimal_path_length_summary.png` plot shows the observed optimal-path-length
+distribution and the corresponding mean success rate and path efficiency for
+each length in the raw training rollouts.
+
 The plot shows separate rows for dataset-epoch mean rollout return, success
 rate, env steps per rollout, and, for TD methods, dataset-epoch mean absolute TD
 error. Success rate is the mean of the per-rollout `success` flag, so it is the
@@ -309,6 +315,14 @@ remain directly comparable. The command also writes
 each trial's numeric hyperparameters and validation score on shared parallel
 axes, with better scores drawn in brighter colors and the best trial(s)
 emphasized.
+
+Tuning summaries also write success-rate and length-weighted path metric
+heatmaps and training-history plots when those columns are available. The
+`optimal_path_length_summary.png` plot uses each agent's best trial and shows
+the raw optimal-path-length distribution, mean success rate by length, and
+mean path efficiency by length. New validation CSVs include
+`weighted_path_success` and `weighted_path_efficiency`; older CSVs remain
+readable but cannot produce those weighted validation plots until regenerated.
 
 Early stopping defaults to `--early-stopping-patience 35` with
 `--early-stopping-min-delta 0.0`, and the same stopping rule applies to every

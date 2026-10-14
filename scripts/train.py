@@ -2066,7 +2066,7 @@ def should_stop_early(
 def parse_validation_csv_row(
     row: dict[str, str],
 ) -> dict:
-    return {
+    parsed = {
         "split": row.get(
             "split",
             "validation",
@@ -2092,6 +2092,16 @@ def parse_validation_csv_row(
             ]
         ),
     }
+
+    for field in (
+        "weighted_path_success",
+        "weighted_path_efficiency",
+    ):
+        raw_value = row.get(field)
+        if raw_value not in (None, ""):
+            parsed[field] = float(raw_value)
+
+    return parsed
 
 
 TRAIN_GREEDY_VALIDATION_SPLITS = {
@@ -2253,13 +2263,48 @@ def append_validation_csv(
         "average_episode_return",
         "mean_path_efficiency",
         "average_successful_path_efficiency",
+        "weighted_path_success",
+        "weighted_path_efficiency",
     ]
     write_header = not path.exists()
 
     with path.open(
-        "a",
+        "a+",
         newline="",
     ) as file:
+        if not write_header:
+            file.seek(0)
+            existing_fieldnames = file.readline().strip().split(",")
+
+            if existing_fieldnames != fieldnames:
+                if not all(
+                    field in fieldnames
+                    for field in existing_fieldnames
+                ):
+                    raise RuntimeError(
+                        "Existing validation metrics file has a different "
+                        f"schema: {path}"
+                    )
+
+                file.seek(0)
+                existing_rows = list(csv.DictReader(file))
+                file.seek(0)
+                file.truncate()
+
+                writer = csv.DictWriter(
+                    file,
+                    fieldnames=fieldnames,
+                )
+                writer.writeheader()
+                for existing_row in existing_rows:
+                    writer.writerow(
+                        {
+                            field: existing_row.get(field, "")
+                            for field in fieldnames
+                        }
+                    )
+
+        file.seek(0, 2)
         writer = csv.DictWriter(
             file,
             fieldnames=fieldnames,
@@ -2268,7 +2313,12 @@ def append_validation_csv(
         if write_header:
             writer.writeheader()
 
-        writer.writerow(row)
+        writer.writerow(
+            {
+                field: row.get(field, "")
+                for field in fieldnames
+            }
+        )
 
 
 def write_training_summary(
@@ -3928,6 +3978,12 @@ def main():
                             "average_successful_path_efficiency"
                         ]
                     ),
+                    "weighted_path_success": validation_summary[
+                        "weighted_path_success"
+                    ],
+                    "weighted_path_efficiency": validation_summary[
+                        "weighted_path_efficiency"
+                    ],
                 }
 
                 append_validation_csv(

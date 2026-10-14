@@ -52,6 +52,7 @@ from scripts.summarize_tuning_runs import (
     parse_args as parse_summary_args,
     plot_all_agent_training_progress,
     plot_best_trial_training_summary,
+    plot_path_length_summary,
     plot_validation_metric_montage,
     summarize_tuning_runs,
     training_metric_series,
@@ -1729,6 +1730,43 @@ def test_summarize_evaluation_uses_mean_path_efficiency(tmp_path):
     )
 
 
+def test_summarize_evaluation_computes_weighted_path_metrics(tmp_path):
+    path = tmp_path / "evaluation.csv"
+
+    with path.open("w", newline="") as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=[
+                "episode_return",
+                "success",
+                "path_efficiency",
+                "optimal_path_length",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(
+            [
+                {
+                    "episode_return": "1.0",
+                    "success": "True",
+                    "path_efficiency": "0.8",
+                    "optimal_path_length": "10",
+                },
+                {
+                    "episode_return": "0.0",
+                    "success": "False",
+                    "path_efficiency": "0.0",
+                    "optimal_path_length": "20",
+                },
+            ]
+        )
+
+    summary = summarize_evaluation(path)
+
+    assert summary["weighted_path_success"] == 1 / 3
+    assert summary["weighted_path_efficiency"] == 8 / 30
+
+
 def write_fake_validation_artifacts(
     run_dir,
     *,
@@ -1925,6 +1963,7 @@ def test_summarize_tuning_writes_heatmap_trial_grids_and_parallel_coordinates(
         / "dqn",
         validation_score=0.5,
         same_layout_score=0.4,
+        training_score=0.55,
         hyperparameters={
             "learning_rate": 0.0001,
             "gamma": 0.99,
@@ -1938,6 +1977,7 @@ def test_summarize_tuning_writes_heatmap_trial_grids_and_parallel_coordinates(
         / "ppo",
         validation_score=0.75,
         same_layout_score=0.7,
+        training_score=0.8,
         hyperparameters={
             "learning_rate": 0.0003,
             "gamma": 0.98,
@@ -1985,6 +2025,22 @@ def test_summarize_tuning_writes_heatmap_trial_grids_and_parallel_coordinates(
     assert (
         summary_output_dir
         / "mean_path_efficiency_best_trial_training_history_summary.png"
+    ).exists()
+    assert (
+        summary_output_dir
+        / "success_rate_heatmap.png"
+    ).exists()
+    assert (
+        summary_output_dir
+        / "success_rate_training_progress_by_agent.png"
+    ).exists()
+    assert (
+        summary_output_dir
+        / "success_rate_best_trial_training_history_summary.png"
+    ).exists()
+    assert (
+        summary_output_dir
+        / "optimal_path_length_summary.png"
     ).exists()
     assert (
         summary_output_dir

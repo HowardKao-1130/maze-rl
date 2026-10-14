@@ -39,6 +39,7 @@ from scripts.open_tensorboard import (
 from scripts.train import (
     HierarchicalTaskSampler,
     agent_training_state_dict,
+    append_validation_csv,
     apply_resume_training_state_defaults,
     apply_retroactive_resume_metadata,
     confirm_overwrite_existing_training_output,
@@ -1874,6 +1875,38 @@ def test_early_stopping_still_applies_after_positive_validation():
         checks_without_improvement=4,
         has_positive_validation_score=True,
     )
+
+
+def test_append_validation_csv_migrates_legacy_schema(tmp_path):
+    metrics_path = tmp_path / "validation_metrics.csv"
+    metrics_path.write_text(
+        "split,dataset_epoch,episodes,success_rate,"
+        "average_episode_return,mean_path_efficiency,"
+        "average_successful_path_efficiency\n"
+        "validation,1,2,0.5,1.0,0.4,0.8\n"
+    )
+
+    append_validation_csv(
+        metrics_path,
+        {
+            "split": "validation",
+            "dataset_epoch": 2,
+            "episodes": 2,
+            "success_rate": 0.75,
+            "average_episode_return": 1.0,
+            "mean_path_efficiency": 0.6,
+            "average_successful_path_efficiency": 0.8,
+            "weighted_path_success": 0.7,
+            "weighted_path_efficiency": 0.65,
+        },
+    )
+
+    rows = metrics_path.read_text().splitlines()
+    assert rows[0].endswith(
+        "weighted_path_success,weighted_path_efficiency"
+    )
+    assert rows[1].endswith(",,")
+    assert rows[2].endswith(",0.7,0.65")
 
 
 def test_replay_early_stopping_from_validation_metrics(

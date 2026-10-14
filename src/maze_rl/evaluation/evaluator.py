@@ -241,6 +241,34 @@ def evaluate(
         if result["success"]
     ]
 
+    weighted_path_lengths = [
+        result["optimal_path_length"]
+        for result in results
+        if result["optimal_path_length"] is not None
+        and result["optimal_path_length"] > 0
+    ]
+    weighted_path_length_total = sum(
+        weighted_path_lengths
+    )
+    weighted_path_success = 0.0
+    weighted_path_efficiency = 0.0
+
+    if weighted_path_length_total > 0:
+        weighted_path_success = sum(
+            result["optimal_path_length"]
+            for result in results
+            if result["optimal_path_length"] is not None
+            and result["optimal_path_length"] > 0
+            and result["success"]
+        ) / weighted_path_length_total
+        weighted_path_efficiency = sum(
+            result["optimal_path_length"]
+            * result["path_efficiency"]
+            for result in results
+            if result["optimal_path_length"] is not None
+            and result["optimal_path_length"] > 0
+        ) / weighted_path_length_total
+
     average_efficiency = (
         np.mean(
             successful_efficiencies
@@ -262,6 +290,12 @@ def evaluate(
         ),
         "average_successful_path_efficiency":
             float(average_efficiency),
+        "weighted_path_success": float(
+            weighted_path_success
+        ),
+        "weighted_path_efficiency": float(
+            weighted_path_efficiency
+        ),
     }
 
     return results, summary

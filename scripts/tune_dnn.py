@@ -284,6 +284,8 @@ RESULT_FIELDNAMES = [
     "success_rate",
     "average_episode_return",
     "average_successful_path_efficiency",
+    "weighted_path_success",
+    "weighted_path_efficiency",
     "rollouts_per_task_requested",
     "task_batch_size",
     "rollout_group_size",
@@ -1648,6 +1650,39 @@ def summarize_evaluation(
         )
         if success
     ]
+    weighted_rows = [
+        (
+            float(row["optimal_path_length"]),
+            success,
+            efficiency,
+        )
+        for row, success, efficiency in zip(
+            rows,
+            successes,
+            efficiencies,
+        )
+        if row.get("optimal_path_length") not in {
+            None,
+            "",
+        }
+        and float(row["optimal_path_length"]) > 0
+    ]
+    weighted_path_length_total = sum(
+        length
+        for length, _, _ in weighted_rows
+    )
+    weighted_path_success = 0.0
+    weighted_path_efficiency = 0.0
+    if weighted_path_length_total > 0:
+        weighted_path_success = sum(
+            length
+            for length, success, _ in weighted_rows
+            if success
+        ) / weighted_path_length_total
+        weighted_path_efficiency = sum(
+            length * efficiency
+            for length, _, efficiency in weighted_rows
+        ) / weighted_path_length_total
 
     return {
         "episodes": float(len(rows)),
@@ -1669,6 +1704,12 @@ def summarize_evaluation(
             if successful_efficiencies
             else 0.0
         ),
+        "weighted_path_success": float(
+            weighted_path_success
+        ),
+        "weighted_path_efficiency": float(
+            weighted_path_efficiency
+        ),
     }
 
 
@@ -1689,6 +1730,18 @@ def _csv_int(
         return None
 
     return int(value)
+
+
+def _csv_float(
+    value: str | None,
+) -> float | None:
+    if value in {
+        None,
+        "",
+    }:
+        return None
+
+    return float(value)
 
 
 def _csv_bool(
@@ -1716,6 +1769,12 @@ def parse_result_row(
             row[
                 "average_successful_path_efficiency"
             ]
+        ),
+        "weighted_path_success": _csv_float(
+            row.get("weighted_path_success")
+        ),
+        "weighted_path_efficiency": _csv_float(
+            row.get("weighted_path_efficiency")
         ),
         "rollouts_per_task_requested": _csv_int(
             row.get(
@@ -2148,6 +2207,12 @@ def build_result_from_artifacts(
                 "average_successful_path_efficiency"
             ]
         )
+        weighted_path_success = best_validation.get(
+            "weighted_path_success"
+        )
+        weighted_path_efficiency = best_validation.get(
+            "weighted_path_efficiency"
+        )
         dataset_epochs_completed = training_summary[
             "dataset_epochs_completed"
         ]
@@ -2190,6 +2255,8 @@ def build_result_from_artifacts(
         "average_successful_path_efficiency": (
             average_successful_path_efficiency
         ),
+        "weighted_path_success": weighted_path_success,
+        "weighted_path_efficiency": weighted_path_efficiency,
         "rollouts_per_task_requested": (
             training_summary.get(
                 "rollouts_per_task_requested"
@@ -2235,9 +2302,42 @@ def write_result_row(
     write_header = not path.exists()
 
     with path.open(
-        "a",
+        "a+",
         newline="",
     ) as file:
+        if not write_header:
+            file.seek(0)
+            existing_fieldnames = file.readline().strip().split(",")
+
+            if existing_fieldnames != RESULT_FIELDNAMES:
+                if not all(
+                    field in RESULT_FIELDNAMES
+                    for field in existing_fieldnames
+                ):
+                    raise RuntimeError(
+                        "Existing tuning results file has a different "
+                        f"schema: {path}"
+                    )
+
+                file.seek(0)
+                existing_rows = list(csv.DictReader(file))
+                file.seek(0)
+                file.truncate()
+
+                writer = csv.DictWriter(
+                    file,
+                    fieldnames=RESULT_FIELDNAMES,
+                )
+                writer.writeheader()
+                for existing_row in existing_rows:
+                    writer.writerow(
+                        {
+                            field: existing_row.get(field, "")
+                            for field in RESULT_FIELDNAMES
+                        }
+                    )
+
+        file.seek(0, 2)
         writer = csv.DictWriter(
             file,
             fieldnames=RESULT_FIELDNAMES,
