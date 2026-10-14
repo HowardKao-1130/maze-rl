@@ -75,11 +75,23 @@ def default_checkpoint_path(
             / "checkpoint.pkl"
         )
 
-    return (
+    baseline_path = (
         DEFAULT_EXPERIMENT_OUTPUT_ROOT
         / algorithm
         / "checkpoint.pt"
     )
+    if baseline_path.exists():
+        return baseline_path
+
+    residual_path = (
+        DEFAULT_EXPERIMENT_OUTPUT_ROOT
+        / f"{algorithm}_residual"
+        / "checkpoint.pt"
+    )
+    if residual_path.exists():
+        return residual_path
+
+    return baseline_path
 
 
 def default_rollout_animation_output_dir(

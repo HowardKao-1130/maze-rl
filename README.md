@@ -348,7 +348,10 @@ mean to the aggregate plot.
 Evaluation also writes the training plot automatically when it can find
 `metrics.csv` next to the checkpoint. The checkpoint path defaults to
 `runs/tabular/<algorithm>/checkpoint.pkl` for tabular agents and
-`runs/dnn/training/<algorithm>/checkpoint.pt` for neural agents:
+`runs/dnn/training/<algorithm>/checkpoint.pt` for neural agents. If the
+baseline neural checkpoint does not exist but a residual checkpoint does,
+default evaluation uses
+`runs/dnn/training/<algorithm>_residual/checkpoint.pt`:
 
 ```bash
 python scripts/evaluate.py --algorithm q_learning --dataset data/train.npz

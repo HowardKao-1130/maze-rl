@@ -148,6 +148,51 @@ def test_default_checkpoint_path_uses_algorithm_specific_suffix():
     )
 
 
+def test_default_checkpoint_path_finds_existing_residual_run(
+    monkeypatch,
+    tmp_path,
+):
+    residual_path = (
+        tmp_path
+        / "ppo_residual"
+        / "checkpoint.pt"
+    )
+    residual_path.parent.mkdir()
+    residual_path.touch()
+    monkeypatch.setattr(
+        "scripts.evaluate.DEFAULT_EXPERIMENT_OUTPUT_ROOT",
+        tmp_path,
+    )
+
+    assert default_checkpoint_path("ppo") == residual_path
+
+
+def test_default_checkpoint_path_prefers_existing_baseline_run(
+    monkeypatch,
+    tmp_path,
+):
+    baseline_path = (
+        tmp_path
+        / "ppo"
+        / "checkpoint.pt"
+    )
+    residual_path = (
+        tmp_path
+        / "ppo_residual"
+        / "checkpoint.pt"
+    )
+    baseline_path.parent.mkdir()
+    residual_path.parent.mkdir()
+    baseline_path.touch()
+    residual_path.touch()
+    monkeypatch.setattr(
+        "scripts.evaluate.DEFAULT_EXPERIMENT_OUTPUT_ROOT",
+        tmp_path,
+    )
+
+    assert default_checkpoint_path("ppo") == baseline_path
+
+
 def test_evaluation_reads_network_configuration_from_checkpoint(
     tmp_path,
 ):
