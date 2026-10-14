@@ -155,7 +155,7 @@ def test_default_checkpoint_path_finds_existing_residual_run(
 ):
     residual_path = (
         tmp_path
-        / "ppo_residual"
+        / "ppo_residual_l2"
         / "checkpoint.pt"
     )
     residual_path.parent.mkdir()
@@ -179,7 +179,7 @@ def test_default_checkpoint_path_prefers_existing_baseline_run(
     )
     residual_path = (
         tmp_path
-        / "ppo_residual"
+        / "ppo_residual_l2"
         / "checkpoint.pt"
     )
     baseline_path.parent.mkdir()
@@ -617,7 +617,7 @@ def test_output_algorithm_name_separates_residual_runs():
     assert output_algorithm_name(
         "ppo",
         "residual",
-    ) == "ppo_residual"
+    ) == "ppo_residual_l2"
 
 
 def test_resume_finds_residual_state_without_architecture_cli_option(
@@ -625,7 +625,7 @@ def test_resume_finds_residual_state_without_architecture_cli_option(
 ):
     residual_state_path = (
         tmp_path
-        / "ppo_residual"
+        / "ppo_residual_l2"
         / "training_state.pt"
     )
     residual_state_path.parent.mkdir()
@@ -1701,7 +1701,7 @@ def test_default_tensorboard_dir_finds_existing_residual_logs(
 ):
     residual_path = (
         tmp_path
-        / "ppo_residual"
+        / "ppo_residual_l2"
         / "tensorboard"
     )
     residual_path.mkdir(parents=True)
@@ -1723,7 +1723,7 @@ def test_default_tensorboard_dir_prefers_baseline_logs(
     )
     residual_path = (
         tmp_path
-        / "ppo_residual"
+        / "ppo_residual_l2"
         / "tensorboard"
     )
     baseline_path.mkdir(parents=True)
