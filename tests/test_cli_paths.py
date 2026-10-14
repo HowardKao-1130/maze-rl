@@ -72,6 +72,7 @@ from scripts.train import (
     task_batch_size_for_algorithm,
     task_selection_passes_for_budget,
     tensorboard_default_enabled,
+    training_summary_status,
     training_state_metadata,
     validate_training_state_metadata,
     validate_neural_hyperparameters,
@@ -1748,6 +1749,33 @@ def test_rollouts_per_task_converts_to_task_selection_passes():
         rollouts_per_task=100,
         rollout_group_size=1,
     ) == 100
+
+
+@pytest.mark.parametrize(
+    (
+        "stopped_early",
+        "completed",
+        "requested",
+        "status",
+    ),
+    [
+        (True, 2, 3, "early_stopped"),
+        (False, 3, 3, "completed"),
+        (False, 4, 3, "completed"),
+        (False, 2, 3, "interrupted"),
+    ],
+)
+def test_training_summary_status(
+    stopped_early,
+    completed,
+    requested,
+    status,
+):
+    assert training_summary_status(
+        stopped_early=stopped_early,
+        completed=completed,
+        requested=requested,
+    ) == status
 
 
 def test_rollout_group_size_rejects_non_positive_values():

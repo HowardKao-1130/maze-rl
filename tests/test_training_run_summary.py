@@ -5,6 +5,8 @@ from pathlib import Path
 
 from scripts.summarize_training_runs import (
     collect_training_run_series,
+    file_url_for_path,
+    format_saved_file_message,
     plot_training_run_summary,
     resolve_summary_paths,
     subplot_title,
@@ -70,10 +72,17 @@ def write_training_summary(
     *,
     completed: bool,
     stopped_early: bool = False,
+    status: str | None = None,
 ) -> None:
+    status_field = (
+        f'"status": "{status}",'
+        if status is not None
+        else ""
+    )
     path.write_text(
         (
             "{"
+            f"{status_field}"
             '"task_selection_passes_requested": 3,'
             f'"task_selection_passes_completed": {3 if completed else 2},'
             f'"dataset_epochs_completed": {3 if completed else 2},'
@@ -102,6 +111,57 @@ def test_resolve_summary_paths_uses_dataset_name(
         Path("runs") / "dnn" / "training" / "dataset_alpha"
     )
     assert args.output_dir == args.runs_dir / "summary_plots"
+
+
+def test_file_url_for_path_uses_local_file_uri_without_wsl(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.delenv(
+        "WSL_DISTRO_NAME",
+        raising=False,
+    )
+    output_path = tmp_path / "summary image.png"
+
+    assert file_url_for_path(output_path) == (
+        output_path.resolve().as_uri()
+    )
+
+
+def test_file_url_for_path_uses_wsl_unc_uri(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "WSL_DISTRO_NAME",
+        "Ubuntu Test",
+    )
+    output_path = tmp_path / "summary image.png"
+
+    assert file_url_for_path(output_path) == (
+        "file://wsl.localhost/Ubuntu%20Test"
+        f"{output_path.resolve().as_posix().replace(' ', '%20')}"
+    )
+
+
+def test_format_saved_file_message_includes_clickable_url(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.delenv(
+        "WSL_DISTRO_NAME",
+        raising=False,
+    )
+    output_path = tmp_path / "summary.png"
+
+    assert format_saved_file_message(
+        "Saved plot to ",
+        output_path,
+        " (1 item)",
+    ) == (
+        f"Saved plot to {output_path} (1 item)\n"
+        f"Open: {output_path.resolve().as_uri()}"
+    )
 
 
 def test_collect_training_run_series_averages_by_epoch(
@@ -216,6 +276,58 @@ def test_collect_training_run_series_treats_early_stop_as_complete(
 
     assert len(series) == 1
     assert series[0].is_incomplete is False
+
+
+def test_collect_training_run_series_uses_explicit_status(
+    tmp_path,
+):
+    runs_dir = tmp_path / "runs"
+    running_dir = runs_dir / "running" / "ppo"
+    early_stop_dir = runs_dir / "early_stop" / "a2c"
+    completed_dir = runs_dir / "completed" / "dqn"
+
+    for run_dir in [
+        running_dir,
+        early_stop_dir,
+        completed_dir,
+    ]:
+        write_metrics_csv(
+            run_dir / "metrics.csv",
+            [(1, 0.2, True)],
+        )
+
+    write_training_summary(
+        running_dir / "training_summary.json",
+        completed=True,
+        stopped_early=True,
+        status="running",
+    )
+    write_training_summary(
+        early_stop_dir / "training_summary.json",
+        completed=False,
+        status="early_stopped",
+    )
+    write_training_summary(
+        completed_dir / "training_summary.json",
+        completed=False,
+        status="completed",
+    )
+
+    series = collect_training_run_series(
+        runs_dir,
+        metric="path_efficiency",
+    )
+
+    incomplete_by_label = {
+        item.label: item.is_incomplete
+        for item in series
+    }
+
+    assert incomplete_by_label == {
+        "completed/dqn": False,
+        "early_stop/a2c": False,
+        "running/ppo": True,
+    }
 
 
 def test_collect_training_run_series_marks_stale_summary_incomplete(

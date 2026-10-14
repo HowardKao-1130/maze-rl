@@ -1814,6 +1814,23 @@ def result_has_stale_completion_marker(
 def training_summary_completed(
     training_summary: dict[str, Any],
 ) -> bool:
+    status = training_summary.get("status")
+
+    if status in {
+        "completed",
+        "early_stopped",
+    }:
+        return True
+
+    if status in {
+        "running",
+        "interrupted",
+    }:
+        return False
+
+    if status is not None:
+        return False
+
     if training_summary.get("stopped_early") is True:
         return True
 

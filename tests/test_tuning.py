@@ -47,6 +47,7 @@ from scripts.summarize_tuning_runs import (
     collect_heatmap_cells,
     collect_parallel_coordinate_trials,
     discover_validation_metric_artifacts,
+    format_saved_file_message as format_tuning_saved_file_message,
     metric_series_by_split,
     parse_args as parse_summary_args,
     plot_all_agent_training_progress,
@@ -459,6 +460,26 @@ def test_summarize_parse_args_derives_paths_from_dataset(
     )
     assert args.output_dir == args.runs_dir / "summary_plots"
     assert args.metric == "mean_path_efficiency"
+
+
+def test_tuning_saved_file_message_includes_clickable_url(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "WSL_DISTRO_NAME",
+        "Ubuntu-24.04",
+    )
+    output_path = tmp_path / "heatmap image.png"
+
+    assert format_tuning_saved_file_message(
+        "Saved heatmap to ",
+        output_path,
+    ) == (
+        f"Saved heatmap to {output_path}\n"
+        "Open: file://wsl.localhost/Ubuntu-24.04"
+        f"{output_path.resolve().as_posix().replace(' ', '%20')}"
+    )
 
 
 def test_resume_config_allows_tensorboard_cli_override():
@@ -1721,6 +1742,7 @@ def write_fake_validation_artifacts(
     write_training_plot=True,
     completed=None,
     stopped_early=False,
+    status=None,
 ):
     if train_greedy_score is None:
         train_greedy_score = validation_score
@@ -1779,12 +1801,19 @@ def write_fake_validation_artifacts(
     plt.close(figure)
 
     training_summary = None
-    if hyperparameters is not None or completed is not None:
+    if (
+        hyperparameters is not None
+        or completed is not None
+        or status is not None
+    ):
         training_summary = {
             "hyperparameters": hyperparameters or {},
             "task_batch_size": task_batch_size,
             "rollout_group_size": rollout_group_size,
         }
+
+        if status is not None:
+            training_summary["status"] = status
 
         if completed is not None:
             training_summary.update(
@@ -1871,6 +1900,7 @@ def write_fake_validation_artifacts(
 
 def test_summarize_tuning_writes_heatmap_trial_grids_and_parallel_coordinates(
     tmp_path,
+    capsys,
 ):
     output_dir = tmp_path / "tuning"
     write_fake_validation_artifacts(
@@ -1924,6 +1954,24 @@ def test_summarize_tuning_writes_heatmap_trial_grids_and_parallel_coordinates(
             output_dir=summary_output_dir,
             metric="mean_path_efficiency",
         )
+    )
+    summary_output = capsys.readouterr().out
+
+    assert "=== Summary: tuning heatmap ===" in summary_output
+    assert (
+        "=== Summary: all-agent training progress ==="
+        in summary_output
+    )
+    assert (
+        "=== Summary: best-trial training history by agent ==="
+        in summary_output
+    )
+    assert "=== Agent: dqn ===" in summary_output
+    assert "=== Agent: ppo ===" in summary_output
+    assert summary_output.index(
+        "=== Agent: dqn ==="
+    ) < summary_output.index(
+        "=== Agent: ppo ==="
     )
 
     assert (
@@ -2982,6 +3030,55 @@ def test_tuning_artifact_early_stop_completion_honors_stale_summary(
     assert artifact_is_incomplete(artifacts[0]) is True
 
 
+def test_tuning_artifact_completion_uses_explicit_status(
+    tmp_path,
+):
+    output_dir = tmp_path / "tuning"
+    running_dir = (
+        output_dir
+        / "trials"
+        / "trial_001"
+        / "ppo"
+    )
+    early_stop_dir = (
+        output_dir
+        / "trials"
+        / "trial_002"
+        / "a2c"
+    )
+
+    write_fake_validation_artifacts(
+        running_dir,
+        validation_score=0.5,
+        same_layout_score=0.25,
+        completed=True,
+        stopped_early=True,
+        status="running",
+    )
+    write_fake_validation_artifacts(
+        early_stop_dir,
+        validation_score=0.4,
+        same_layout_score=0.2,
+        completed=False,
+        status="early_stopped",
+    )
+
+    artifacts = discover_validation_metric_artifacts(
+        output_dir
+    )
+    incomplete_by_trial = {
+        artifact["trial"]: artifact_is_incomplete(
+            artifact
+        )
+        for artifact in artifacts
+    }
+
+    assert incomplete_by_trial == {
+        1: True,
+        2: False,
+    }
+
+
 def test_validation_metric_montage_marks_empty_slots_incomplete(
     tmp_path,
     monkeypatch,
@@ -3801,6 +3898,97 @@ def test_build_result_from_artifacts_treats_partial_summary_as_incomplete(
     )
 
     assert result is None
+
+
+@pytest.mark.parametrize(
+    (
+        "status",
+        "completed",
+        "stopped_early",
+        "expected_result",
+    ),
+    [
+        ("completed", False, False, True),
+        ("early_stopped", False, False, True),
+        ("running", True, True, False),
+        ("interrupted", True, True, False),
+    ],
+)
+def test_build_result_from_artifacts_uses_explicit_status(
+    tmp_path,
+    status,
+    completed,
+    stopped_early,
+    expected_result,
+):
+    run_dir = tmp_path / "trial_001" / "ppo"
+    run_dir.mkdir(
+        parents=True,
+    )
+    checkpoint_path = run_dir / "checkpoint.pt"
+    best_checkpoint_path = run_dir / "best_checkpoint.pt"
+    training_summary_path = (
+        run_dir / "training_summary.json"
+    )
+    evaluation_path = (
+        run_dir / "validation_evaluation.csv"
+    )
+    checkpoint_path.write_bytes(b"checkpoint")
+    best_checkpoint_path.write_bytes(
+        b"best checkpoint"
+    )
+    training_summary_path.write_text(
+        json.dumps(
+            {
+                "status": status,
+                "algorithm": "ppo",
+                "task_batch_size": 4,
+                "rollout_group_size": 1,
+                "dataset_epochs_completed": (
+                    3
+                    if completed
+                    else 2
+                ),
+                "task_selection_passes_requested": 3,
+                "task_selection_passes_completed": (
+                    3
+                    if completed
+                    else 2
+                ),
+                "stopped_early": stopped_early,
+                "hyperparameters": {
+                    "learning_rate": 0.001,
+                },
+                "best_validation": {
+                    "mean_path_efficiency": 0.75,
+                    "success_rate": 1.0,
+                    "average_episode_return": 2.0,
+                    "average_successful_path_efficiency": 0.75,
+                },
+            }
+        )
+    )
+    evaluation_path.write_text(
+        (
+            "episode_return,success,path_efficiency\n"
+            "2.0,True,0.75\n"
+        )
+    )
+    args = SimpleNamespace(
+        algorithm="ppo",
+    )
+
+    result = build_result_from_artifacts(
+        args=args,
+        trial=1,
+        trial_seed=11,
+        checkpoint_path=checkpoint_path,
+        best_checkpoint_path=best_checkpoint_path,
+        training_summary_path=training_summary_path,
+        evaluation_path=evaluation_path,
+    )
+
+    assert (result is not None) is expected_result
 
 
 def test_build_result_from_artifacts_rejects_stale_completion_marker(tmp_path):

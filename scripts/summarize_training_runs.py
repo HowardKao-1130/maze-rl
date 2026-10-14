@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import sys
 from typing import Any
+from urllib.parse import quote
 
 import numpy as np
 
@@ -37,6 +38,35 @@ NEURAL_ALGORITHM_ORDER = {
         NEURAL_ALGORITHMS
     )
 }
+
+
+def file_url_for_path(
+    path: Path,
+) -> str:
+    resolved_path = path.expanduser().resolve()
+    wsl_distro = os.environ.get(
+        "WSL_DISTRO_NAME"
+    )
+
+    if wsl_distro:
+        return (
+            "file://wsl.localhost/"
+            f"{quote(wsl_distro, safe='')}"
+            f"{quote(resolved_path.as_posix(), safe='/')}"
+        )
+
+    return resolved_path.as_uri()
+
+
+def format_saved_file_message(
+    prefix: str,
+    path: Path,
+    suffix: str = "",
+) -> str:
+    return (
+        f"{prefix}{path}{suffix}\n"
+        f"Open: {file_url_for_path(path)}"
+    )
 
 METRIC_LABELS = {
     "mean_path_efficiency": "Path efficiency",
@@ -294,6 +324,23 @@ def read_training_summary(
 def training_summary_completed(
     training_summary: dict[str, Any],
 ) -> bool:
+    status = training_summary.get("status")
+
+    if status in {
+        "completed",
+        "early_stopped",
+    }:
+        return True
+
+    if status in {
+        "running",
+        "interrupted",
+    }:
+        return False
+
+    if status is not None:
+        return False
+
     if training_summary.get("stopped_early") is True:
         return True
 
@@ -1067,7 +1114,10 @@ def main() -> None:
     )
 
     print(
-        f"Saved {len(series)} training run curve(s) to {output_path}"
+        format_saved_file_message(
+            f"Saved {len(series)} training run curve(s) to ",
+            output_path,
+        )
     )
 
 

@@ -2289,6 +2289,21 @@ def write_training_summary(
         )
 
 
+def training_summary_status(
+    *,
+    stopped_early: bool,
+    completed: int,
+    requested: int,
+) -> str:
+    if stopped_early:
+        return "early_stopped"
+
+    if completed >= requested:
+        return "completed"
+
+    return "interrupted"
+
+
 def format_progress_message(
     algorithm: str,
     metrics,
@@ -3414,6 +3429,73 @@ def main():
         )
     )
 
+    def completed_training_passes() -> int:
+        return int(
+            stopped_epoch
+            if stopped_early
+            else sampler.completed_dataset_epochs
+        )
+
+    def build_training_summary(
+        status: str,
+    ) -> dict:
+        completed_passes = completed_training_passes()
+        summary = {
+            "status": status,
+            "algorithm": args.algorithm,
+            "rollouts_per_task_requested": args.rollouts_per_task,
+            "task_batch_size": task_batch_size,
+            "rollout_group_size": rollout_group_size,
+            "task_selection_passes_requested": task_selection_pass_budget,
+            "task_selection_passes_completed": completed_passes,
+            "dataset_epochs_requested": task_selection_pass_budget,
+            "dataset_epochs_completed": completed_passes,
+            "optimization_epochs_requested": task_selection_pass_budget,
+            "group_size": rollout_group_size,
+            "stopped_early": stopped_early,
+            "stopped_epoch": stopped_epoch,
+            "checkpoint_path": str(
+                checkpoint_path
+            ),
+            "training_state_path": str(
+                training_state_path
+            ),
+            "hyperparameters": agent_hyperparameters,
+        }
+
+        if best_config_overrides is not None:
+            summary["best_config_path"] = str(
+                best_config_overrides.path
+            )
+
+        if best_validation is not None:
+            summary["best_validation"] = (
+                best_validation
+            )
+            summary["best_checkpoint_path"] = str(
+                best_checkpoint_path
+            )
+
+        if latest_validation_by_split:
+            summary["latest_validation_by_split"] = (
+                latest_validation_by_split
+            )
+
+        return summary
+
+    def write_running_training_summary() -> None:
+        if (
+            sampler.completed_dataset_epochs
+            >= task_selection_pass_budget
+            or stopped_early
+        ):
+            return
+
+        write_training_summary(
+            training_summary_path,
+            build_training_summary("running"),
+        )
+
     if args.resume:
         if not training_state_path.exists():
             raise RuntimeError(
@@ -3593,6 +3675,8 @@ def main():
                     "Replayed validation history for retroactive "
                     "early stopping; continuing training."
                 )
+
+    write_running_training_summary()
 
     if validation_envs and should_record_train_greedy_validation(
         resuming=(
@@ -4232,53 +4316,14 @@ def main():
         hyperparameters=agent_hyperparameters,
     )
 
-    summary = {
-        "algorithm": args.algorithm,
-        "rollouts_per_task_requested": args.rollouts_per_task,
-        "task_batch_size": task_batch_size,
-        "rollout_group_size": rollout_group_size,
-        "task_selection_passes_requested": task_selection_pass_budget,
-        "task_selection_passes_completed": (
-            stopped_epoch
-            if stopped_early
-            else sampler.completed_dataset_epochs
-        ),
-        "dataset_epochs_requested": task_selection_pass_budget,
-        "dataset_epochs_completed": (
-            stopped_epoch
-            if stopped_early
-            else sampler.completed_dataset_epochs
-        ),
-        "optimization_epochs_requested": task_selection_pass_budget,
-        "group_size": rollout_group_size,
-        "stopped_early": stopped_early,
-        "stopped_epoch": stopped_epoch,
-        "checkpoint_path": str(
-            checkpoint_path
-        ),
-        "training_state_path": str(
-            training_state_path
-        ),
-        "hyperparameters": agent_hyperparameters,
-    }
-
-    if best_config_overrides is not None:
-        summary["best_config_path"] = str(
-            best_config_overrides.path
+    completed_passes = completed_training_passes()
+    summary = build_training_summary(
+        training_summary_status(
+            stopped_early=stopped_early,
+            completed=completed_passes,
+            requested=task_selection_pass_budget,
         )
-
-    if best_validation is not None:
-        summary["best_validation"] = (
-            best_validation
-        )
-        summary["best_checkpoint_path"] = str(
-            best_checkpoint_path
-        )
-
-    if latest_validation_by_split:
-        summary["latest_validation_by_split"] = (
-            latest_validation_by_split
-        )
+    )
 
     write_training_summary(
         training_summary_path,

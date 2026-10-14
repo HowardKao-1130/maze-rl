@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import sys
 from typing import Any
+from urllib.parse import quote
 
 import numpy as np
 
@@ -31,6 +32,35 @@ TRAINING_LOOP_PARAMETERS = {
 }
 
 
+def file_url_for_path(
+    path: Path,
+) -> str:
+    resolved_path = path.expanduser().resolve()
+    wsl_distro = os.environ.get(
+        "WSL_DISTRO_NAME"
+    )
+
+    if wsl_distro:
+        return (
+            "file://wsl.localhost/"
+            f"{quote(wsl_distro, safe='')}"
+            f"{quote(resolved_path.as_posix(), safe='/')}"
+        )
+
+    return resolved_path.as_uri()
+
+
+def format_saved_file_message(
+    prefix: str,
+    path: Path,
+    suffix: str = "",
+) -> str:
+    return (
+        f"{prefix}{path}{suffix}\n"
+        f"Open: {file_url_for_path(path)}"
+    )
+
+
 def read_training_summary(
     path: Path,
 ) -> dict[str, Any]:
@@ -41,6 +71,23 @@ def read_training_summary(
 def training_summary_completed(
     training_summary: dict[str, Any],
 ) -> bool:
+    status = training_summary.get("status")
+
+    if status in {
+        "completed",
+        "early_stopped",
+    }:
+        return True
+
+    if status in {
+        "running",
+        "interrupted",
+    }:
+        return False
+
+    if status is not None:
+        return False
+
     if training_summary.get("stopped_early") is True:
         return True
 
@@ -2741,6 +2788,15 @@ def resolve_summary_paths(
         args.output_dir = args.runs_dir / "summary_plots"
 
 
+def print_summary_section(
+    title: str,
+) -> None:
+    print(
+        f"\n=== {title} ===",
+        flush=True,
+    )
+
+
 def parse_args(
     argv: list[str] | None = None,
 ) -> argparse.Namespace:
@@ -2815,19 +2871,28 @@ def summarize_tuning_runs(
         args.output_dir
         / f"{args.metric}_heatmap.png"
     )
+    print_summary_section(
+        "Summary: tuning heatmap",
+    )
     plot_tuning_summary_heatmap(
         cells,
         metric=args.metric,
         output_path=heatmap_path,
     )
     print(
-        f"Saved tuning heatmap to {heatmap_path}",
+        format_saved_file_message(
+            "Saved tuning heatmap to ",
+            heatmap_path,
+        ),
         flush=True,
     )
 
     training_progress_path = (
         args.output_dir
         / f"{args.metric}_training_progress_by_agent.png"
+    )
+    print_summary_section(
+        "Summary: all-agent training progress",
     )
     training_progress_count = (
         plot_all_agent_training_progress(
@@ -2839,9 +2904,11 @@ def summarize_tuning_runs(
 
     if training_progress_count:
         print(
-            "Saved all-agent training progress plot to "
-            f"{training_progress_path} "
-            f"({training_progress_count} trial(s))",
+            format_saved_file_message(
+                "Saved all-agent training progress plot to ",
+                training_progress_path,
+                f" ({training_progress_count} trial(s))",
+            ),
             flush=True,
         )
     else:
@@ -2856,6 +2923,9 @@ def summarize_tuning_runs(
         args.output_dir
         / f"{args.metric}_best_trial_training_history_summary.png"
     )
+    print_summary_section(
+        "Summary: best-trial training history by agent",
+    )
     best_trial_summary_count = (
         plot_best_trial_training_summary(
             artifacts,
@@ -2866,9 +2936,11 @@ def summarize_tuning_runs(
 
     if best_trial_summary_count:
         print(
-            "Saved best-trial training summary plot to "
-            f"{best_trial_summary_path} "
-            f"({best_trial_summary_count} agent(s))",
+            format_saved_file_message(
+                "Saved best-trial training summary plot to ",
+                best_trial_summary_path,
+                f" ({best_trial_summary_count} agent(s))",
+            ),
             flush=True,
         )
     else:
@@ -2889,6 +2961,9 @@ def summarize_tuning_runs(
             for artifact in artifacts
         }
     ):
+        print_summary_section(
+            f"Agent: {algorithm}",
+        )
         montage_path = (
             args.output_dir
             / f"{algorithm}_validation_metrics_trials.png"
@@ -2902,9 +2977,11 @@ def summarize_tuning_runs(
 
         if filled_trial_slots:
             print(
-                "Saved validation metrics trial grid to "
-                f"{montage_path} "
-                f"({filled_trial_slots} trial plot(s))",
+                format_saved_file_message(
+                    "Saved validation metrics trial grid to ",
+                    montage_path,
+                    f" ({filled_trial_slots} trial plot(s))",
+                ),
                 flush=True,
             )
         else:
@@ -2930,9 +3007,11 @@ def summarize_tuning_runs(
 
         if parallel_trial_count:
             print(
-                "Saved hyperparameter parallel-coordinate plot to "
-                f"{parallel_path} "
-                f"({parallel_trial_count} trial(s))",
+                format_saved_file_message(
+                    "Saved hyperparameter parallel-coordinate plot to ",
+                    parallel_path,
+                    f" ({parallel_trial_count} trial(s))",
+                ),
                 flush=True,
             )
         else:
