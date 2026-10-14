@@ -5,7 +5,10 @@ import torch
 from torch import nn
 from torch.distributions import Categorical
 
-from maze_rl.agents.networks import ActorCriticNetwork
+from maze_rl.agents.networks import (
+    ActorCriticNetwork,
+    DEFAULT_RESIDUAL_LAYERS,
+)
 
 
 class PPOAgent:
@@ -23,6 +26,8 @@ class PPOAgent:
         entropy_coefficient: float = 0.01,
         update_epochs: int = 4,
         minibatch_size: int = 64,
+        network_architecture: str = "baseline",
+        residual_layers: int = DEFAULT_RESIDUAL_LAYERS,
     ) -> None:
         self.device = device
 
@@ -46,6 +51,8 @@ class PPOAgent:
             height,
             width,
             action_count,
+            network_architecture=network_architecture,
+            residual_layers=residual_layers,
         ).to(device)
 
         self.optimizer = torch.optim.Adam(

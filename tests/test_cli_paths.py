@@ -21,6 +21,7 @@ from scripts.generate_dataset import (
 from scripts.evaluate import default_checkpoint_path
 from scripts.evaluate import (
     best_trial_checkpoint_path,
+    checkpoint_network_configuration,
     default_rollout_animation_output_dir,
     default_tuning_results_path,
     evaluation_episode_plan,
@@ -143,6 +144,25 @@ def test_default_checkpoint_path_uses_algorithm_specific_suffix():
     ) == Path(
         "runs/dnn/training/dqn/checkpoint.pt"
     )
+
+
+def test_evaluation_reads_network_configuration_from_checkpoint(
+    tmp_path,
+):
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    torch.save(
+        {
+            "network_architecture": "residual",
+            "residual_layers": 4,
+        },
+        checkpoint_path,
+    )
+
+    assert checkpoint_network_configuration(
+        "ppo",
+        checkpoint_path,
+        torch.device("cpu"),
+    ) == ("residual", 4)
 
 
 def test_evaluate_rollout_animation_defaults(monkeypatch):
@@ -523,6 +543,44 @@ def test_training_progress_messages_enabled_by_default(monkeypatch):
     args = parse_train_args()
 
     assert args.no_progress is False
+
+
+def test_training_uses_baseline_network_by_default(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "ppo",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.network_architecture == "baseline"
+    assert args.residual_layers == 2
+
+
+def test_training_accepts_residual_network_configuration(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "ppo",
+            "--network-architecture",
+            "residual",
+            "--residual-layers",
+            "4",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.network_architecture == "residual"
+    assert args.residual_layers == 4
 
 
 def test_training_plots_disabled_by_default(monkeypatch):

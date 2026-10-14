@@ -4,7 +4,10 @@ import numpy as np
 import torch
 from torch.distributions import Categorical
 
-from maze_rl.agents.networks import PolicyNetwork
+from maze_rl.agents.networks import (
+    DEFAULT_RESIDUAL_LAYERS,
+    PolicyNetwork,
+)
 
 
 class ReinforceAgent:
@@ -20,6 +23,8 @@ class ReinforceAgent:
         entropy_coefficient_min: float = 0.01,
         entropy_coefficient_decay: float = 0.9995,
         minibatch_size: int = 64,
+        network_architecture: str = "baseline",
+        residual_layers: int = DEFAULT_RESIDUAL_LAYERS,
     ) -> None:
         self.device = device
         self.gamma = gamma
@@ -38,6 +43,8 @@ class ReinforceAgent:
             height,
             width,
             action_count,
+            network_architecture=network_architecture,
+            residual_layers=residual_layers,
         ).to(device)
 
         self.optimizer = torch.optim.Adam(

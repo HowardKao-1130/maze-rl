@@ -7,7 +7,10 @@ import numpy as np
 import torch
 from torch import nn
 
-from maze_rl.agents.networks import QNetwork
+from maze_rl.agents.networks import (
+    DEFAULT_RESIDUAL_LAYERS,
+    QNetwork,
+)
 
 
 @dataclass
@@ -76,6 +79,8 @@ class DQNAgent:
         train_frequency: int | None = None,
         target_update_interval: int = 500,
         seed: int = 42,
+        network_architecture: str = "baseline",
+        residual_layers: int = DEFAULT_RESIDUAL_LAYERS,
     ) -> None:
         self.action_count = action_count
         self.device = device
@@ -111,12 +116,16 @@ class DQNAgent:
             height,
             width,
             action_count,
+            network_architecture=network_architecture,
+            residual_layers=residual_layers,
         ).to(device)
 
         self.target_network = QNetwork(
             height,
             width,
             action_count,
+            network_architecture=network_architecture,
+            residual_layers=residual_layers,
         ).to(device)
 
         self.target_network.load_state_dict(

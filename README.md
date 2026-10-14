@@ -117,6 +117,17 @@ Neural-agent hyperparameters can be passed directly to training, for example:
 python scripts/train.py --algorithm dqn --rollouts-per-task 20 --learning-rate 0.0001 --batch-size 64 --epsilon-decay 0.999
 ```
 
+Neural agents use the original two-convolution encoder by default. A residual
+encoder can be selected explicitly; `--residual-layers` controls the number of
+residual blocks and defaults to 2:
+
+```bash
+python scripts/train.py --algorithm ppo --network-architecture residual --residual-layers 2
+```
+
+The selected architecture is stored in checkpoints and training state, so
+evaluation and resume automatically reconstruct the matching encoder.
+
 For DNN agents, `--task-batch-size` controls how many distinct tasks are
 sampled for a training round, and `--rollout-group-size` controls how many
 rollouts are generated per selected task. Defaults are `task_batch_size=16` for
