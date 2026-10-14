@@ -102,6 +102,10 @@ event file for one algorithm with:
 python scripts/open_tensorboard.py --logdir runs/dnn/training/dqn/tensorboard
 ```
 
+When `--logdir` is omitted, the launcher uses the baseline algorithm log
+directory when it has events, or an existing `<algorithm>_residual` log
+directory when the baseline has no events.
+
 By default, the launcher shows only the newest
 `events.out.tfevents.<timestamp>.<host>.<pid>.<index>` file in the log
 directory so older event files from previous runs are not overlaid. Pass

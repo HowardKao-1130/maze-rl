@@ -1695,6 +1695,47 @@ def test_default_tensorboard_dir_uses_algorithm_run_directory():
     )
 
 
+def test_default_tensorboard_dir_finds_existing_residual_logs(
+    tmp_path,
+):
+    residual_path = (
+        tmp_path
+        / "ppo_residual"
+        / "tensorboard"
+    )
+    residual_path.mkdir(parents=True)
+    (residual_path / "events.out.tfevents.test").touch()
+
+    assert default_tensorboard_dir(
+        "ppo",
+        runs_dir=tmp_path,
+    ) == residual_path
+
+
+def test_default_tensorboard_dir_prefers_baseline_logs(
+    tmp_path,
+):
+    baseline_path = (
+        tmp_path
+        / "ppo"
+        / "tensorboard"
+    )
+    residual_path = (
+        tmp_path
+        / "ppo_residual"
+        / "tensorboard"
+    )
+    baseline_path.mkdir(parents=True)
+    residual_path.mkdir(parents=True)
+    (baseline_path / "events.out.tfevents.baseline").touch()
+    (residual_path / "events.out.tfevents.residual").touch()
+
+    assert default_tensorboard_dir(
+        "ppo",
+        runs_dir=tmp_path,
+    ) == baseline_path
+
+
 def test_latest_event_file_uses_newest_tensorboard_file(tmp_path):
     logdir = tmp_path / "tensorboard"
     logdir.mkdir()
