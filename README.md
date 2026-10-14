@@ -131,9 +131,9 @@ python scripts/train.py --algorithm ppo --network-architecture residual --residu
 
 The selected architecture is stored in checkpoints and training state, so
 evaluation and resume automatically reconstruct the matching encoder.
-Residual runs append the architecture name to the algorithm output directory;
-for example, PPO residual runs are stored under `ppo_residual` while baseline
-PPO runs remain under `ppo`.
+Residual runs append the architecture and depth to the algorithm output
+directory; for example, two-block PPO residual runs are stored under
+`ppo_residual_l2` while baseline PPO runs remain under `ppo`.
 
 For DNN agents, `--task-batch-size` controls how many distinct tasks are
 sampled for a training round, and `--rollout-group-size` controls how many

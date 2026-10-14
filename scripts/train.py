@@ -264,11 +264,15 @@ def default_experiment_output_dir(
 def output_algorithm_name(
     algorithm: str,
     network_architecture: str,
+    residual_layers: int = DEFAULT_RESIDUAL_LAYERS,
 ) -> str:
     if network_architecture == "baseline":
         return algorithm
 
-    return f"{algorithm}_{network_architecture}"
+    return (
+        f"{algorithm}_{network_architecture}"
+        f"_l{residual_layers}"
+    )
 
 
 def resolve_resume_training_state_path(
@@ -277,12 +281,14 @@ def resolve_resume_training_state_path(
     algorithm: str,
     network_architecture: str,
     network_architecture_was_provided: bool,
+    residual_layers: int = DEFAULT_RESIDUAL_LAYERS,
 ) -> Path:
     requested_path = (
         output_dir
         / output_algorithm_name(
             algorithm,
             network_architecture,
+            residual_layers,
         )
         / "training_state.pt"
     )
@@ -293,17 +299,24 @@ def resolve_resume_training_state_path(
     ):
         return requested_path
 
-    for candidate_architecture in NETWORK_ARCHITECTURES:
-        candidate_path = (
-            output_dir
-            / output_algorithm_name(
-                algorithm,
-                candidate_architecture,
-            )
-            / "training_state.pt"
+    baseline_path = (
+        output_dir
+        / output_algorithm_name(
+            algorithm,
+            "baseline",
         )
-        if candidate_path.exists():
-            return candidate_path
+        / "training_state.pt"
+    )
+    if baseline_path.exists():
+        return baseline_path
+
+    residual_paths = sorted(
+        output_dir.glob(
+            f"{algorithm}_residual_l*/training_state.pt"
+        )
+    )
+    if residual_paths:
+        return residual_paths[0]
 
     return requested_path
 
@@ -3205,6 +3218,7 @@ def main():
             output_dir=args.output_dir,
             algorithm=args.algorithm,
             network_architecture=args.network_architecture,
+            residual_layers=args.residual_layers,
             network_architecture_was_provided=(
                 "network_architecture"
                 in args.resume_metadata_cli_fields
@@ -3341,6 +3355,7 @@ def main():
         / output_algorithm_name(
             args.algorithm,
             args.network_architecture,
+            args.residual_layers,
         )
     )
 

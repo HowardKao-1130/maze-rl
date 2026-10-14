@@ -29,17 +29,16 @@ def default_tensorboard_dir(
         else runs_dir
     )
     baseline_path = root / algorithm / "tensorboard"
-    residual_path = (
-        root
-        / f"{algorithm}_residual"
-        / "tensorboard"
+    residual_paths = sorted(
+        root.glob(
+            f"{algorithm}_residual_l*/tensorboard"
+        )
     )
 
-    if (
-        not tensorboard_event_files(baseline_path)
-        and tensorboard_event_files(residual_path)
-    ):
-        return residual_path
+    if not tensorboard_event_files(baseline_path):
+        for residual_path in residual_paths:
+            if tensorboard_event_files(residual_path):
+                return residual_path
 
     return baseline_path
 

@@ -238,7 +238,7 @@ def test_collect_training_run_series_discovers_residual_run(
     write_metrics_csv(
         runs_dir
         / "residual_run"
-        / "ppo_residual"
+        / "ppo_residual_l2"
         / "metrics.csv",
         [(1, 0.6, True)],
     )
@@ -251,7 +251,7 @@ def test_collect_training_run_series_discovers_residual_run(
     assert len(series) == 1
     assert series[0].algorithm == "ppo"
     assert series[0].label == (
-        "residual_run/ppo_residual"
+        "residual_run/ppo_residual_l2"
     )
 
 
@@ -266,7 +266,7 @@ def test_collect_training_run_series_discovers_mixed_baseline_and_residual_runs(
     write_metrics_csv(
         runs_dir
         / "residual_run"
-        / "ppo_residual"
+        / "ppo_residual_l2"
         / "metrics.csv",
         [(1, 0.6, True)],
     )
@@ -285,7 +285,7 @@ def test_collect_training_run_series_discovers_mixed_baseline_and_residual_runs(
         for item in series
     } == {
         "baseline_run/ppo",
-        "residual_run/ppo_residual",
+        "residual_run/ppo_residual_l2",
     }
 
 

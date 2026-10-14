@@ -6,6 +6,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import sys
 from typing import Any
 from urllib.parse import quote
@@ -243,10 +244,12 @@ def parse_float(value: str | None) -> float | None:
 
 def infer_algorithm(metrics_path: Path) -> str:
     algorithm = metrics_path.parent.name
-    if algorithm.endswith("_residual"):
-        base_algorithm = algorithm.removesuffix(
-            "_residual"
-        )
+    residual_match = re.fullmatch(
+        r"(.+)_residual_l\d+",
+        algorithm,
+    )
+    if residual_match:
+        base_algorithm = residual_match.group(1)
         if base_algorithm in NEURAL_ALGORITHM_ORDER:
             return base_algorithm
 

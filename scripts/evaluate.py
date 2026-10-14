@@ -83,13 +83,13 @@ def default_checkpoint_path(
     if baseline_path.exists():
         return baseline_path
 
-    residual_path = (
-        DEFAULT_EXPERIMENT_OUTPUT_ROOT
-        / f"{algorithm}_residual"
-        / "checkpoint.pt"
+    residual_paths = sorted(
+        DEFAULT_EXPERIMENT_OUTPUT_ROOT.glob(
+            f"{algorithm}_residual_l*/checkpoint.pt"
+        )
     )
-    if residual_path.exists():
-        return residual_path
+    if residual_paths:
+        return residual_paths[0]
 
     return baseline_path
 
