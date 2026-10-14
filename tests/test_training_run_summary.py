@@ -231,6 +231,64 @@ def test_collect_training_run_series_averages_by_epoch(
     )
 
 
+def test_collect_training_run_series_discovers_residual_run(
+    tmp_path,
+):
+    runs_dir = tmp_path / "runs"
+    write_metrics_csv(
+        runs_dir
+        / "residual_run"
+        / "ppo_residual"
+        / "metrics.csv",
+        [(1, 0.6, True)],
+    )
+
+    series = collect_training_run_series(
+        runs_dir,
+        metric="path_efficiency",
+    )
+
+    assert len(series) == 1
+    assert series[0].algorithm == "ppo"
+    assert series[0].label == (
+        "residual_run/ppo_residual"
+    )
+
+
+def test_collect_training_run_series_discovers_mixed_baseline_and_residual_runs(
+    tmp_path,
+):
+    runs_dir = tmp_path / "runs"
+    write_metrics_csv(
+        runs_dir / "baseline_run" / "ppo" / "metrics.csv",
+        [(1, 0.4, True)],
+    )
+    write_metrics_csv(
+        runs_dir
+        / "residual_run"
+        / "ppo_residual"
+        / "metrics.csv",
+        [(1, 0.6, True)],
+    )
+
+    series = collect_training_run_series(
+        runs_dir,
+        metric="path_efficiency",
+    )
+
+    assert [item.algorithm for item in series] == [
+        "ppo",
+        "ppo",
+    ]
+    assert {
+        item.label
+        for item in series
+    } == {
+        "baseline_run/ppo",
+        "residual_run/ppo_residual",
+    }
+
+
 def test_collect_training_run_series_marks_incomplete_runs(
     tmp_path,
 ):

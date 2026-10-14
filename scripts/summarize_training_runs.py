@@ -242,7 +242,15 @@ def parse_float(value: str | None) -> float | None:
 
 
 def infer_algorithm(metrics_path: Path) -> str:
-    return metrics_path.parent.name
+    algorithm = metrics_path.parent.name
+    if algorithm.endswith("_residual"):
+        base_algorithm = algorithm.removesuffix(
+            "_residual"
+        )
+        if base_algorithm in NEURAL_ALGORITHM_ORDER:
+            return base_algorithm
+
+    return algorithm
 
 
 def canonical_metric(metric: str) -> str:
