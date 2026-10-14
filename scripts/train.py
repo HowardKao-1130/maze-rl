@@ -36,6 +36,11 @@ from maze_rl.agents.ppo import PPOAgent
 from maze_rl.agents.q_learning import QLearningAgent
 from maze_rl.agents.reinforce import ReinforceAgent
 from maze_rl.agents.sarsa import SarsaAgent
+from maze_rl.agents.networks import (
+    DEFAULT_RESIDUAL_LAYERS,
+    NETWORK_ARCHITECTURES,
+    validate_network_architecture,
+)
 from maze_rl.envs.maze_env import MazeEnv
 from maze_rl.evaluation.evaluator import evaluate
 from maze_rl.training.metrics import append_metrics_csv
@@ -256,6 +261,53 @@ def default_experiment_output_dir(
     )
 
 
+def output_algorithm_name(
+    algorithm: str,
+    network_architecture: str,
+) -> str:
+    if network_architecture == "baseline":
+        return algorithm
+
+    return f"{algorithm}_{network_architecture}"
+
+
+def resolve_resume_training_state_path(
+    *,
+    output_dir: Path,
+    algorithm: str,
+    network_architecture: str,
+    network_architecture_was_provided: bool,
+) -> Path:
+    requested_path = (
+        output_dir
+        / output_algorithm_name(
+            algorithm,
+            network_architecture,
+        )
+        / "training_state.pt"
+    )
+
+    if (
+        network_architecture_was_provided
+        or requested_path.exists()
+    ):
+        return requested_path
+
+    for candidate_architecture in NETWORK_ARCHITECTURES:
+        candidate_path = (
+            output_dir
+            / output_algorithm_name(
+                algorithm,
+                candidate_architecture,
+            )
+            / "training_state.pt"
+        )
+        if candidate_path.exists():
+            return candidate_path
+
+    return requested_path
+
+
 def dataset_bundle_output_dir(
     *,
     dataset_dir: Path,
@@ -338,6 +390,12 @@ RESUME_METADATA_CLI_OPTIONS = {
     "rollout_group_size": (
         "--rollout-group-size",
         "--group-size",
+    ),
+    "network_architecture": (
+        "--network-architecture",
+    ),
+    "residual_layers": (
+        "--residual-layers",
     ),
     "validation_dataset": (
         "--validation-dataset",
@@ -946,6 +1004,24 @@ def parse_args():
             "alias."
         ),
     )
+    neural_group.add_argument(
+        "--network-architecture",
+        choices=NETWORK_ARCHITECTURES,
+        default="baseline",
+        help=(
+            "Neural encoder architecture. The default baseline "
+            "preserves the original two-convolution encoder."
+        ),
+    )
+    neural_group.add_argument(
+        "--residual-layers",
+        type=int,
+        default=DEFAULT_RESIDUAL_LAYERS,
+        help=(
+            "Number of residual blocks when using the residual "
+            "network architecture. Defaults to 2."
+        ),
+    )
 
     argv = sys.argv[1:]
     args = parser.parse_args()
@@ -1190,7 +1266,13 @@ def create_agent(
     device,
     seed,
     hyperparameters=None,
+    network_architecture="baseline",
+    residual_layers=DEFAULT_RESIDUAL_LAYERS,
 ):
+    validate_network_architecture(
+        network_architecture,
+        residual_layers,
+    )
     hyperparameters = dict(
         hyperparameters or {}
     )
@@ -1232,6 +1314,8 @@ def create_agent(
         "height": env.height,
         "width": env.width,
         "device": device,
+        "network_architecture": network_architecture,
+        "residual_layers": residual_layers,
     }
 
     if algorithm == "dqn":
@@ -1284,6 +1368,8 @@ def save_checkpoint(
     q_snapshots=None,
     model_snapshots=None,
     hyperparameters=None,
+    network_architecture="baseline",
+    residual_layers=DEFAULT_RESIDUAL_LAYERS,
 ):
     path.parent.mkdir(
         parents=True,
@@ -1327,6 +1413,8 @@ def save_checkpoint(
             "model_state_dict": state_dict,
             "model_snapshots": model_snapshots or [],
             "hyperparameters": hyperparameters or {},
+            "network_architecture": network_architecture,
+            "residual_layers": residual_layers,
         },
         path,
     )
@@ -1377,6 +1465,8 @@ def save_neural_checkpoint_state(
     model_snapshots=None,
     hyperparameters=None,
     validation_metadata=None,
+    network_architecture="baseline",
+    residual_layers=DEFAULT_RESIDUAL_LAYERS,
 ) -> None:
     path.parent.mkdir(
         parents=True,
@@ -1390,6 +1480,8 @@ def save_neural_checkpoint_state(
             "model_snapshots": model_snapshots or [],
             "hyperparameters": hyperparameters or {},
             "validation": validation_metadata or {},
+            "network_architecture": network_architecture,
+            "residual_layers": residual_layers,
         },
         path,
     )
@@ -1655,6 +1747,18 @@ def training_state_metadata(
         ),
         "task_batch_size": task_batch_size,
         "rollout_group_size": rollout_group_size,
+        "network_architecture": getattr(
+            args,
+            "network_architecture",
+            "baseline",
+        ),
+        "residual_layers": int(
+            getattr(
+                args,
+                "residual_layers",
+                DEFAULT_RESIDUAL_LAYERS,
+            )
+        ),
         "validation_dataset": (
             None
             if args.validation_dataset is None
@@ -1682,7 +1786,15 @@ def validate_training_state_metadata(
     *,
     allowed_mismatches: set[str] | None = None,
 ) -> None:
-    metadata = state.get("metadata")
+    metadata = dict(state.get("metadata") or {})
+    metadata.setdefault(
+        "network_architecture",
+        "baseline",
+    )
+    metadata.setdefault(
+        "residual_layers",
+        DEFAULT_RESIDUAL_LAYERS,
+    )
     allowed_mismatches = allowed_mismatches or set()
 
     if metadata == expected_metadata:
@@ -1876,6 +1988,16 @@ def apply_retroactive_resume_metadata(
     args.rollout_group_size = metadata.get(
         "rollout_group_size"
     )
+    args.network_architecture = metadata.get(
+        "network_architecture",
+        "baseline",
+    )
+    args.residual_layers = int(
+        metadata.get(
+            "residual_layers",
+            DEFAULT_RESIDUAL_LAYERS,
+        )
+    )
     args.validation_dataset = optional_metadata_path(
         metadata,
         "validation_dataset",
@@ -1920,6 +2042,16 @@ def apply_resume_training_state_defaults(
         ),
         "rollout_group_size": metadata.get(
             "rollout_group_size"
+        ),
+        "network_architecture": metadata.get(
+            "network_architecture",
+            "baseline",
+        ),
+        "residual_layers": int(
+            metadata.get(
+                "residual_layers",
+                DEFAULT_RESIDUAL_LAYERS,
+            )
         ),
         "validation_dataset": optional_metadata_path(
             metadata,
@@ -3014,6 +3146,21 @@ def optimization_epochs_for_round(
 
 def main():
     args = parse_args()
+
+    validate_network_architecture(
+        args.network_architecture,
+        args.residual_layers,
+    )
+
+    if (
+        args.algorithm in TABULAR_ALGORITHMS
+        and args.network_architecture != "baseline"
+    ):
+        raise ValueError(
+            "--network-architecture is only supported for "
+            "neural agents."
+        )
+
     resolve_dataset_bundle_args(args)
 
     if args.best_config == BEST_CONFIG_DEFAULT_SENTINEL:
@@ -3054,10 +3201,14 @@ def main():
     retroactive_resume_metadata = None
 
     if args.resume:
-        training_state_path = (
-            args.output_dir
-            / args.algorithm
-            / "training_state.pt"
+        training_state_path = resolve_resume_training_state_path(
+            output_dir=args.output_dir,
+            algorithm=args.algorithm,
+            network_architecture=args.network_architecture,
+            network_architecture_was_provided=(
+                "network_architecture"
+                in args.resume_metadata_cli_fields
+            ),
         )
         resume_training_metadata = (
             load_training_state_metadata(
@@ -3175,6 +3326,8 @@ def main():
         device=device,
         seed=args.seed,
         hyperparameters=agent_hyperparameters,
+        network_architecture=args.network_architecture,
+        residual_layers=args.residual_layers,
     )
 
     if args.algorithm == "dqn":
@@ -3185,7 +3338,10 @@ def main():
 
     run_dir = (
         args.output_dir
-        / args.algorithm
+        / output_algorithm_name(
+            args.algorithm,
+            args.network_architecture,
+        )
     )
 
     tensorboard_writer = create_tensorboard_writer(
@@ -3446,6 +3602,8 @@ def main():
             "rollouts_per_task_requested": args.rollouts_per_task,
             "task_batch_size": task_batch_size,
             "rollout_group_size": rollout_group_size,
+            "network_architecture": args.network_architecture,
+            "residual_layers": args.residual_layers,
             "task_selection_passes_requested": task_selection_pass_budget,
             "task_selection_passes_completed": completed_passes,
             "dataset_epochs_requested": task_selection_pass_budget,
@@ -3976,6 +4134,8 @@ def main():
                         ),
                         model_snapshots=model_snapshots,
                         hyperparameters=agent_hyperparameters,
+                        network_architecture=args.network_architecture,
+                        residual_layers=args.residual_layers,
                         validation_metadata=validation_row,
                     )
                 else:
@@ -4314,6 +4474,8 @@ def main():
         q_snapshots=q_snapshots,
         model_snapshots=model_snapshots,
         hyperparameters=agent_hyperparameters,
+        network_architecture=args.network_architecture,
+        residual_layers=args.residual_layers,
     )
 
     completed_passes = completed_training_passes()

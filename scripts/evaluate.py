@@ -34,6 +34,10 @@ from maze_rl.agents.ppo import PPOAgent
 from maze_rl.agents.q_learning import QLearningAgent
 from maze_rl.agents.reinforce import ReinforceAgent
 from maze_rl.agents.sarsa import SarsaAgent
+from maze_rl.agents.networks import (
+    DEFAULT_RESIDUAL_LAYERS,
+    validate_network_architecture,
+)
 from maze_rl.envs.maze_env import MazeEnv
 from maze_rl.evaluation.evaluator import evaluate
 from maze_rl.evaluation.q_plots import plot_q_snapshots
@@ -71,11 +75,23 @@ def default_checkpoint_path(
             / "checkpoint.pkl"
         )
 
-    return (
+    baseline_path = (
         DEFAULT_EXPERIMENT_OUTPUT_ROOT
         / algorithm
         / "checkpoint.pt"
     )
+    if baseline_path.exists():
+        return baseline_path
+
+    residual_path = (
+        DEFAULT_EXPERIMENT_OUTPUT_ROOT
+        / f"{algorithm}_residual"
+        / "checkpoint.pt"
+    )
+    if residual_path.exists():
+        return residual_path
+
+    return baseline_path
 
 
 def default_rollout_animation_output_dir(
@@ -503,6 +519,8 @@ def create_agent(
     env,
     device,
     seed,
+    network_architecture="baseline",
+    residual_layers=DEFAULT_RESIDUAL_LAYERS,
 ):
     kwargs = {
         "action_count": env.action_space.n,
@@ -537,6 +555,8 @@ def create_agent(
         "height": env.height,
         "width": env.width,
         "device": device,
+        "network_architecture": network_architecture,
+        "residual_layers": residual_layers,
     }
 
     if algorithm == "dqn":
@@ -568,6 +588,35 @@ def create_agent(
     raise ValueError(
         algorithm
     )
+
+
+def checkpoint_network_configuration(
+    algorithm,
+    checkpoint_path,
+    device,
+):
+    if algorithm in TABULAR_ALGORITHMS:
+        return "baseline", DEFAULT_RESIDUAL_LAYERS
+
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location=device,
+    )
+    network_architecture = checkpoint.get(
+        "network_architecture",
+        "baseline",
+    )
+    residual_layers = int(
+        checkpoint.get(
+            "residual_layers",
+            DEFAULT_RESIDUAL_LAYERS,
+        )
+    )
+    validate_network_architecture(
+        network_architecture,
+        residual_layers,
+    )
+    return network_architecture, residual_layers
 
 
 def load_checkpoint(
@@ -723,11 +772,21 @@ def main():
         max_steps=args.max_steps,
     )
 
+    network_architecture, residual_layers = (
+        checkpoint_network_configuration(
+            args.algorithm,
+            args.checkpoint,
+            device,
+        )
+    )
+
     agent = create_agent(
         args.algorithm,
         agent_env,
         device,
         args.seed,
+        network_architecture=network_architecture,
+        residual_layers=residual_layers,
     )
 
     checkpoint = load_checkpoint(

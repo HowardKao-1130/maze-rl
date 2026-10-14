@@ -5,7 +5,10 @@ import torch
 from torch import nn
 from torch.distributions import Categorical
 
-from maze_rl.agents.networks import ActorCriticNetwork
+from maze_rl.agents.networks import (
+    ActorCriticNetwork,
+    DEFAULT_RESIDUAL_LAYERS,
+)
 
 
 class A2CAgent:
@@ -23,6 +26,8 @@ class A2CAgent:
         entropy_coefficient_min: float = 0.03,
         entropy_coefficient_decay: float = 0.9998,
         minibatch_size: int = 64,
+        network_architecture: str = "baseline",
+        residual_layers: int = DEFAULT_RESIDUAL_LAYERS,
     ) -> None:
         self.device = device
         self.gamma = gamma
@@ -48,6 +53,8 @@ class A2CAgent:
             height,
             width,
             action_count,
+            network_architecture=network_architecture,
+            residual_layers=residual_layers,
         ).to(device)
 
         self.optimizer = torch.optim.Adam(

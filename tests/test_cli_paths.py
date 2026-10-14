@@ -21,6 +21,7 @@ from scripts.generate_dataset import (
 from scripts.evaluate import default_checkpoint_path
 from scripts.evaluate import (
     best_trial_checkpoint_path,
+    checkpoint_network_configuration,
     default_rollout_animation_output_dir,
     default_tuning_results_path,
     evaluation_episode_plan,
@@ -58,6 +59,7 @@ from scripts.train import (
     log_tensorboard_training_round,
     neural_hyperparameters_from_args,
     optimization_epochs_for_round,
+    output_algorithm_name,
     parse_args as parse_train_args,
     replay_early_stopping_from_validation_metrics,
     resolve_best_config_path,
@@ -65,6 +67,7 @@ from scripts.train import (
     resume_training_state_allowed_mismatches,
     resolve_dataset_bundle_args,
     remove_existing_training_output,
+    resolve_resume_training_state_path,
     save_training_state,
     should_record_train_greedy_validation,
     should_validate_epoch,
@@ -143,6 +146,70 @@ def test_default_checkpoint_path_uses_algorithm_specific_suffix():
     ) == Path(
         "runs/dnn/training/dqn/checkpoint.pt"
     )
+
+
+def test_default_checkpoint_path_finds_existing_residual_run(
+    monkeypatch,
+    tmp_path,
+):
+    residual_path = (
+        tmp_path
+        / "ppo_residual"
+        / "checkpoint.pt"
+    )
+    residual_path.parent.mkdir()
+    residual_path.touch()
+    monkeypatch.setattr(
+        "scripts.evaluate.DEFAULT_EXPERIMENT_OUTPUT_ROOT",
+        tmp_path,
+    )
+
+    assert default_checkpoint_path("ppo") == residual_path
+
+
+def test_default_checkpoint_path_prefers_existing_baseline_run(
+    monkeypatch,
+    tmp_path,
+):
+    baseline_path = (
+        tmp_path
+        / "ppo"
+        / "checkpoint.pt"
+    )
+    residual_path = (
+        tmp_path
+        / "ppo_residual"
+        / "checkpoint.pt"
+    )
+    baseline_path.parent.mkdir()
+    residual_path.parent.mkdir()
+    baseline_path.touch()
+    residual_path.touch()
+    monkeypatch.setattr(
+        "scripts.evaluate.DEFAULT_EXPERIMENT_OUTPUT_ROOT",
+        tmp_path,
+    )
+
+    assert default_checkpoint_path("ppo") == baseline_path
+
+
+def test_evaluation_reads_network_configuration_from_checkpoint(
+    tmp_path,
+):
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    torch.save(
+        {
+            "network_architecture": "residual",
+            "residual_layers": 4,
+        },
+        checkpoint_path,
+    )
+
+    assert checkpoint_network_configuration(
+        "ppo",
+        checkpoint_path,
+        torch.device("cpu"),
+    ) == ("residual", 4)
 
 
 def test_evaluate_rollout_animation_defaults(monkeypatch):
@@ -523,6 +590,84 @@ def test_training_progress_messages_enabled_by_default(monkeypatch):
     args = parse_train_args()
 
     assert args.no_progress is False
+
+
+def test_training_uses_baseline_network_by_default(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "ppo",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.network_architecture == "baseline"
+    assert args.residual_layers == 2
+
+
+def test_output_algorithm_name_separates_residual_runs():
+    assert output_algorithm_name(
+        "ppo",
+        "baseline",
+    ) == "ppo"
+    assert output_algorithm_name(
+        "ppo",
+        "residual",
+    ) == "ppo_residual"
+
+
+def test_resume_finds_residual_state_without_architecture_cli_option(
+    tmp_path,
+):
+    residual_state_path = (
+        tmp_path
+        / "ppo_residual"
+        / "training_state.pt"
+    )
+    residual_state_path.parent.mkdir()
+    torch.save(
+        {
+            "metadata": {
+                "algorithm": "ppo",
+                "network_architecture": "residual",
+            },
+        },
+        residual_state_path,
+    )
+
+    resolved_path = resolve_resume_training_state_path(
+        output_dir=tmp_path,
+        algorithm="ppo",
+        network_architecture="baseline",
+        network_architecture_was_provided=False,
+    )
+
+    assert resolved_path == residual_state_path
+
+
+def test_training_accepts_residual_network_configuration(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "ppo",
+            "--network-architecture",
+            "residual",
+            "--residual-layers",
+            "4",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.network_architecture == "residual"
+    assert args.residual_layers == 4
 
 
 def test_training_plots_disabled_by_default(monkeypatch):
@@ -1548,6 +1693,47 @@ def test_default_tensorboard_dir_uses_algorithm_run_directory():
     ) == Path(
         "runs/dnn/training/ppo/tensorboard"
     )
+
+
+def test_default_tensorboard_dir_finds_existing_residual_logs(
+    tmp_path,
+):
+    residual_path = (
+        tmp_path
+        / "ppo_residual"
+        / "tensorboard"
+    )
+    residual_path.mkdir(parents=True)
+    (residual_path / "events.out.tfevents.test").touch()
+
+    assert default_tensorboard_dir(
+        "ppo",
+        runs_dir=tmp_path,
+    ) == residual_path
+
+
+def test_default_tensorboard_dir_prefers_baseline_logs(
+    tmp_path,
+):
+    baseline_path = (
+        tmp_path
+        / "ppo"
+        / "tensorboard"
+    )
+    residual_path = (
+        tmp_path
+        / "ppo_residual"
+        / "tensorboard"
+    )
+    baseline_path.mkdir(parents=True)
+    residual_path.mkdir(parents=True)
+    (baseline_path / "events.out.tfevents.baseline").touch()
+    (residual_path / "events.out.tfevents.residual").touch()
+
+    assert default_tensorboard_dir(
+        "ppo",
+        runs_dir=tmp_path,
+    ) == baseline_path
 
 
 def test_latest_event_file_uses_newest_tensorboard_file(tmp_path):

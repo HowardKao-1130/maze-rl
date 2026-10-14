@@ -23,14 +23,25 @@ def default_tensorboard_dir(
     algorithm: str,
     runs_dir: Path | None = None,
 ) -> Path:
-    if runs_dir is None:
-        return (
-            DEFAULT_EXPERIMENT_OUTPUT_ROOT
-            / algorithm
-            / "tensorboard"
-        )
+    root = (
+        DEFAULT_EXPERIMENT_OUTPUT_ROOT
+        if runs_dir is None
+        else runs_dir
+    )
+    baseline_path = root / algorithm / "tensorboard"
+    residual_path = (
+        root
+        / f"{algorithm}_residual"
+        / "tensorboard"
+    )
 
-    return runs_dir / algorithm / "tensorboard"
+    if (
+        not tensorboard_event_files(baseline_path)
+        and tensorboard_event_files(residual_path)
+    ):
+        return residual_path
+
+    return baseline_path
 
 
 def tensorboard_event_files(
@@ -141,7 +152,8 @@ def parse_args():
         default=None,
         help=(
             "TensorBoard directory to inspect. Defaults to "
-            "runs/dnn/training/<algorithm>/tensorboard."
+            "runs/dnn/training/<algorithm>/tensorboard, or the "
+            "existing residual run directory when appropriate."
         ),
     )
 

@@ -102,6 +102,10 @@ event file for one algorithm with:
 python scripts/open_tensorboard.py --logdir runs/dnn/training/dqn/tensorboard
 ```
 
+When `--logdir` is omitted, the launcher uses the baseline algorithm log
+directory when it has events, or an existing `<algorithm>_residual` log
+directory when the baseline has no events.
+
 By default, the launcher shows only the newest
 `events.out.tfevents.<timestamp>.<host>.<pid>.<index>` file in the log
 directory so older event files from previous runs are not overlaid. Pass
@@ -116,6 +120,20 @@ Neural-agent hyperparameters can be passed directly to training, for example:
 ```bash
 python scripts/train.py --algorithm dqn --rollouts-per-task 20 --learning-rate 0.0001 --batch-size 64 --epsilon-decay 0.999
 ```
+
+Neural agents use the original two-convolution encoder by default. A residual
+encoder can be selected explicitly; `--residual-layers` controls the number of
+residual blocks and defaults to 2:
+
+```bash
+python scripts/train.py --algorithm ppo --network-architecture residual --residual-layers 2
+```
+
+The selected architecture is stored in checkpoints and training state, so
+evaluation and resume automatically reconstruct the matching encoder.
+Residual runs append the architecture name to the algorithm output directory;
+for example, PPO residual runs are stored under `ppo_residual` while baseline
+PPO runs remain under `ppo`.
 
 For DNN agents, `--task-batch-size` controls how many distinct tasks are
 sampled for a training round, and `--rollout-group-size` controls how many
@@ -334,7 +352,10 @@ mean to the aggregate plot.
 Evaluation also writes the training plot automatically when it can find
 `metrics.csv` next to the checkpoint. The checkpoint path defaults to
 `runs/tabular/<algorithm>/checkpoint.pkl` for tabular agents and
-`runs/dnn/training/<algorithm>/checkpoint.pt` for neural agents:
+`runs/dnn/training/<algorithm>/checkpoint.pt` for neural agents. If the
+baseline neural checkpoint does not exist but a residual checkpoint does,
+default evaluation uses
+`runs/dnn/training/<algorithm>_residual/checkpoint.pt`:
 
 ```bash
 python scripts/evaluate.py --algorithm q_learning --dataset data/train.npz
