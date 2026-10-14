@@ -215,6 +215,8 @@ def test_evaluate_reports_mean_path_efficiency_over_all_tasks():
         ]
         == 1.0
     )
+    assert summary["weighted_path_success"] == 0.5
+    assert summary["weighted_path_efficiency"] == 0.5
 
 
 def test_choose_greedy_action_returns_bounded_dqn_action():

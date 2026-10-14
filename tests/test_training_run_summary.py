@@ -7,6 +7,7 @@ from scripts.summarize_training_runs import (
     collect_training_run_series,
     file_url_for_path,
     format_saved_file_message,
+    plot_path_length_summary,
     plot_training_run_summary,
     resolve_summary_paths,
     subplot_title,
@@ -470,6 +471,54 @@ def test_plot_training_run_summary_writes_one_image(
         output_path=output_path,
     )
 
+    assert output_path.exists()
+    assert output_path.stat().st_size > 0
+
+
+def test_collect_training_run_series_supports_weighted_metrics(
+    tmp_path,
+):
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "ppo" / "ppo"
+    write_metrics_csv(
+        run_dir / "metrics.csv",
+        [
+            (1, 0.2, True),
+            (1, 0.4, False),
+            (2, 0.8, True),
+        ],
+    )
+
+    series = collect_training_run_series(
+        runs_dir,
+        metric="weighted_path_success",
+    )
+
+    assert series[0].train_points == [
+        (1, 0.5),
+        (2, 1.0),
+    ]
+
+
+def test_plot_path_length_summary_writes_one_image(
+    tmp_path,
+):
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "ppo" / "ppo"
+    write_metrics_csv(
+        run_dir / "metrics.csv",
+        [(1, 0.2, True), (1, 0.0, False)],
+    )
+    series = collect_training_run_series(
+        runs_dir,
+        metric="success_rate",
+    )
+    output_path = tmp_path / "path_lengths.png"
+
+    assert plot_path_length_summary(
+        series,
+        output_path=output_path,
+    ) == 1
     assert output_path.exists()
     assert output_path.stat().st_size > 0
 

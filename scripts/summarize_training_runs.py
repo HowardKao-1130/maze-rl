@@ -23,6 +23,12 @@ from scripts.experiment_naming import (
     DEFAULT_DATA_OUTPUT_ROOT,
     DEFAULT_EXPERIMENT_OUTPUT_ROOT,
 )
+from scripts.summary_metrics import (
+    WEIGHTED_PATH_EFFICIENCY,
+    WEIGHTED_PATH_SUCCESS,
+    aggregate_episode_rows,
+    path_length_metrics,
+)
 
 
 NEURAL_ALGORITHMS = [
@@ -71,6 +77,8 @@ def format_saved_file_message(
 METRIC_LABELS = {
     "mean_path_efficiency": "Path efficiency",
     "success_rate": "Success rate",
+    WEIGHTED_PATH_SUCCESS: "Weighted path success",
+    WEIGHTED_PATH_EFFICIENCY: "Weighted path efficiency",
     "average_episode_return": "Return",
     "steps": "Steps",
 }
@@ -79,6 +87,8 @@ TRAIN_METRIC_ALIASES = {
     "path_efficiency": "path_efficiency",
     "success_rate": "success",
     "success": "success",
+    WEIGHTED_PATH_SUCCESS: WEIGHTED_PATH_SUCCESS,
+    WEIGHTED_PATH_EFFICIENCY: WEIGHTED_PATH_EFFICIENCY,
     "average_episode_return": "episode_return",
     "episode_return": "episode_return",
     "steps": "steps",
@@ -88,6 +98,8 @@ BOUNDED_METRICS = {
     "path_efficiency",
     "success_rate",
     "success",
+    WEIGHTED_PATH_SUCCESS,
+    WEIGHTED_PATH_EFFICIENCY,
 }
 SERIES_STYLES = {
     "validation": {
@@ -464,25 +476,34 @@ def load_training_run_series(
         return None
 
     values_by_epoch: dict[int, list[float]] = {}
-    column_name = metric_column(metric)
 
-    with metrics_path.open(
-        newline="",
-    ) as file:
-        reader = csv.DictReader(file)
+    with metrics_path.open(newline="") as file:
+        rows = list(csv.DictReader(file))
 
-        for row in reader:
-            value = parse_float(
-                row.get(column_name)
-            )
+    if metric in {
+        WEIGHTED_PATH_SUCCESS,
+        WEIGHTED_PATH_EFFICIENCY,
+    }:
+        rows_by_epoch: dict[int, list[dict[str, str]]] = {}
+        for row in rows:
+            epoch_value = parse_float(row.get("epoch"))
+            if epoch_value is None:
+                continue
+            rows_by_epoch.setdefault(int(epoch_value), []).append(row)
 
+        for epoch, epoch_rows in rows_by_epoch.items():
+            summary = aggregate_episode_rows(epoch_rows)
+            if summary is None or metric not in summary:
+                continue
+            values_by_epoch[epoch] = [summary[metric]]
+    else:
+        column_name = metric_column(metric)
+        for row in rows:
+            value = parse_float(row.get(column_name))
             if value is None:
                 continue
 
-            epoch_value = parse_float(
-                row.get("epoch")
-            )
-
+            epoch_value = parse_float(row.get("epoch"))
             if epoch_value is None:
                 continue
 
@@ -1103,30 +1124,171 @@ def plot_training_run_summary(
     plt.close(figure)
 
 
+def plot_path_length_summary(
+    series: list[TrainingRunSeries],
+    *,
+    output_path: Path,
+) -> int:
+    records = []
+
+    for item in series:
+        with item.metrics_path.open(newline="") as file:
+            rows = list(csv.DictReader(file))
+
+        metrics = path_length_metrics(rows)
+        if metrics:
+            records.append((item, metrics))
+
+    if not records:
+        return 0
+
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    figure, axes = plt.subplots(
+        len(records),
+        3,
+        figsize=(18.0, 4.3 * len(records)),
+        squeeze=False,
+    )
+
+    for row_index, (item, metrics) in enumerate(records):
+        lengths = list(metrics)
+        counts = [metrics[length]["episodes"] for length in lengths]
+        success_rates = [
+            metrics[length].get("success_rate", 0.0)
+            for length in lengths
+        ]
+        efficiencies = [
+            metrics[length].get("mean_path_efficiency", 0.0)
+            for length in lengths
+        ]
+
+        distribution_axis, success_axis, efficiency_axis = axes[row_index]
+        distribution_axis.bar(lengths, counts, color="#7f8c8d")
+        distribution_axis.set_title(
+            f"{item.label}: optimal path length distribution"
+        )
+        distribution_axis.set_xlabel("Optimal path length")
+        distribution_axis.set_ylabel("Episodes")
+
+        success_axis.plot(
+            lengths,
+            success_rates,
+            marker="o",
+            color="#1f77b4",
+        )
+        success_axis.set_title(f"{item.label}: success by path length")
+        success_axis.set_xlabel("Optimal path length")
+        success_axis.set_ylabel("Mean success rate")
+        success_axis.set_ylim(0.0, 1.0)
+
+        efficiency_axis.plot(
+            lengths,
+            efficiencies,
+            marker="o",
+            color="#d62728",
+        )
+        efficiency_axis.set_title(
+            f"{item.label}: efficiency by path length"
+        )
+        efficiency_axis.set_xlabel("Optimal path length")
+        efficiency_axis.set_ylabel("Mean path efficiency")
+        efficiency_axis.set_ylim(0.0, 1.0)
+
+        for axis in (
+            distribution_axis,
+            success_axis,
+            efficiency_axis,
+        ):
+            axis.grid(True, alpha=0.22, linewidth=0.8)
+
+    figure.suptitle(
+        "Optimal path length diagnostics from training rollouts",
+        fontsize=16,
+        y=0.995,
+    )
+    figure.tight_layout(rect=(0, 0, 1, 0.98))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(
+        output_path,
+        dpi=160,
+        facecolor="white",
+        edgecolor="white",
+        transparent=False,
+    )
+    rewrite_png_without_alpha(output_path)
+    plt.close(figure)
+    return len(records)
+
+
 def main() -> None:
     args = parse_args()
-    series = collect_training_run_series(
-        args.runs_dir,
-        metric=args.metric,
-    )
-    output_path = (
-        args.output_dir
-        / f"{canonical_metric(args.metric)}_training_history_summary.png"
-    )
+    summary_metrics = []
+    for metric in (
+        args.metric,
+        "success_rate",
+        WEIGHTED_PATH_SUCCESS,
+        WEIGHTED_PATH_EFFICIENCY,
+    ):
+        if metric not in summary_metrics:
+            summary_metrics.append(metric)
 
-    plot_training_run_summary(
-        series,
-        metric=args.metric,
-        output_path=output_path,
-        rolling_window=args.rolling_window,
-    )
-
-    print(
-        format_saved_file_message(
-            f"Saved {len(series)} training run curve(s) to ",
-            output_path,
+    for metric in summary_metrics:
+        series = collect_training_run_series(
+            args.runs_dir,
+            metric=metric,
         )
+        if not series:
+            print(
+                f"Skipped {metric} summary; no matching metrics found."
+            )
+            continue
+
+        output_path = (
+            args.output_dir
+            / f"{canonical_metric(metric)}_training_history_summary.png"
+        )
+        plot_training_run_summary(
+            series,
+            metric=metric,
+            output_path=output_path,
+            rolling_window=args.rolling_window,
+        )
+        print(
+            format_saved_file_message(
+                f"Saved {len(series)} training run curve(s) to ",
+                output_path,
+            )
+        )
+
+    path_series = collect_training_run_series(
+        args.runs_dir,
+        metric="success_rate",
     )
+    path_length_output_path = (
+        args.output_dir / "optimal_path_length_summary.png"
+    )
+    path_length_count = plot_path_length_summary(
+        path_series,
+        output_path=path_length_output_path,
+    )
+    if path_length_count:
+        print(
+            format_saved_file_message(
+                "Saved optimal path length diagnostics to ",
+                path_length_output_path,
+                f" ({path_length_count} run(s))",
+            )
+        )
+    else:
+        print(
+            "Skipped optimal path length diagnostics; no raw episode "
+            "metrics were found."
+        )
 
 
 if __name__ == "__main__":
