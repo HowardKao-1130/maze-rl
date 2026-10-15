@@ -7,6 +7,7 @@ from maze_rl.maze.stratification import (
     bucket_quotas,
     directed_weighted_jaccard,
     generate_stratified_tasks_for_layouts,
+    threshold_schedule,
 )
 from maze_rl.maze.pathfinding import shortest_distances
 from scripts.experiment_naming import experiment_dataset_name
@@ -62,6 +63,10 @@ def test_bucket_quotas_use_configured_budget_and_sum_to_total():
     ) == 7
 
 
+def test_threshold_fallback_does_not_relax_the_configured_threshold():
+    assert threshold_schedule(0.75) == (0.75,)
+
+
 def test_stratified_dataset_name_includes_budgets_and_threshold():
     name = experiment_dataset_name(
         "experiment",
@@ -91,6 +96,9 @@ def test_cli_defaults_configure_stratification(monkeypatch):
     args = parse_args()
 
     assert args.dedupe_threshold == 0.75
+    assert args.min_tasks_per_maze == 3
+    assert args.max_tasks_per_maze == 7
+    assert args.local_search_budget == 2_000
     assert args.bucket_budgets == {
         "short": 0.2,
         "medium": 0.4,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+import time
 from typing import Iterable, Mapping
 
 import numpy as np
@@ -11,6 +12,10 @@ import numpy as np
 from maze_rl.maze.pathfinding import (
     Position,
     traversable_positions,
+)
+from maze_rl.maze.generator import (
+    generate_valid_maze,
+    generate_valid_tasks_for_maze,
 )
 
 
@@ -206,6 +211,71 @@ class QuotaAllocationError(RuntimeError):
         )
 
 
+@dataclass
+class SearchResult:
+    selected: list[TaskCandidate]
+    completed: bool
+    candidate_attempts: int
+    backtracking_events: int
+    budget_exhausted: bool
+
+
+def _empty_assignment() -> dict[str, int]:
+    return {bucket: 0 for bucket in BUCKETS}
+
+
+def _assignment_for_tasks(
+    tasks: Iterable[TaskCandidate],
+) -> dict[str, int]:
+    assignment = _empty_assignment()
+    for task in tasks:
+        assignment[task.bucket] += 1
+    return assignment
+
+
+def generate_layouts(
+    seeds: np.ndarray,
+    height: int,
+    width: int,
+    wall_probability: float,
+    min_path_length: int,
+    minimum_eligible_tasks: int = 1,
+) -> np.ndarray:
+    """Generate layouts independently of stratified task selection."""
+    layouts = np.empty(
+        (len(seeds), height, width),
+        dtype=np.uint8,
+    )
+
+    for layout_index, seed in enumerate(seeds):
+        rng = np.random.default_rng(int(seed))
+        for _ in range(1000):
+            maze, _, _ = generate_valid_maze(
+                height=height,
+                width=width,
+                wall_probability=wall_probability,
+                rng=rng,
+                min_path_length=min_path_length,
+            )
+            try:
+                generate_valid_tasks_for_maze(
+                    maze=maze,
+                    task_count=minimum_eligible_tasks,
+                    rng=rng,
+                    min_path_length=min_path_length,
+                )
+            except RuntimeError:
+                continue
+            layouts[layout_index] = maze
+            break
+        else:
+            raise RuntimeError(
+                "Could not generate a layout with enough eligible tasks."
+            )
+
+    return layouts
+
+
 def build_candidate_index(
     maze: np.ndarray,
     *,
@@ -357,13 +427,43 @@ def allocate_bucket_slots(
                 shortfalls[bucket] += 1
                 continue
 
+            later_buckets = ALLOCATION_ORDER[
+                ALLOCATION_ORDER.index(bucket) + 1 :
+            ]
+
+            def allocation_score(candidate_index: int) -> tuple[float, int, float]:
+                current_capacity = (
+                    candidate_counts[candidate_index][bucket]
+                    - assignments[candidate_index][bucket]
+                )
+                future_capacity = sum(
+                    candidate_counts[candidate_index][future_bucket]
+                    - assignments[candidate_index][future_bucket]
+                    for future_bucket in later_buckets
+                )
+                future_demand = sum(
+                    int(quotas[future_bucket])
+                    - sum(
+                        assignment[future_bucket]
+                        for assignment in assignments
+                    )
+                    for future_bucket in later_buckets
+                )
+                reserve_pressure = min(
+                    future_capacity - future_demand,
+                    0,
+                )
+                return (
+                    reserve_pressure,
+                    current_capacity,
+                    tie_breakers[
+                        candidate_index
+                    ][BUCKETS.index(bucket)],
+                )
+
             layout_index = max(
                 eligible,
-                key=lambda candidate_index: (
-                    candidate_counts[candidate_index][bucket]
-                    - assignments[candidate_index][bucket],
-                    tie_breakers[candidate_index][BUCKETS.index(bucket)],
-                ),
+                key=allocation_score,
             )
             assignments[layout_index][bucket] += 1
 
@@ -389,11 +489,11 @@ def _select_tasks_for_maze(
     *,
     threshold: float,
     rng: np.random.Generator,
-    max_search_nodes: int = 10_000,
-) -> list[TaskCandidate] | None:
+    search_budget: int = 2_000,
+) -> SearchResult:
     candidates_by_bucket = index.candidates_by_bucket()
     choices: list[list[TaskCandidate]] = []
-    for bucket in ALLOCATION_ORDER[::-1]:
+    for bucket in ALLOCATION_ORDER:
         bucket_choices = list(candidates_by_bucket[bucket])
         rng.shuffle(bucket_choices)
         choices.extend(
@@ -401,18 +501,29 @@ def _select_tasks_for_maze(
         )
 
     selected: list[TaskCandidate] = []
+    best_selected: list[TaskCandidate] = []
     selected_keys: set[TaskKey] = set()
-    search_nodes = 0
+    candidate_attempts = 0
+    backtracking_events = 0
+    budget_exhausted = False
 
     def visit(slot_index: int) -> bool:
-        nonlocal search_nodes
-        search_nodes += 1
-        if search_nodes > max_search_nodes:
-            return False
+        nonlocal candidate_attempts
+        nonlocal backtracking_events
+        nonlocal best_selected
+        nonlocal budget_exhausted
         if slot_index == len(choices):
             return True
 
         for candidate in choices[slot_index]:
+            candidate_attempts += 1
+            if candidate_attempts > search_budget:
+                budget_exhausted = True
+                return False
+
+            if len(selected) > len(best_selected):
+                best_selected = list(selected)
+
             if candidate.key in selected_keys:
                 continue
             if any(
@@ -427,21 +538,205 @@ def _select_tasks_for_maze(
                 return True
             selected.pop()
             selected_keys.remove(candidate.key)
+            backtracking_events += 1
+
+            if budget_exhausted:
+                return False
+
         return False
 
-    return selected if visit(0) else None
+    completed = visit(0)
+    if len(selected) > len(best_selected):
+        best_selected = list(selected)
+
+    return SearchResult(
+        selected=list(selected if completed else best_selected),
+        completed=completed,
+        candidate_attempts=candidate_attempts,
+        backtracking_events=backtracking_events,
+        budget_exhausted=budget_exhausted,
+    )
 
 
 def threshold_schedule(threshold: float) -> tuple[float, ...]:
     if not 0 < threshold <= 1:
         raise ValueError("The deduplication threshold must be in (0, 1].")
-    return tuple(
-        dict.fromkeys(
-            value
-            for value in (threshold, 0.90, 0.95, 1.00)
-            if value >= threshold
+    return (threshold,)
+
+
+def _constrained_layout_order(
+    indexes: list[MazeCandidateIndex],
+    assignments: list[Mapping[str, int]],
+    rng: np.random.Generator,
+) -> list[int]:
+    tie_breakers = rng.random(len(indexes))
+    order_keys = []
+    for layout_index, (index, assignment) in enumerate(
+        zip(indexes, assignments)
+    ):
+        candidate_counts = index.candidates_by_bucket()
+        required = sum(assignment.values())
+        available = sum(
+            len(candidate_counts[bucket])
+            for bucket in BUCKETS
+            if assignment[bucket]
         )
-    )
+        pressure = available / max(required, 1)
+        order_keys.append(
+            (
+                pressure,
+                available,
+                tie_breakers[layout_index],
+                layout_index,
+            )
+        )
+    return [
+        key[-1]
+        for key in sorted(order_keys)
+    ]
+
+
+def _select_all_layouts(
+    indexes: list[MazeCandidateIndex],
+    assignments: list[dict[str, int]],
+    *,
+    threshold: float,
+    seeds: np.ndarray,
+    random_seed: int,
+    local_search_budget: int,
+) -> tuple[list[SearchResult], dict[str, object]]:
+    results: list[SearchResult | None] = [None] * len(indexes)
+    order_rng = np.random.default_rng(random_seed)
+    order = _constrained_layout_order(indexes, assignments, order_rng)
+    for layout_index in order:
+        selection_rng = np.random.default_rng(
+            np.random.SeedSequence(
+                [random_seed, layout_index, int(seeds[layout_index])]
+            )
+        )
+        results[layout_index] = _select_tasks_for_maze(
+            indexes[layout_index],
+            assignments[layout_index],
+            threshold=threshold,
+            rng=selection_rng,
+            search_budget=local_search_budget,
+        )
+
+    finalized_results = [result for result in results if result is not None]
+    return finalized_results, {
+        "selection_order": order,
+        "candidate_attempts": [
+            result.candidate_attempts
+            for result in finalized_results
+        ],
+        "backtracking_events": [
+            result.backtracking_events
+            for result in finalized_results
+        ],
+        "budget_exhausted": [
+            index
+            for index, result in enumerate(finalized_results)
+            if result.budget_exhausted
+        ],
+        "proven_infeasible": [
+            index
+            for index, result in enumerate(finalized_results)
+            if not result.completed and not result.budget_exhausted
+        ],
+        "completed": [
+            result.completed
+            for result in finalized_results
+        ],
+        "successful_completions": sum(
+            result.completed
+            for result in finalized_results
+        ),
+    }
+
+
+def _repair_unresolved_allocations(
+    indexes: list[MazeCandidateIndex],
+    assignments: list[dict[str, int]],
+    selected_by_layout: list[list[TaskCandidate]],
+    unresolved: list[tuple[int, str]],
+    *,
+    threshold: float,
+    seeds: np.ndarray,
+    random_seed: int,
+    min_tasks_per_maze: int,
+    max_tasks_per_maze: int,
+    local_search_budget: int,
+    repair_budget: int,
+) -> tuple[list[tuple[int, str]], dict[str, object]]:
+    repair_attempts = 0
+    successful_reallocations = 0
+    recipient_checks = 0
+    repair_candidate_attempts = 0
+    repair_backtracking_events = 0
+
+    for source_index, bucket in list(unresolved):
+        if repair_attempts >= repair_budget:
+            break
+
+        recipients = []
+        for layout_index, (index, assignment) in enumerate(
+            zip(indexes, assignments)
+        ):
+            if layout_index == source_index:
+                continue
+            current_total = sum(assignment.values())
+            capacity = (
+                len(index.candidates_by_bucket()[bucket])
+                - assignment[bucket]
+            )
+            if current_total >= max_tasks_per_maze or capacity <= 0:
+                continue
+            recipients.append((capacity, layout_index))
+
+        recipients.sort(reverse=True)
+        moved = False
+        for _, recipient_index in recipients:
+            if repair_attempts >= repair_budget:
+                break
+            repair_attempts += 1
+            recipient_checks += 1
+            tentative = dict(assignments[recipient_index])
+            tentative[bucket] += 1
+            selection_rng = np.random.default_rng(
+                np.random.SeedSequence(
+                    [random_seed, 10_000 + repair_attempts, recipient_index, int(seeds[recipient_index])]
+                )
+            )
+            result = _select_tasks_for_maze(
+                indexes[recipient_index],
+                tentative,
+                threshold=threshold,
+                rng=selection_rng,
+                search_budget=local_search_budget,
+            )
+            if not result.completed:
+                repair_candidate_attempts += result.candidate_attempts
+                repair_backtracking_events += result.backtracking_events
+                continue
+            assignments[recipient_index] = tentative
+            selected_by_layout[recipient_index] = result.selected
+            successful_reallocations += 1
+            repair_candidate_attempts += result.candidate_attempts
+            repair_backtracking_events += result.backtracking_events
+            moved = True
+            break
+
+        if moved:
+            unresolved.remove((source_index, bucket))
+
+    return unresolved, {
+        "repair_attempts": repair_attempts,
+        "recipient_checks": recipient_checks,
+        "successful_reallocations": successful_reallocations,
+        "candidate_attempts": repair_candidate_attempts,
+        "backtracking_events": repair_backtracking_events,
+        "repair_budget": repair_budget,
+    }
 
 
 def generate_stratified_tasks_for_layouts(
@@ -455,10 +750,24 @@ def generate_stratified_tasks_for_layouts(
     random_seed: int = 0,
     excluded_tasks_by_layout: dict[int, set[TaskKey]] | None = None,
     allocation_attempts: int = 8,
+    min_tasks_per_maze: int = 3,
+    max_tasks_per_maze: int = 7,
+    local_search_budget: int = 2_000,
+    global_repair_budget: int | None = None,
+    difficulty_boundaries: DifficultyBoundaries | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, object]]:
     """Select reproducible, difficulty-balanced tasks for each layout."""
     if tasks_per_maze <= 0:
         raise ValueError("tasks_per_maze must be positive.")
+    if not 0 < min_tasks_per_maze <= tasks_per_maze <= max_tasks_per_maze:
+        raise ValueError(
+            "Expected min_tasks_per_maze <= tasks_per_maze <= "
+            "max_tasks_per_maze."
+        )
+    if len(layouts) != len(seeds):
+        raise ValueError("layouts and seeds must have the same length.")
+    if local_search_budget <= 0:
+        raise ValueError("local_search_budget must be positive.")
     budgets = validate_bucket_budgets(
         bucket_budgets or DEFAULT_BUCKET_BUDGETS,
     )
@@ -474,7 +783,7 @@ def generate_stratified_tasks_for_layouts(
     insufficient = [
         layout_index
         for layout_index, index in enumerate(indexes)
-        if len(index.candidates) < tasks_per_maze
+        if len(index.candidates) < min_tasks_per_maze
     ]
     if insufficient:
         raise RuntimeError(
@@ -482,7 +791,10 @@ def generate_stratified_tasks_for_layouts(
             + ", ".join(str(index) for index in insufficient[:10])
         )
 
-    boundaries = derive_difficulty_boundaries(indexes, budgets)
+    boundaries = difficulty_boundaries or derive_difficulty_boundaries(
+        indexes,
+        budgets,
+    )
     apply_difficulty_buckets(indexes, boundaries)
     candidate_counts_by_layout = [
         {
@@ -499,80 +811,171 @@ def generate_stratified_tasks_for_layouts(
         for bucket in BUCKETS
     }
     quotas = bucket_quotas(len(layouts) * tasks_per_maze, budgets)
+    repair_budget = (
+        5 * len(layouts)
+        if global_repair_budget is None
+        else global_repair_budget
+    )
+    started_at = time.perf_counter()
     last_error: Exception | None = None
+    repair_attempts_used = 0
+    repair_totals = {
+        "repair_attempts": 0,
+        "recipient_checks": 0,
+        "successful_reallocations": 0,
+        "candidate_attempts": 0,
+        "backtracking_events": 0,
+    }
 
-    for threshold in threshold_schedule(dedupe_threshold):
-        for attempt in range(allocation_attempts):
-            allocation_rng = np.random.default_rng(
-                np.random.SeedSequence(
-                    [random_seed, int(round(threshold * 1000)), attempt]
-                )
+    for allocation_attempt in range(allocation_attempts):
+        allocation_rng = np.random.default_rng(
+            np.random.SeedSequence([random_seed, allocation_attempt])
+        )
+        try:
+            assignments = allocate_bucket_slots(
+                indexes,
+                tasks_per_maze=tasks_per_maze,
+                quotas=quotas,
+                rng=allocation_rng,
             )
-            try:
-                assignments = allocate_bucket_slots(
-                    indexes,
-                    tasks_per_maze=tasks_per_maze,
-                    quotas=quotas,
-                    rng=allocation_rng,
-                )
-            except QuotaAllocationError as error:
-                last_error = error
-                continue
+        except QuotaAllocationError as error:
+            last_error = error
+            continue
 
-            selected_by_layout: list[list[TaskCandidate]] = []
-            failed = False
-            for layout_index, (index, assignment, seed) in enumerate(
-                zip(indexes, assignments, seeds)
-            ):
-                selection_rng = np.random.default_rng(
-                    np.random.SeedSequence(
-                        [random_seed, attempt, layout_index, int(seed)]
+        results, search_metadata = _select_all_layouts(
+            indexes,
+            assignments,
+            threshold=dedupe_threshold,
+            seeds=seeds,
+            random_seed=random_seed + allocation_attempt,
+            local_search_budget=local_search_budget,
+        )
+        selected_by_layout = [result.selected for result in results]
+        unresolved: list[tuple[int, str]] = []
+        for layout_index, (assignment, result) in enumerate(
+            zip(assignments, results)
+        ):
+            if result.completed:
+                continue
+            selected_assignment = _assignment_for_tasks(result.selected)
+            for bucket in BUCKETS:
+                unresolved.extend(
+                    (layout_index, bucket)
+                    for _ in range(
+                        max(
+                            assignment[bucket]
+                            - selected_assignment[bucket],
+                            0,
+                        )
                     )
                 )
-                selected = _select_tasks_for_maze(
-                    index,
-                    assignment,
-                    threshold=threshold,
-                    rng=selection_rng,
-                )
-                if selected is None:
-                    failed = True
-                    break
-                selected_by_layout.append(selected)
+            assignments[layout_index] = selected_assignment
 
-            if failed:
-                continue
-
-            task_count = len(layouts) * tasks_per_maze
-            layout_indices = np.empty(task_count, dtype=np.int64)
-            starts = np.empty((task_count, 2), dtype=np.int64)
-            goals = np.empty((task_count, 2), dtype=np.int64)
-            bucket_counts = {bucket: 0 for bucket in BUCKETS}
-            output_index = 0
-
-            for layout_index, selected in enumerate(selected_by_layout):
-                for candidate in selected:
-                    layout_indices[output_index] = layout_index
-                    starts[output_index] = candidate.start
-                    goals[output_index] = candidate.goal
-                    bucket_counts[candidate.bucket] += 1
-                    output_index += 1
-
-            metadata: dict[str, object] = {
-                "dedupe_threshold": threshold,
-                "bucket_budgets": budgets,
-                "bucket_quotas": quotas,
-                "bucket_counts": bucket_counts,
-                "candidate_counts": candidate_counts,
-                "candidate_counts_by_layout": candidate_counts_by_layout,
-                "difficulty_boundaries": boundaries.as_dict(),
-                "candidate_distribution": (
-                    "all eligible ordered pairs across training layouts"
-                ),
+        if unresolved and repair_attempts_used < repair_budget:
+            unresolved_before_repair = list(unresolved)
+            remaining_repair_budget = repair_budget - repair_attempts_used
+            unresolved, repair_metadata = _repair_unresolved_allocations(
+                indexes,
+                assignments,
+                selected_by_layout,
+                unresolved,
+                threshold=dedupe_threshold,
+                seeds=seeds,
+                random_seed=random_seed + allocation_attempt,
+                min_tasks_per_maze=min_tasks_per_maze,
+                max_tasks_per_maze=max_tasks_per_maze,
+                local_search_budget=local_search_budget,
+                repair_budget=remaining_repair_budget,
+            )
+            repair_attempts_used += repair_metadata["repair_attempts"]
+            for key in repair_totals:
+                repair_totals[key] += repair_metadata[key]
+        else:
+            unresolved_before_repair = []
+            repair_metadata = {
+                "repair_attempts": 0,
+                "recipient_checks": 0,
+                "successful_reallocations": 0,
+                "repair_budget": repair_budget,
             }
-            return layout_indices, starts, goals, metadata
+
+        contributions = [
+            len(selected)
+            for selected in selected_by_layout
+        ]
+        if unresolved or any(
+            contribution < min_tasks_per_maze
+            or contribution > max_tasks_per_maze
+            for contribution in contributions
+        ):
+            last_error = RuntimeError(
+                "Unresolved stratified task allocations."
+            )
+            continue
+
+        bucket_counts = {
+            bucket: sum(
+                task.bucket == bucket
+                for selected in selected_by_layout
+                for task in selected
+            )
+            for bucket in BUCKETS
+        }
+        if bucket_counts != quotas:
+            last_error = RuntimeError(
+                f"Bucket quotas changed during repair: {bucket_counts}"
+            )
+            continue
+
+        task_count = sum(contributions)
+        layout_indices = np.empty(task_count, dtype=np.int64)
+        starts = np.empty((task_count, 2), dtype=np.int64)
+        goals = np.empty((task_count, 2), dtype=np.int64)
+        output_index = 0
+        for layout_index, selected in enumerate(selected_by_layout):
+            for candidate in selected:
+                layout_indices[output_index] = layout_index
+                starts[output_index] = candidate.start
+                goals[output_index] = candidate.goal
+                output_index += 1
+
+        metadata: dict[str, object] = {
+            "dedupe_threshold": dedupe_threshold,
+            "bucket_budgets": budgets,
+            "bucket_quotas": quotas,
+            "bucket_counts": bucket_counts,
+            "candidate_counts": candidate_counts,
+            "candidate_counts_by_layout": candidate_counts_by_layout,
+            "difficulty_boundaries": boundaries.as_dict(),
+            "candidate_distribution": (
+                "all eligible ordered pairs across training layouts"
+            ),
+            "tasks_per_maze_target": tasks_per_maze,
+            "min_tasks_per_maze": min_tasks_per_maze,
+            "max_tasks_per_maze": max_tasks_per_maze,
+            "contributions_by_layout": contributions,
+            "allocation_attempts": allocation_attempt + 1,
+            "local_search_budget": local_search_budget,
+            "global_repair_budget": repair_budget,
+            "search": search_metadata,
+            "repair": {
+                **repair_totals,
+                "repair_budget": repair_budget,
+            },
+            "unresolved_before_repair_by_bucket": {
+                bucket: sum(
+                    unresolved_bucket == bucket
+                    for _, unresolved_bucket in unresolved_before_repair
+                )
+                for bucket in BUCKETS
+            },
+            "unresolved_allocations": unresolved,
+            "generation_runtime_seconds": time.perf_counter() - started_at,
+        }
+        return layout_indices, starts, goals, metadata
 
     raise RuntimeError(
-        "Could not select stratified tasks after retries. "
+        "Could not select stratified tasks after retries without "
+        "relaxing constraints. "
         f"Requested quotas: {quotas}. Last error: {last_error}"
     )

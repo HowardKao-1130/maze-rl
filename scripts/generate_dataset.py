@@ -19,6 +19,8 @@ from maze_rl.maze.dataset import (
 )
 from maze_rl.maze.stratification import (
     DEFAULT_BUCKET_BUDGETS,
+    DifficultyBoundaries,
+    generate_layouts,
     generate_stratified_tasks_for_layouts,
 )
 from scripts.experiment_naming import (
@@ -152,6 +154,20 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--min-tasks-per-maze",
+        type=int,
+        default=3,
+        help="Minimum tasks a layout may contribute after repair.",
+    )
+
+    parser.add_argument(
+        "--max-tasks-per-maze",
+        type=int,
+        default=7,
+        help="Maximum tasks a layout may contribute after repair.",
+    )
+
+    parser.add_argument(
         "--stratify",
         action="store_true",
         help=(
@@ -188,10 +204,40 @@ def parse_args() -> argparse.Namespace:
         help="Fraction of stratified tasks allocated to long paths.",
     )
 
+    parser.add_argument(
+        "--allocation-attempts",
+        type=int,
+        default=8,
+        help="Number of seeded global allocation attempts.",
+    )
+
+    parser.add_argument(
+        "--local-search-budget",
+        type=int,
+        default=2_000,
+        help="Candidate-extension attempts allowed per layout.",
+    )
+
+    parser.add_argument(
+        "--global-repair-budget",
+        type=int,
+        default=None,
+        help="Global repair attempts; defaults to five per layout.",
+    )
+
     args = parser.parse_args()
 
     if not 0 < args.dedupe_threshold <= 1:
         parser.error("--dedupe-threshold must be in (0, 1].")
+    if args.stratify and not 0 < args.min_tasks_per_maze <= args.tasks_per_maze <= args.max_tasks_per_maze:
+        parser.error(
+            "Require --min-tasks-per-maze <= --tasks-per-maze <= "
+            "--max-tasks-per-maze."
+        )
+    if args.allocation_attempts <= 0 or args.local_search_budget <= 0:
+        parser.error("Allocation and search budgets must be positive.")
+    if args.global_repair_budget is not None and args.global_repair_budget <= 0:
+        parser.error("--global-repair-budget must be positive.")
     args.bucket_budgets = {
         "short": args.short_budget,
         "medium": args.medium_budget,
@@ -222,6 +268,9 @@ def main() -> None:
     args = parse_args()
     train_path = args.output_dir / "train.npz"
     validation_path = args.output_dir / "validation.npz"
+    validation_stratified_path = (
+        args.output_dir / "validation_stratified.npz"
+    )
     same_layout_path = (
         args.output_dir / "same_layout_new_goals.npz"
     )
@@ -238,6 +287,11 @@ def main() -> None:
     print(f"Writing datasets to {args.output_dir}")
     print(f"  train:        {train_path}")
     print(f"  validation:   {validation_path}")
+    if args.stratify:
+        print(
+            "  val-stratified: "
+            f"{validation_stratified_path}"
+        )
     print(f"  same-layout:  {same_layout_path}")
     print(f"  test:         {test_path}")
     print(f"  metadata:     {metadata_path}")
@@ -254,19 +308,32 @@ def main() -> None:
     )
 
     print("Generating training mazes...")
-    (
-        train_layouts,
-        train_layout_indices,
-        train_starts,
-        train_goals,
-    ) = generate_mazes(
-        seeds=train_seeds,
-        height=args.height,
-        width=args.width,
-        wall_probability=args.wall_probability,
-        min_path_length=args.min_path_length,
-        tasks_per_maze=args.tasks_per_maze,
-    )
+    if args.stratify:
+        train_layouts = generate_layouts(
+            seeds=train_seeds,
+            height=args.height,
+            width=args.width,
+            wall_probability=args.wall_probability,
+            min_path_length=args.min_path_length,
+            minimum_eligible_tasks=args.min_tasks_per_maze,
+        )
+        train_layout_indices = None
+        train_starts = None
+        train_goals = None
+    else:
+        (
+            train_layouts,
+            train_layout_indices,
+            train_starts,
+            train_goals,
+        ) = generate_mazes(
+            seeds=train_seeds,
+            height=args.height,
+            width=args.width,
+            wall_probability=args.wall_probability,
+            min_path_length=args.min_path_length,
+            tasks_per_maze=args.tasks_per_maze,
+        )
 
     stratification_metadata = None
     if args.stratify:
@@ -284,6 +351,11 @@ def main() -> None:
             dedupe_threshold=args.dedupe_threshold,
             bucket_budgets=args.bucket_budgets,
             random_seed=args.seed,
+            allocation_attempts=args.allocation_attempts,
+            min_tasks_per_maze=args.min_tasks_per_maze,
+            max_tasks_per_maze=args.max_tasks_per_maze,
+            local_search_budget=args.local_search_budget,
+            global_repair_budget=args.global_repair_budget,
         )
 
     print("Generating validation mazes...")
@@ -300,6 +372,36 @@ def main() -> None:
         min_path_length=args.min_path_length,
         tasks_per_maze=args.tasks_per_maze,
     )
+
+    validation_stratified_metadata = None
+    validation_stratified_indices = None
+    validation_stratified_starts = None
+    validation_stratified_goals = None
+    if args.stratify:
+        print("Selecting stratified validation tasks...")
+        train_boundaries = DifficultyBoundaries(
+            **stratification_metadata["difficulty_boundaries"]
+        )
+        (
+            validation_stratified_indices,
+            validation_stratified_starts,
+            validation_stratified_goals,
+            validation_stratified_metadata,
+        ) = generate_stratified_tasks_for_layouts(
+            validation_layouts,
+            validation_seeds,
+            tasks_per_maze=args.tasks_per_maze,
+            min_path_length=args.min_path_length,
+            dedupe_threshold=args.dedupe_threshold,
+            bucket_budgets=args.bucket_budgets,
+            random_seed=args.seed + 1,
+            allocation_attempts=args.allocation_attempts,
+            min_tasks_per_maze=args.min_tasks_per_maze,
+            max_tasks_per_maze=args.max_tasks_per_maze,
+            local_search_budget=args.local_search_budget,
+            global_repair_budget=args.global_repair_budget,
+            difficulty_boundaries=train_boundaries,
+        )
 
     print("Generating same-layout held-out tasks...")
     same_layout_maze_count = args.validation_mazes
@@ -358,6 +460,16 @@ def main() -> None:
         validation_goals,
     )
 
+    if args.stratify:
+        save_dataset(
+            validation_stratified_path,
+            validation_layouts,
+            validation_seeds,
+            validation_stratified_indices,
+            validation_stratified_starts,
+            validation_stratified_goals,
+        )
+
     save_dataset(
         same_layout_path,
         same_layout_layouts,
@@ -387,6 +499,10 @@ def main() -> None:
         "validation_mazes": args.validation_mazes,
         "test_mazes": args.test_mazes,
         "tasks_per_maze": args.tasks_per_maze,
+        "min_tasks_per_maze": args.min_tasks_per_maze,
+        "max_tasks_per_maze": args.max_tasks_per_maze,
+        "local_search_budget": args.local_search_budget,
+        "global_repair_budget": args.global_repair_budget,
         "stratify": args.stratify,
         "dedupe_threshold": args.dedupe_threshold,
         "bucket_budgets": args.bucket_budgets,
@@ -397,7 +513,10 @@ def main() -> None:
         },
     }
     if stratification_metadata is not None:
-        metadata["stratification"] = stratification_metadata
+        metadata["stratification"] = {
+            "train": stratification_metadata,
+            "validation_stratified": validation_stratified_metadata,
+        }
 
     with metadata_path.open("w") as file:
         json.dump(
@@ -412,6 +531,11 @@ def main() -> None:
     print("Stored files:")
     print(f"  train:        {train_path}")
     print(f"  validation:   {validation_path}")
+    if args.stratify:
+        print(
+            "  val-stratified: "
+            f"{validation_stratified_path}"
+        )
     print(f"  same-layout:  {same_layout_path}")
     print(f"  test:         {test_path}")
     print(f"  metadata:     {metadata_path}")

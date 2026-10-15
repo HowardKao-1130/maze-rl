@@ -118,6 +118,9 @@ def infer_dataset_label(
     if filename == "same_layout_new_goals.npz":
         return "val_with_same_layout"
 
+    if filename == "validation_stratified.npz":
+        return "val-stratified"
+
     return Path(dataset_path).stem
 
 

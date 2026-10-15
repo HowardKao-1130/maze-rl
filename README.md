@@ -20,10 +20,30 @@ configurable with `--short-budget`, `--medium-budget`, and `--long-budget`,
 which default to `0.20`, `0.40`, and `0.40`. Stratified dataset names record
 these settings, for example `stratified_s20_m40_l40_dedupe075`.
 
+Stratified generation also writes `validation_stratified.npz`, using the
+training-derived absolute difficulty boundaries. Training normally targets
+`--tasks-per-maze` tasks per layout; unresolved selections may transfer tasks
+between layouts within the configurable `--min-tasks-per-maze` and
+`--max-tasks-per-maze` bounds. Search diagnostics are recorded in
+`metadata.json`.
+
+Print split, bucket, contribution, and optimal-path summaries with:
+
+```bash
+python scripts/summarize_dataset.py \
+  --dataset data/datasets/<dataset-name> \
+  --output-json data/datasets/<dataset-name>/dataset_summary.json
+```
+
+When training against a stratified dataset bundle, periodic validation can
+report `train`, `train-greedy`, `val`, `same-val`, and `val-stratified`.
+
 - `data/train.npz`: seen tasks for training and memorization evaluation.
 - `data/same_layout_new_goals.npz`: validation-sized held-out start/goal tasks
   on training layouts.
 - `data/validation.npz`: held-out validation layouts.
+- `data/validation_stratified.npz`: the same validation layouts with
+  training-derived stratified task selection (when `--stratify` is enabled).
 - `data/test.npz`: held-out test layouts.
 
 ## Training Metrics
