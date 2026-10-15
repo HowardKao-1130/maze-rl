@@ -45,6 +45,8 @@ def generate_mazes(
         dtype=np.int64,
     )
 
+    if progress_callback is not None:
+        progress_callback(0, len(seeds))
     for i, seed in enumerate(seeds):
         rng = np.random.default_rng(int(seed))
 
@@ -121,6 +123,8 @@ def generate_tasks_for_layouts(
         excluded_tasks_by_layout or {}
     )
 
+    if progress_callback is not None:
+        progress_callback(0, len(layouts))
     for layout_index, maze in enumerate(layouts):
         rng = np.random.default_rng(
             int(seeds[layout_index]) + seed_offset

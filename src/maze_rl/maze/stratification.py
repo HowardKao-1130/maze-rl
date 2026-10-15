@@ -254,6 +254,8 @@ def generate_layouts(
         dtype=np.uint8,
     )
 
+    if progress_callback is not None:
+        progress_callback(0, len(seeds))
     for layout_index, seed in enumerate(seeds):
         rng = np.random.default_rng(int(seed))
         for _ in range(1000):
