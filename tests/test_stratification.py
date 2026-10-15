@@ -13,7 +13,7 @@ from maze_rl.maze.stratification import (
 )
 from maze_rl.maze.pathfinding import shortest_distances
 from scripts.experiment_naming import experiment_dataset_name
-from scripts.generate_dataset import parse_args
+from scripts.generate_dataset import _confirm_overwrite, parse_args
 
 
 def test_directed_profiles_have_expected_similarity_properties():
@@ -129,6 +129,18 @@ def test_cli_defaults_configure_stratification(monkeypatch):
     assert args.output_dir.name.endswith(
         "_stratified_s20_m40_l40_dedupe075"
     )
+
+
+def test_overwrite_confirmation_requires_explicit_yes(tmp_path, monkeypatch):
+    existing_file = tmp_path / "train.npz"
+    existing_file.touch()
+
+    monkeypatch.setattr("builtins.input", lambda _: "n")
+    with pytest.raises(SystemExit, match="cancelled"):
+        _confirm_overwrite([existing_file])
+
+    monkeypatch.setattr("builtins.input", lambda _: "yes")
+    _confirm_overwrite([existing_file])
 
 
 def test_stratified_generation_is_reproducible_and_records_configuration():

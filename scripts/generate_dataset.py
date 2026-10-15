@@ -94,6 +94,22 @@ def _finish_progress() -> None:
     print()
 
 
+def _confirm_overwrite(output_paths: list[Path]) -> None:
+    existing_paths = [path for path in output_paths if path.exists()]
+    if not existing_paths:
+        return
+
+    print("Existing dataset files would be overwritten:")
+    for path in existing_paths:
+        print(f"  {path}")
+    try:
+        response = input("Overwrite these files? [y/N]: ")
+    except EOFError:
+        response = ""
+    if response.strip().lower() not in {"y", "yes"}:
+        raise SystemExit("Dataset generation cancelled.")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate maze datasets."
@@ -338,6 +354,16 @@ def main() -> None:
     )
     test_path = args.output_dir / "test.npz"
     metadata_path = args.output_dir / "metadata.json"
+    output_paths = [
+        train_path,
+        validation_path,
+        same_layout_path,
+        test_path,
+        metadata_path,
+    ]
+    if args.stratify:
+        output_paths.append(validation_stratified_path)
+    _confirm_overwrite(output_paths)
 
     if args.validation_mazes > args.train_mazes:
         raise SystemExit(
