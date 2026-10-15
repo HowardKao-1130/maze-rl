@@ -19,6 +19,7 @@ from maze_rl.maze.dataset import (
 )
 from maze_rl.maze.stratification import (
     DEFAULT_BUCKET_BUDGETS,
+    DEFAULT_DIFFICULTY_BOUNDARIES,
     DifficultyBoundaries,
     generate_layouts,
     generate_stratified_tasks_for_layouts,
@@ -205,6 +206,20 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--short-max-path-length",
+        type=int,
+        default=int(DEFAULT_DIFFICULTY_BOUNDARIES.short_max),
+        help="Maximum shortest-path length in the short bucket.",
+    )
+
+    parser.add_argument(
+        "--medium-max-path-length",
+        type=int,
+        default=int(DEFAULT_DIFFICULTY_BOUNDARIES.medium_max),
+        help="Maximum shortest-path length in the medium bucket.",
+    )
+
+    parser.add_argument(
         "--allocation-attempts",
         type=int,
         default=8,
@@ -238,6 +253,14 @@ def parse_args() -> argparse.Namespace:
         parser.error("Allocation and search budgets must be positive.")
     if args.global_repair_budget is not None and args.global_repair_budget <= 0:
         parser.error("--global-repair-budget must be positive.")
+    if (
+        args.short_max_path_length < 0
+        or args.medium_max_path_length <= args.short_max_path_length
+    ):
+        parser.error(
+            "Require 0 <= --short-max-path-length < "
+            "--medium-max-path-length."
+        )
     args.bucket_budgets = {
         "short": args.short_budget,
         "medium": args.medium_budget,
@@ -351,6 +374,10 @@ def main() -> None:
             dedupe_threshold=args.dedupe_threshold,
             bucket_budgets=args.bucket_budgets,
             random_seed=args.seed,
+            difficulty_boundaries=DifficultyBoundaries(
+                short_max=args.short_max_path_length,
+                medium_max=args.medium_max_path_length,
+            ),
             allocation_attempts=args.allocation_attempts,
             min_tasks_per_maze=args.min_tasks_per_maze,
             max_tasks_per_maze=args.max_tasks_per_maze,
@@ -506,6 +533,11 @@ def main() -> None:
         "stratify": args.stratify,
         "dedupe_threshold": args.dedupe_threshold,
         "bucket_budgets": args.bucket_budgets,
+        "difficulty_boundaries": (
+            stratification_metadata["difficulty_boundaries"]
+            if stratification_metadata is not None
+            else None
+        ),
         "same_layout_new_goals": {
             "source": "train_layouts",
             "layout_count": same_layout_maze_count,

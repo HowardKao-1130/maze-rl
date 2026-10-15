@@ -100,6 +100,12 @@ class DifficultyBoundaries:
         }
 
 
+DEFAULT_DIFFICULTY_BOUNDARIES = DifficultyBoundaries(
+    short_max=15.0,
+    medium_max=25.0,
+)
+
+
 @dataclass
 class MazeCandidateIndex:
     maze: np.ndarray
@@ -791,10 +797,7 @@ def generate_stratified_tasks_for_layouts(
             + ", ".join(str(index) for index in insufficient[:10])
         )
 
-    boundaries = difficulty_boundaries or derive_difficulty_boundaries(
-        indexes,
-        budgets,
-    )
+    boundaries = difficulty_boundaries or DEFAULT_DIFFICULTY_BOUNDARIES
     apply_difficulty_buckets(indexes, boundaries)
     candidate_counts_by_layout = [
         {
@@ -947,9 +950,7 @@ def generate_stratified_tasks_for_layouts(
             "candidate_counts": candidate_counts,
             "candidate_counts_by_layout": candidate_counts_by_layout,
             "difficulty_boundaries": boundaries.as_dict(),
-            "candidate_distribution": (
-                "all eligible ordered pairs across training layouts"
-            ),
+            "difficulty_boundaries_source": "configured absolute lengths",
             "tasks_per_maze_target": tasks_per_maze,
             "min_tasks_per_maze": min_tasks_per_maze,
             "max_tasks_per_maze": max_tasks_per_maze,

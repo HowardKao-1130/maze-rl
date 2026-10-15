@@ -20,8 +20,11 @@ configurable with `--short-budget`, `--medium-budget`, and `--long-budget`,
 which default to `0.20`, `0.40`, and `0.40`. Stratified dataset names record
 these settings, for example `stratified_s20_m40_l40_dedupe075`.
 
-Stratified generation also writes `validation_stratified.npz`, using the
-training-derived absolute difficulty boundaries. Training normally targets
+Stratified generation also writes `validation_stratified.npz`, using shared
+absolute difficulty boundaries. By default, Short tasks have optimal path
+length `<= 15`, Medium tasks have length `16-25`, and Long tasks have length
+`> 25`. Override the first two cutoffs with `--short-max-path-length` and
+`--medium-max-path-length`. Training normally targets
 `--tasks-per-maze` tasks per layout; unresolved selections may transfer tasks
 between layouts within the configurable `--min-tasks-per-maze` and
 `--max-tasks-per-maze` bounds. Search diagnostics are recorded in

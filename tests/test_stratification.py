@@ -2,7 +2,9 @@ import numpy as np
 import pytest
 
 from maze_rl.maze.stratification import (
+    DifficultyBoundaries,
     TaskCandidate,
+    apply_difficulty_buckets,
     build_candidate_index,
     bucket_quotas,
     directed_weighted_jaccard,
@@ -48,6 +50,24 @@ def test_candidate_index_records_exact_shortest_path_lengths():
             maze,
             candidate.start,
         )[candidate.goal]
+
+
+def test_explicit_difficulty_boundaries_assign_inclusive_ranges():
+    maze = np.zeros((1, 30), dtype=np.uint8)
+    index = build_candidate_index(maze, min_path_length=1)
+    apply_difficulty_buckets(
+        [index],
+        DifficultyBoundaries(short_max=15, medium_max=25),
+    )
+
+    buckets_by_distance = {
+        candidate.distance: candidate.bucket
+        for candidate in index.candidates
+    }
+    assert buckets_by_distance[15] == "short"
+    assert buckets_by_distance[16] == "medium"
+    assert buckets_by_distance[25] == "medium"
+    assert buckets_by_distance[26] == "long"
 
 
 def test_bucket_quotas_use_configured_budget_and_sum_to_total():
@@ -99,6 +119,8 @@ def test_cli_defaults_configure_stratification(monkeypatch):
     assert args.min_tasks_per_maze == 3
     assert args.max_tasks_per_maze == 7
     assert args.local_search_budget == 2_000
+    assert args.short_max_path_length == 15
+    assert args.medium_max_path_length == 25
     assert args.bucket_budgets == {
         "short": 0.2,
         "medium": 0.4,
@@ -122,6 +144,10 @@ def test_stratified_generation_is_reproducible_and_records_configuration():
             "long": 0.4,
         },
         "random_seed": 42,
+        "difficulty_boundaries": DifficultyBoundaries(
+            short_max=5,
+            medium_max=8,
+        ),
     }
 
     first = generate_stratified_tasks_for_layouts(layouts, seeds, **kwargs)
@@ -136,3 +162,7 @@ def test_stratified_generation_is_reproducible_and_records_configuration():
         "long": 4,
     }
     assert first[3]["dedupe_threshold"] == 0.75
+    assert first[3]["difficulty_boundaries"] == {
+        "short_max": 5.0,
+        "medium_max": 8.0,
+    }
