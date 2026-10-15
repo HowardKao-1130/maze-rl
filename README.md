@@ -13,6 +13,13 @@ The split sizes control the number of unique layouts. `--train`,
 `--validation`, and `--test` remain accepted aliases for those maze counts.
 Each layout gets `--tasks-per-maze` valid start/goal tasks.
 
+Pass `--stratify` to select training tasks using common distance buckets and
+directed weighted-Jaccard deduplication. The deduplication threshold defaults
+to `0.75` and is configurable with `--dedupe-threshold`. Bucket budgets are
+configurable with `--short-budget`, `--medium-budget`, and `--long-budget`,
+which default to `0.20`, `0.40`, and `0.40`. Stratified dataset names record
+these settings, for example `stratified_s20_m40_l40_dedupe075`.
+
 - `data/train.npz`: seen tasks for training and memorization evaluation.
 - `data/same_layout_new_goals.npz`: validation-sized held-out start/goal tasks
   on training layouts.

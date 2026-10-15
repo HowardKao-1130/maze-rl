@@ -3,6 +3,8 @@ import json
 from pathlib import Path
 import sys
 
+import numpy as np
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(
@@ -15,6 +17,10 @@ from maze_rl.maze.dataset import (
     generate_tasks_for_layouts,
     generate_split_seeds,
     save_dataset,
+)
+from maze_rl.maze.stratification import (
+    DEFAULT_BUCKET_BUDGETS,
+    generate_stratified_tasks_for_layouts,
 )
 from scripts.experiment_naming import (
     DEFAULT_DATA_OUTPUT_ROOT,
@@ -146,7 +152,56 @@ def parse_args() -> argparse.Namespace:
         default=5,
     )
 
+    parser.add_argument(
+        "--stratify",
+        action="store_true",
+        help=(
+            "Select training tasks using difficulty buckets and "
+            "directed weighted Jaccard deduplication."
+        ),
+    )
+
+    parser.add_argument(
+        "--dedupe-threshold",
+        type=float,
+        default=0.75,
+        help="Maximum directed weighted Jaccard similarity threshold.",
+    )
+
+    parser.add_argument(
+        "--short-budget",
+        type=float,
+        default=DEFAULT_BUCKET_BUDGETS["short"],
+        help="Fraction of stratified tasks allocated to short paths.",
+    )
+
+    parser.add_argument(
+        "--medium-budget",
+        type=float,
+        default=DEFAULT_BUCKET_BUDGETS["medium"],
+        help="Fraction of stratified tasks allocated to medium paths.",
+    )
+
+    parser.add_argument(
+        "--long-budget",
+        type=float,
+        default=DEFAULT_BUCKET_BUDGETS["long"],
+        help="Fraction of stratified tasks allocated to long paths.",
+    )
+
     args = parser.parse_args()
+
+    if not 0 < args.dedupe_threshold <= 1:
+        parser.error("--dedupe-threshold must be in (0, 1].")
+    args.bucket_budgets = {
+        "short": args.short_budget,
+        "medium": args.medium_budget,
+        "long": args.long_budget,
+    }
+    if any(value < 0 for value in args.bucket_budgets.values()):
+        parser.error("Bucket budgets must be non-negative.")
+    if not np.isclose(sum(args.bucket_budgets.values()), 1.0):
+        parser.error("Bucket budgets must sum to 1.0.")
 
     if args.output_dir is None:
         args.output_dir = args.output_root / experiment_dataset_name(
@@ -156,6 +211,9 @@ def parse_args() -> argparse.Namespace:
             test_mazes=args.test_mazes,
             tasks_per_maze=args.tasks_per_maze,
             seed=args.seed,
+            stratify=args.stratify,
+            dedupe_threshold=args.dedupe_threshold,
+            bucket_budgets=args.bucket_budgets,
         )
 
     return args
@@ -210,6 +268,24 @@ def main() -> None:
         min_path_length=args.min_path_length,
         tasks_per_maze=args.tasks_per_maze,
     )
+
+    stratification_metadata = None
+    if args.stratify:
+        print("Selecting stratified training tasks...")
+        (
+            train_layout_indices,
+            train_starts,
+            train_goals,
+            stratification_metadata,
+        ) = generate_stratified_tasks_for_layouts(
+            train_layouts,
+            train_seeds,
+            tasks_per_maze=args.tasks_per_maze,
+            min_path_length=args.min_path_length,
+            dedupe_threshold=args.dedupe_threshold,
+            bucket_budgets=args.bucket_budgets,
+            random_seed=args.seed,
+        )
 
     print("Generating validation mazes...")
     (
@@ -312,12 +388,17 @@ def main() -> None:
         "validation_mazes": args.validation_mazes,
         "test_mazes": args.test_mazes,
         "tasks_per_maze": args.tasks_per_maze,
+        "stratify": args.stratify,
+        "dedupe_threshold": args.dedupe_threshold,
+        "bucket_budgets": args.bucket_budgets,
         "same_layout_new_goals": {
             "source": "train_layouts",
             "layout_count": same_layout_maze_count,
             "tasks_per_maze": args.tasks_per_maze,
         },
     }
+    if stratification_metadata is not None:
+        metadata["stratification"] = stratification_metadata
 
     with metadata_path.open("w") as file:
         json.dump(
