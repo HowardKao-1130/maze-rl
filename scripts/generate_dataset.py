@@ -67,7 +67,10 @@ def _simple_progress_callback(label: str):
 
 
 def _stratified_progress_callback(label: str):
+    previous_width = 0
+
     def update(event: dict[str, object]) -> None:
+        nonlocal previous_width
         counts = event["bucket_counts"]
         quotas = event["bucket_quotas"]
         status = " | ".join(
@@ -81,11 +84,13 @@ def _stratified_progress_callback(label: str):
                 f" (indexing {event['layouts_completed']}"
                 f"/{event['layout_count']})"
             )
+        line = f"{label}{phase_status}: {status}"
         print(
-            f"\r{label}{phase_status}: {status}",
+            f"\r{line}{' ' * max(previous_width - len(line), 0)}",
             end="",
             flush=True,
         )
+        previous_width = len(line)
 
     return update
 
