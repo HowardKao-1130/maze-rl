@@ -74,8 +74,15 @@ def _stratified_progress_callback(label: str):
             f"{bucket.title()} {counts[bucket]}/{quotas[bucket]}"
             for bucket in ("short", "medium", "long")
         )
+        phase = event.get("phase")
+        phase_status = ""
+        if phase == "indexing":
+            phase_status = (
+                f" (indexing {event['layouts_completed']}"
+                f"/{event['layout_count']})"
+            )
         print(
-            f"\r{label}: {status}",
+            f"\r{label}{phase_status}: {status}",
             end="",
             flush=True,
         )
@@ -362,7 +369,6 @@ def main() -> None:
         master_seed=args.seed,
     )
 
-    print("Generating training mazes...")
     if args.stratify:
         train_layouts = generate_layouts(
             seeds=train_seeds,
@@ -399,7 +405,6 @@ def main() -> None:
 
     stratification_metadata = None
     if args.stratify:
-        print("Selecting stratified training tasks...")
         (
             train_layout_indices,
             train_starts,
@@ -428,7 +433,6 @@ def main() -> None:
         )
         _finish_progress()
 
-    print("Generating validation mazes...")
     (
         validation_layouts,
         validation_layout_indices,
@@ -452,7 +456,6 @@ def main() -> None:
     validation_stratified_starts = None
     validation_stratified_goals = None
     if args.stratify:
-        print("Selecting stratified validation tasks...")
         train_boundaries = DifficultyBoundaries(
             **stratification_metadata["difficulty_boundaries"]
         )
@@ -481,7 +484,6 @@ def main() -> None:
         )
         _finish_progress()
 
-    print("Generating same-layout held-out tasks...")
     same_layout_maze_count = args.validation_mazes
     same_layout_layouts = train_layouts[
         :same_layout_maze_count
@@ -509,7 +511,6 @@ def main() -> None:
     )
     _finish_progress()
 
-    print("Generating test mazes...")
     (
         test_layouts,
         test_layout_indices,

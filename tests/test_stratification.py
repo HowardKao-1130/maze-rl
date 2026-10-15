@@ -168,6 +168,7 @@ def test_stratified_generation_is_reproducible_and_records_configuration():
         "short_max": 5.0,
         "medium_max": 8.0,
     }
+    assert progress_events[0]["phase"] == "indexing"
     assert progress_events[-1]["bucket_counts"] == {
         "short": 2,
         "medium": 4,

@@ -832,14 +832,36 @@ def generate_stratified_tasks_for_layouts(
         bucket_budgets or DEFAULT_BUCKET_BUDGETS,
     )
     excluded_tasks_by_layout = excluded_tasks_by_layout or {}
-    indexes = [
-        build_candidate_index(
-            maze,
-            min_path_length=min_path_length,
-            excluded_tasks=excluded_tasks_by_layout.get(layout_index),
+    quotas = bucket_quotas(len(layouts) * tasks_per_maze, budgets)
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "phase": "indexing",
+                "layouts_completed": 0,
+                "layout_count": len(layouts),
+                "bucket_counts": _empty_assignment(),
+                "bucket_quotas": dict(quotas),
+            }
         )
-        for layout_index, maze in enumerate(layouts)
-    ]
+    indexes = []
+    for layout_index, maze in enumerate(layouts):
+        indexes.append(
+            build_candidate_index(
+                maze,
+                min_path_length=min_path_length,
+                excluded_tasks=excluded_tasks_by_layout.get(layout_index),
+            )
+        )
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "phase": "indexing",
+                    "layouts_completed": layout_index + 1,
+                    "layout_count": len(layouts),
+                    "bucket_counts": _empty_assignment(),
+                    "bucket_quotas": dict(quotas),
+                }
+            )
     insufficient = [
         layout_index
         for layout_index, index in enumerate(indexes)
@@ -867,7 +889,6 @@ def generate_stratified_tasks_for_layouts(
         )
         for bucket in BUCKETS
     }
-    quotas = bucket_quotas(len(layouts) * tasks_per_maze, budgets)
     repair_budget = (
         5 * len(layouts)
         if global_repair_budget is None
