@@ -22,8 +22,8 @@ these settings, for example `stratified_s20_m40_l40_dedupe075`.
 
 Stratified generation also writes `validation_stratified.npz`, using shared
 absolute difficulty boundaries. By default, Short tasks have optimal path
-length `<= 15`, Medium tasks have length `16-25`, and Long tasks have length
-`> 25`. Override the first two cutoffs with `--short-max-path-length` and
+length `<= 10`, Medium tasks have length `11-20`, and Long tasks have length
+`> 20`. Override the first two cutoffs with `--short-max-path-length` and
 `--medium-max-path-length`. Training normally targets
 `--tasks-per-maze` tasks per layout; unresolved selections may transfer tasks
 between layouts within the configurable `--min-tasks-per-maze` and

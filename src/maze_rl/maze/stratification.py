@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 import time
-from typing import Iterable, Mapping
+from typing import Callable, Iterable, Mapping
 
 import numpy as np
 
@@ -101,8 +101,8 @@ class DifficultyBoundaries:
 
 
 DEFAULT_DIFFICULTY_BOUNDARIES = DifficultyBoundaries(
-    short_max=15.0,
-    medium_max=25.0,
+    short_max=10.0,
+    medium_max=20.0,
 )
 
 
@@ -246,6 +246,7 @@ def generate_layouts(
     wall_probability: float,
     min_path_length: int,
     minimum_eligible_tasks: int = 1,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> np.ndarray:
     """Generate layouts independently of stratified task selection."""
     layouts = np.empty(
@@ -273,6 +274,8 @@ def generate_layouts(
             except RuntimeError:
                 continue
             layouts[layout_index] = maze
+            if progress_callback is not None:
+                progress_callback(layout_index + 1, len(seeds))
             break
         else:
             raise RuntimeError(
@@ -610,6 +613,8 @@ def _select_all_layouts(
     seeds: np.ndarray,
     random_seed: int,
     local_search_budget: int,
+    bucket_quotas: Mapping[str, int],
+    progress_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> tuple[list[SearchResult], dict[str, object]]:
     results: list[SearchResult | None] = [None] * len(indexes)
     order_rng = np.random.default_rng(random_seed)
@@ -627,6 +632,24 @@ def _select_all_layouts(
             rng=selection_rng,
             search_budget=local_search_budget,
         )
+        if progress_callback is not None:
+            bucket_counts = _assignment_for_tasks(
+                task
+                for result in results
+                if result is not None
+                for task in result.selected
+            )
+            progress_callback(
+                {
+                    "phase": "selection",
+                    "layouts_completed": sum(
+                        result is not None for result in results
+                    ),
+                    "layout_count": len(indexes),
+                    "bucket_counts": bucket_counts,
+                    "bucket_quotas": dict(bucket_quotas),
+                }
+            )
 
     finalized_results = [result for result in results if result is not None]
     return finalized_results, {
@@ -673,6 +696,8 @@ def _repair_unresolved_allocations(
     max_tasks_per_maze: int,
     local_search_budget: int,
     repair_budget: int,
+    bucket_quotas: Mapping[str, int],
+    progress_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> tuple[list[tuple[int, str]], dict[str, object]]:
     repair_attempts = 0
     successful_reallocations = 0
@@ -723,12 +748,40 @@ def _repair_unresolved_allocations(
             if not result.completed:
                 repair_candidate_attempts += result.candidate_attempts
                 repair_backtracking_events += result.backtracking_events
+                if progress_callback is not None:
+                    progress_callback(
+                        {
+                            "phase": "repair",
+                            "repair_attempts": repair_attempts,
+                            "repair_budget": repair_budget,
+                            "bucket_counts": _assignment_for_tasks(
+                                task
+                                for selected in selected_by_layout
+                                for task in selected
+                            ),
+                            "bucket_quotas": dict(bucket_quotas),
+                        }
+                    )
                 continue
             assignments[recipient_index] = tentative
             selected_by_layout[recipient_index] = result.selected
             successful_reallocations += 1
             repair_candidate_attempts += result.candidate_attempts
             repair_backtracking_events += result.backtracking_events
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "phase": "repair",
+                        "repair_attempts": repair_attempts,
+                        "repair_budget": repair_budget,
+                        "bucket_counts": _assignment_for_tasks(
+                            task
+                            for selected in selected_by_layout
+                            for task in selected
+                        ),
+                        "bucket_quotas": dict(bucket_quotas),
+                    }
+                )
             moved = True
             break
 
@@ -761,6 +814,7 @@ def generate_stratified_tasks_for_layouts(
     local_search_budget: int = 2_000,
     global_repair_budget: int | None = None,
     difficulty_boundaries: DifficultyBoundaries | None = None,
+    progress_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, object]]:
     """Select reproducible, difficulty-balanced tasks for each layout."""
     if tasks_per_maze <= 0:
@@ -852,6 +906,8 @@ def generate_stratified_tasks_for_layouts(
             seeds=seeds,
             random_seed=random_seed + allocation_attempt,
             local_search_budget=local_search_budget,
+            bucket_quotas=quotas,
+            progress_callback=progress_callback,
         )
         selected_by_layout = [result.selected for result in results]
         unresolved: list[tuple[int, str]] = []
@@ -889,6 +945,8 @@ def generate_stratified_tasks_for_layouts(
                 max_tasks_per_maze=max_tasks_per_maze,
                 local_search_budget=local_search_budget,
                 repair_budget=remaining_repair_budget,
+                bucket_quotas=quotas,
+                progress_callback=progress_callback,
             )
             repair_attempts_used += repair_metadata["repair_attempts"]
             for key in repair_totals:

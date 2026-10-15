@@ -55,6 +55,38 @@ def task_pairs_by_layout(
     return pairs_by_layout
 
 
+def _simple_progress_callback(label: str):
+    def update(completed: int, total: int) -> None:
+        print(
+            f"\r{label}: {completed}/{total}",
+            end="",
+            flush=True,
+        )
+
+    return update
+
+
+def _stratified_progress_callback(label: str):
+    def update(event: dict[str, object]) -> None:
+        counts = event["bucket_counts"]
+        quotas = event["bucket_quotas"]
+        status = " | ".join(
+            f"{bucket.title()} {counts[bucket]}/{quotas[bucket]}"
+            for bucket in ("short", "medium", "long")
+        )
+        print(
+            f"\r{label}: {status}",
+            end="",
+            flush=True,
+        )
+
+    return update
+
+
+def _finish_progress() -> None:
+    print()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate maze datasets."
@@ -339,6 +371,9 @@ def main() -> None:
             wall_probability=args.wall_probability,
             min_path_length=args.min_path_length,
             minimum_eligible_tasks=args.min_tasks_per_maze,
+            progress_callback=_simple_progress_callback(
+                "Generating training mazes"
+            ),
         )
         train_layout_indices = None
         train_starts = None
@@ -356,7 +391,11 @@ def main() -> None:
             wall_probability=args.wall_probability,
             min_path_length=args.min_path_length,
             tasks_per_maze=args.tasks_per_maze,
+            progress_callback=_simple_progress_callback(
+                "Generating training mazes"
+            ),
         )
+    _finish_progress()
 
     stratification_metadata = None
     if args.stratify:
@@ -383,7 +422,11 @@ def main() -> None:
             max_tasks_per_maze=args.max_tasks_per_maze,
             local_search_budget=args.local_search_budget,
             global_repair_budget=args.global_repair_budget,
+            progress_callback=_stratified_progress_callback(
+                "Selecting stratified training tasks"
+            ),
         )
+        _finish_progress()
 
     print("Generating validation mazes...")
     (
@@ -398,7 +441,11 @@ def main() -> None:
         wall_probability=args.wall_probability,
         min_path_length=args.min_path_length,
         tasks_per_maze=args.tasks_per_maze,
+        progress_callback=_simple_progress_callback(
+            "Generating validation mazes"
+        ),
     )
+    _finish_progress()
 
     validation_stratified_metadata = None
     validation_stratified_indices = None
@@ -428,7 +475,11 @@ def main() -> None:
             local_search_budget=args.local_search_budget,
             global_repair_budget=args.global_repair_budget,
             difficulty_boundaries=train_boundaries,
+            progress_callback=_stratified_progress_callback(
+                "Selecting stratified validation tasks"
+            ),
         )
+        _finish_progress()
 
     print("Generating same-layout held-out tasks...")
     same_layout_maze_count = args.validation_mazes
@@ -452,7 +503,11 @@ def main() -> None:
             train_starts,
             train_goals,
         ),
+        progress_callback=_simple_progress_callback(
+            "Generating same-layout tasks"
+        ),
     )
+    _finish_progress()
 
     print("Generating test mazes...")
     (
@@ -467,7 +522,11 @@ def main() -> None:
         wall_probability=args.wall_probability,
         min_path_length=args.min_path_length,
         tasks_per_maze=args.tasks_per_maze,
+        progress_callback=_simple_progress_callback(
+            "Generating test mazes"
+        ),
     )
+    _finish_progress()
 
     save_dataset(
         train_path,

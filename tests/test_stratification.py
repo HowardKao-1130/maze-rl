@@ -119,8 +119,8 @@ def test_cli_defaults_configure_stratification(monkeypatch):
     assert args.min_tasks_per_maze == 3
     assert args.max_tasks_per_maze == 7
     assert args.local_search_budget == 2_000
-    assert args.short_max_path_length == 15
-    assert args.medium_max_path_length == 25
+    assert args.short_max_path_length == 10
+    assert args.medium_max_path_length == 20
     assert args.bucket_budgets == {
         "short": 0.2,
         "medium": 0.4,
@@ -134,6 +134,7 @@ def test_cli_defaults_configure_stratification(monkeypatch):
 def test_stratified_generation_is_reproducible_and_records_configuration():
     layouts = np.zeros((2, 7, 7), dtype=np.uint8)
     seeds = np.array([11, 22])
+    progress_events = []
     kwargs = {
         "tasks_per_maze": 5,
         "min_path_length": 3,
@@ -148,6 +149,7 @@ def test_stratified_generation_is_reproducible_and_records_configuration():
             short_max=5,
             medium_max=8,
         ),
+        "progress_callback": progress_events.append,
     }
 
     first = generate_stratified_tasks_for_layouts(layouts, seeds, **kwargs)
@@ -165,4 +167,9 @@ def test_stratified_generation_is_reproducible_and_records_configuration():
     assert first[3]["difficulty_boundaries"] == {
         "short_max": 5.0,
         "medium_max": 8.0,
+    }
+    assert progress_events[-1]["bucket_counts"] == {
+        "short": 2,
+        "medium": 4,
+        "long": 4,
     }
