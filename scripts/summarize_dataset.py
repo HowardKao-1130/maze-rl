@@ -131,6 +131,32 @@ def summarize_split(
     return summary
 
 
+def _print_table(
+    headers: list[str],
+    rows: list[list[str]],
+    numeric_columns: set[int],
+) -> None:
+    widths = [
+        max(
+            len(header),
+            *(len(row[index]) for row in rows),
+        )
+        for index, header in enumerate(headers)
+    ]
+
+    def format_row(row: list[str]) -> str:
+        cells = []
+        for index, value in enumerate(row):
+            alignment = ">" if index in numeric_columns else "<"
+            cells.append(f"{value:{alignment}{widths[index]}}")
+        return "  ".join(cells)
+
+    print(format_row(headers))
+    print("  ".join("-" * width for width in widths))
+    for row in rows:
+        print(format_row(row))
+
+
 def main() -> None:
     args = parse_args()
     bundle_dir = _bundle_dir(args.dataset)
@@ -161,29 +187,54 @@ def main() -> None:
     if isinstance(metadata.get("stratification"), dict):
         report["generation_diagnostics"] = metadata["stratification"]
 
-    print("Split | Tasks | Short | Medium | Long | Mean tasks/layout | Mean path")
-    print("--- | ---: | ---: | ---: | ---: | ---: | ---:")
+    split_rows = []
     for split, summary in summaries.items():
         counts = summary["counts"]
-        print(
-            f"{split} | {summary['task_count']} | "
-            f"{counts['short']} | {counts['medium']} | {counts['long']} | "
-            f"{summary['mean_tasks_per_layout']:.2f} | "
-            f"{summary['mean_optimal_path_length'] or 0:.2f}"
+        split_rows.append(
+            [
+                split,
+                str(summary["task_count"]),
+                str(counts["short"]),
+                str(counts["medium"]),
+                str(counts["long"]),
+                f"{summary['mean_tasks_per_layout']:.2f}",
+                f"{summary['mean_optimal_path_length'] or 0:.2f}",
+            ]
         )
+    _print_table(
+        [
+            "Split",
+            "Tasks",
+            "Short",
+            "Medium",
+            "Long",
+            "Mean tasks/layout",
+            "Mean path",
+        ],
+        split_rows,
+        {1, 2, 3, 4, 5, 6},
+    )
 
-    print("\nSplit | Bucket | Tasks | Mean optimal path length")
-    print("--- | --- | ---: | ---:")
+    bucket_rows = []
     for split, summary in summaries.items():
         for bucket in BUCKETS:
             mean_length = summary[
                 "mean_optimal_path_length_by_bucket"
             ][bucket]
-            print(
-                f"{split} | {bucket} | "
-                f"{summary['counts'][bucket]} | "
-                f"{0 if mean_length is None else mean_length:.2f}"
+            bucket_rows.append(
+                [
+                    split,
+                    bucket,
+                    str(summary["counts"][bucket]),
+                    f"{0 if mean_length is None else mean_length:.2f}",
+                ]
             )
+    print()
+    _print_table(
+        ["Split", "Bucket", "Tasks", "Mean optimal path length"],
+        bucket_rows,
+        {2, 3},
+    )
 
     if args.output_json is not None:
         args.output_json.parent.mkdir(parents=True, exist_ok=True)
