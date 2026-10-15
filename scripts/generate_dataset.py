@@ -57,46 +57,48 @@ def task_pairs_by_layout(
 
 def _simple_progress_callback(label: str):
     def update(completed: int, total: int) -> None:
-        print(
-            f"\r{label}: {completed}/{total}",
-            end="",
-            flush=True,
-        )
+        _write_progress_line(f"{label}: {completed}/{total}")
 
     return update
 
 
+def _write_progress_line(line: str) -> None:
+    if sys.stdout.isatty():
+        print(f"\033[2K\r{line}", end="", flush=True)
+    else:
+        print(line, flush=True)
+
+
 def _stratified_progress_callback(label: str):
-    previous_width = 0
+    if "validation" in label:
+        short_label = "Stratified validation"
+    else:
+        short_label = "Stratified training"
 
     def update(event: dict[str, object]) -> None:
-        nonlocal previous_width
         counts = event["bucket_counts"]
         quotas = event["bucket_quotas"]
         status = " | ".join(
-            f"{bucket.title()} {counts[bucket]}/{quotas[bucket]}"
+            f"{bucket[0].upper()} {counts[bucket]}/{quotas[bucket]}"
             for bucket in ("short", "medium", "long")
         )
         phase = event.get("phase")
-        phase_status = ""
         if phase == "indexing":
-            phase_status = (
-                f" (indexing {event['layouts_completed']}"
-                f"/{event['layout_count']})"
+            line = (
+                f"{short_label} | index "
+                f"{event['layouts_completed']}/{event['layout_count']} | "
+                f"{status}"
             )
-        line = f"{label}{phase_status}: {status}"
-        print(
-            f"\r{line}{' ' * max(previous_width - len(line), 0)}",
-            end="",
-            flush=True,
-        )
-        previous_width = len(line)
+        else:
+            line = f"{short_label} | {status}"
+        _write_progress_line(line)
 
     return update
 
 
 def _finish_progress() -> None:
-    print()
+    if sys.stdout.isatty():
+        print()
 
 
 def _confirm_overwrite(output_paths: list[Path]) -> None:
