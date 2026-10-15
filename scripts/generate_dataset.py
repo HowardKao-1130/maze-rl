@@ -101,10 +101,10 @@ def _finish_progress() -> None:
         print()
 
 
-def _confirm_overwrite(output_paths: list[Path]) -> None:
+def _confirm_overwrite(output_paths: list[Path]) -> list[Path]:
     existing_paths = [path for path in output_paths if path.exists()]
     if not existing_paths:
-        return
+        return []
 
     print("Existing dataset files would be overwritten:")
     for path in existing_paths:
@@ -115,6 +115,154 @@ def _confirm_overwrite(output_paths: list[Path]) -> None:
         response = ""
     if response.strip().lower() not in {"y", "yes"}:
         raise SystemExit("Dataset generation cancelled.")
+    return existing_paths
+
+
+def _remove_dataset_files(output_paths: list[Path]) -> None:
+    for path in output_paths:
+        if not path.exists():
+            continue
+        if not path.is_file():
+            raise SystemExit(
+                f"Cannot remove existing dataset path that is not a file: "
+                f"{path}"
+            )
+        print(f"Removing old dataset file: {path}")
+        path.unlink()
+
+
+def _load_dataset_arrays(
+    path: Path,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    with np.load(path) as data:
+        layouts = data["layouts"] if "layouts" in data else data["mazes"]
+        return (
+            layouts,
+            data["seeds"],
+            data["layout_indices"],
+            data["starts"],
+            data["goals"],
+        )
+
+
+def _load_metadata(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    with path.open() as file:
+        value = json.load(file)
+    if not isinstance(value, dict):
+        raise SystemExit(f"Dataset metadata must be an object: {path}")
+    return value
+
+
+def _write_metadata(path: Path, metadata: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as file:
+        json.dump(metadata, file, indent=2)
+
+
+def _build_metadata(
+    args: argparse.Namespace,
+    *,
+    same_layout_maze_count: int,
+    stratification_metadata: dict[str, object] | None,
+    validation_stratified_metadata: dict[str, object] | None,
+    completed_splits: set[str],
+    complete: bool,
+) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "generator": "random_obstacle_grid",
+        "height": args.height,
+        "width": args.width,
+        "wall_probability": args.wall_probability,
+        "min_path_length": args.min_path_length,
+        "master_seed": args.seed,
+        "train_mazes": args.train_mazes,
+        "validation_mazes": args.validation_mazes,
+        "test_mazes": args.test_mazes,
+        "tasks_per_maze": args.tasks_per_maze,
+        "min_tasks_per_maze": args.min_tasks_per_maze,
+        "max_tasks_per_maze": args.max_tasks_per_maze,
+        "local_search_budget": args.local_search_budget,
+        "global_repair_budget": args.global_repair_budget,
+        "stratify": args.stratify,
+        "dedupe_threshold": args.dedupe_threshold,
+        "bucket_budgets": args.bucket_budgets,
+        "difficulty_boundaries": (
+            stratification_metadata["difficulty_boundaries"]
+            if stratification_metadata is not None
+            else (
+                {
+                    "short_max": float(args.short_max_path_length),
+                    "medium_max": float(args.medium_max_path_length),
+                }
+                if args.stratify
+                else None
+            )
+        ),
+        "same_layout_new_goals": {
+            "source": "train_layouts",
+            "layout_count": same_layout_maze_count,
+            "tasks_per_maze": args.tasks_per_maze,
+        },
+        "generation_status": "complete" if complete else "in_progress",
+        "completed_splits": sorted(completed_splits),
+    }
+    if args.stratify:
+        metadata["stratification"] = {
+            "train": stratification_metadata,
+            "validation_stratified": validation_stratified_metadata,
+        }
+    return metadata
+
+
+def _validate_resume_metadata(
+    args: argparse.Namespace,
+    metadata: dict[str, object],
+) -> None:
+    expected: dict[str, object] = {
+        "height": args.height,
+        "width": args.width,
+        "wall_probability": args.wall_probability,
+        "min_path_length": args.min_path_length,
+        "master_seed": args.seed,
+        "train_mazes": args.train_mazes,
+        "validation_mazes": args.validation_mazes,
+        "test_mazes": args.test_mazes,
+        "tasks_per_maze": args.tasks_per_maze,
+        "stratify": args.stratify,
+        "dedupe_threshold": args.dedupe_threshold,
+        "bucket_budgets": args.bucket_budgets,
+        "min_tasks_per_maze": args.min_tasks_per_maze,
+        "max_tasks_per_maze": args.max_tasks_per_maze,
+        "local_search_budget": args.local_search_budget,
+        "global_repair_budget": args.global_repair_budget,
+    }
+    if args.stratify:
+        expected["difficulty_boundaries"] = {
+            "short_max": float(args.short_max_path_length),
+            "medium_max": float(args.medium_max_path_length),
+        }
+    comparable_metadata = dict(metadata)
+    if "difficulty_boundaries" not in comparable_metadata:
+        stratification = comparable_metadata.get("stratification")
+        if isinstance(stratification, dict):
+            train_metadata = stratification.get("train")
+            if isinstance(train_metadata, dict):
+                comparable_metadata["difficulty_boundaries"] = (
+                    train_metadata.get("difficulty_boundaries")
+                )
+    mismatches = [
+        field
+        for field, value in expected.items()
+        if field in comparable_metadata
+        and comparable_metadata[field] != value
+    ]
+    if mismatches:
+        raise SystemExit(
+            "Resume configuration does not match existing metadata for: "
+            + ", ".join(mismatches)
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -236,6 +384,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Select training tasks using difficulty buckets and "
             "directed weighted Jaccard deduplication."
+        ),
+    )
+
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Resume generation by loading existing split files and "
+            "generating only missing splits."
         ),
     )
 
@@ -364,20 +521,25 @@ def main() -> None:
     output_paths = [
         train_path,
         validation_path,
+        validation_stratified_path,
         same_layout_path,
         test_path,
         metadata_path,
     ]
-    if args.stratify:
-        output_paths.append(validation_stratified_path)
-    _confirm_overwrite(output_paths)
-
     if args.validation_mazes > args.train_mazes:
         raise SystemExit(
             "--validation-mazes cannot exceed --train-mazes because "
             "same_layout_new_goals.npz uses validation-sized held-out "
             "tasks on unique training layouts."
         )
+    checkpoint_metadata = {}
+    if args.resume:
+        checkpoint_metadata = _load_metadata(metadata_path)
+        if checkpoint_metadata:
+            _validate_resume_metadata(args, checkpoint_metadata)
+    else:
+        existing_paths = _confirm_overwrite(output_paths)
+        _remove_dataset_files(existing_paths)
 
     print(f"Writing datasets to {args.output_dir}")
     print(f"  train:        {train_path}")
@@ -402,42 +564,96 @@ def main() -> None:
         master_seed=args.seed,
     )
 
+    split_paths = [
+        ("train", train_path),
+        ("validation", validation_path),
+        ("same_layout_new_goals", same_layout_path),
+        ("test", test_path),
+    ]
     if args.stratify:
-        train_layouts = generate_layouts(
-            seeds=train_seeds,
-            height=args.height,
-            width=args.width,
-            wall_probability=args.wall_probability,
-            min_path_length=args.min_path_length,
-            minimum_eligible_tasks=args.min_tasks_per_maze,
-            progress_callback=_simple_progress_callback(
-                "Generating training mazes"
+        split_paths.append(
+            ("validation_stratified", validation_stratified_path)
+        )
+    completed_splits = {
+        split for split, path in split_paths if path.exists()
+    }
+    stratification_checkpoint = checkpoint_metadata.get(
+        "stratification",
+        {},
+    )
+    if not isinstance(stratification_checkpoint, dict):
+        stratification_checkpoint = {}
+    stratification_metadata = stratification_checkpoint.get("train")
+    if not isinstance(stratification_metadata, dict):
+        stratification_metadata = None
+    validation_stratified_metadata = stratification_checkpoint.get(
+        "validation_stratified"
+    )
+    if not isinstance(validation_stratified_metadata, dict):
+        validation_stratified_metadata = None
+
+    same_layout_maze_count = args.validation_mazes
+
+    def checkpoint() -> None:
+        _write_metadata(
+            metadata_path,
+            _build_metadata(
+                args,
+                same_layout_maze_count=same_layout_maze_count,
+                stratification_metadata=stratification_metadata,
+                validation_stratified_metadata=validation_stratified_metadata,
+                completed_splits=completed_splits,
+                complete=False,
             ),
         )
-        train_layout_indices = None
-        train_starts = None
-        train_goals = None
-    else:
+
+    if train_path.exists():
+        print("Loading existing train split.")
         (
             train_layouts,
+            _saved_train_seeds,
             train_layout_indices,
             train_starts,
             train_goals,
-        ) = generate_mazes(
-            seeds=train_seeds,
-            height=args.height,
-            width=args.width,
-            wall_probability=args.wall_probability,
-            min_path_length=args.min_path_length,
-            tasks_per_maze=args.tasks_per_maze,
-            progress_callback=_simple_progress_callback(
-                "Generating training mazes"
-            ),
-        )
-    _finish_progress()
+        ) = _load_dataset_arrays(train_path)
+    else:
+        if args.stratify:
+            train_layouts = generate_layouts(
+                seeds=train_seeds,
+                height=args.height,
+                width=args.width,
+                wall_probability=args.wall_probability,
+                min_path_length=args.min_path_length,
+                minimum_eligible_tasks=args.min_tasks_per_maze,
+                progress_callback=_simple_progress_callback(
+                    "Generating training mazes"
+                ),
+            )
+            train_layout_indices = None
+            train_starts = None
+            train_goals = None
+        else:
+            (
+                train_layouts,
+                train_layout_indices,
+                train_starts,
+                train_goals,
+            ) = generate_mazes(
+                seeds=train_seeds,
+                height=args.height,
+                width=args.width,
+                wall_probability=args.wall_probability,
+                min_path_length=args.min_path_length,
+                tasks_per_maze=args.tasks_per_maze,
+                progress_callback=_simple_progress_callback(
+                    "Generating training mazes"
+                ),
+            )
+        _finish_progress()
 
-    stratification_metadata = None
-    if args.stratify:
+    if not args.stratify:
+        stratification_metadata = None
+    elif not train_path.exists():
         (
             train_layout_indices,
             train_starts,
@@ -465,190 +681,201 @@ def main() -> None:
             ),
         )
         _finish_progress()
-
-    (
-        validation_layouts,
-        validation_layout_indices,
-        validation_starts,
-        validation_goals,
-    ) = generate_mazes(
-        seeds=validation_seeds,
-        height=args.height,
-        width=args.width,
-        wall_probability=args.wall_probability,
-        min_path_length=args.min_path_length,
-        tasks_per_maze=args.tasks_per_maze,
-        progress_callback=_simple_progress_callback(
-            "Generating validation mazes"
-        ),
-    )
-    _finish_progress()
-
-    validation_stratified_metadata = None
-    validation_stratified_indices = None
-    validation_stratified_starts = None
-    validation_stratified_goals = None
-    if args.stratify:
-        train_boundaries = DifficultyBoundaries(
-            **stratification_metadata["difficulty_boundaries"]
+    elif stratification_metadata is None:
+        raise SystemExit(
+            "Cannot resume stratified generation: train metadata is "
+            "missing from metadata.json."
         )
-        (
-            validation_stratified_indices,
-            validation_stratified_starts,
-            validation_stratified_goals,
-            validation_stratified_metadata,
-        ) = generate_stratified_tasks_for_layouts(
-            validation_layouts,
-            validation_seeds,
-            tasks_per_maze=args.tasks_per_maze,
-            min_path_length=args.min_path_length,
-            dedupe_threshold=args.dedupe_threshold,
-            bucket_budgets=args.bucket_budgets,
-            random_seed=args.seed + 1,
-            allocation_attempts=args.allocation_attempts,
-            min_tasks_per_maze=args.min_tasks_per_maze,
-            max_tasks_per_maze=args.max_tasks_per_maze,
-            local_search_budget=args.local_search_budget,
-            global_repair_budget=args.global_repair_budget,
-            difficulty_boundaries=train_boundaries,
-            progress_callback=_stratified_progress_callback(
-                "Selecting stratified validation tasks"
-            ),
-        )
-        _finish_progress()
 
-    same_layout_maze_count = args.validation_mazes
-    same_layout_layouts = train_layouts[
-        :same_layout_maze_count
-    ]
-    same_layout_seeds = train_seeds[
-        :same_layout_maze_count
-    ]
-    (
-        same_layout_indices,
-        same_layout_starts,
-        same_layout_goals,
-    ) = generate_tasks_for_layouts(
-        layouts=same_layout_layouts,
-        seeds=same_layout_seeds,
-        tasks_per_maze=args.tasks_per_maze,
-        min_path_length=args.min_path_length,
-        excluded_tasks_by_layout=task_pairs_by_layout(
+    if not train_path.exists():
+        save_dataset(
+            train_path,
+            train_layouts,
+            train_seeds,
             train_layout_indices,
             train_starts,
             train_goals,
-        ),
-        progress_callback=_simple_progress_callback(
-            "Generating same-layout tasks"
-        ),
-    )
-    _finish_progress()
+        )
+        completed_splits.add("train")
+        checkpoint()
 
-    (
-        test_layouts,
-        test_layout_indices,
-        test_starts,
-        test_goals,
-    ) = generate_mazes(
-        seeds=test_seeds,
-        height=args.height,
-        width=args.width,
-        wall_probability=args.wall_probability,
-        min_path_length=args.min_path_length,
-        tasks_per_maze=args.tasks_per_maze,
-        progress_callback=_simple_progress_callback(
-            "Generating test mazes"
-        ),
-    )
-    _finish_progress()
-
-    save_dataset(
-        train_path,
-        train_layouts,
-        train_seeds,
-        train_layout_indices,
-        train_starts,
-        train_goals,
-    )
-
-    save_dataset(
-        validation_path,
-        validation_layouts,
-        validation_seeds,
-        validation_layout_indices,
-        validation_starts,
-        validation_goals,
-    )
-
-    if args.stratify:
+    if validation_path.exists():
+        print("Loading existing validation split.")
+        (
+            validation_layouts,
+            _saved_validation_seeds,
+            validation_layout_indices,
+            validation_starts,
+            validation_goals,
+        ) = _load_dataset_arrays(validation_path)
+    else:
+        (
+            validation_layouts,
+            validation_layout_indices,
+            validation_starts,
+            validation_goals,
+        ) = generate_mazes(
+            seeds=validation_seeds,
+            height=args.height,
+            width=args.width,
+            wall_probability=args.wall_probability,
+            min_path_length=args.min_path_length,
+            tasks_per_maze=args.tasks_per_maze,
+            progress_callback=_simple_progress_callback(
+                "Generating validation mazes"
+            ),
+        )
+        _finish_progress()
         save_dataset(
-            validation_stratified_path,
+            validation_path,
             validation_layouts,
             validation_seeds,
-            validation_stratified_indices,
-            validation_stratified_starts,
-            validation_stratified_goals,
+            validation_layout_indices,
+            validation_starts,
+            validation_goals,
         )
+        completed_splits.add("validation")
+        checkpoint()
 
-    save_dataset(
-        same_layout_path,
-        same_layout_layouts,
-        same_layout_seeds,
-        same_layout_indices,
-        same_layout_starts,
-        same_layout_goals,
-    )
+    if args.stratify:
+        if validation_stratified_path.exists():
+            print("Loading existing stratified validation split.")
+            (
+                _validation_stratified_layouts,
+                _saved_validation_stratified_seeds,
+                validation_stratified_indices,
+                validation_stratified_starts,
+                validation_stratified_goals,
+            ) = _load_dataset_arrays(validation_stratified_path)
+        else:
+            train_boundaries = DifficultyBoundaries(
+                short_max=args.short_max_path_length,
+                medium_max=args.medium_max_path_length,
+            )
+            (
+                validation_stratified_indices,
+                validation_stratified_starts,
+                validation_stratified_goals,
+                validation_stratified_metadata,
+            ) = generate_stratified_tasks_for_layouts(
+                validation_layouts,
+                validation_seeds,
+                tasks_per_maze=args.tasks_per_maze,
+                min_path_length=args.min_path_length,
+                dedupe_threshold=args.dedupe_threshold,
+                bucket_budgets=args.bucket_budgets,
+                random_seed=args.seed + 1,
+                allocation_attempts=args.allocation_attempts,
+                min_tasks_per_maze=args.min_tasks_per_maze,
+                max_tasks_per_maze=args.max_tasks_per_maze,
+                local_search_budget=args.local_search_budget,
+                global_repair_budget=args.global_repair_budget,
+                difficulty_boundaries=train_boundaries,
+                progress_callback=_stratified_progress_callback(
+                    "Selecting stratified validation tasks"
+                ),
+            )
+            _finish_progress()
+            save_dataset(
+                validation_stratified_path,
+                validation_layouts,
+                validation_seeds,
+                validation_stratified_indices,
+                validation_stratified_starts,
+                validation_stratified_goals,
+            )
+            completed_splits.add("validation_stratified")
+            checkpoint()
 
-    save_dataset(
-        test_path,
-        test_layouts,
-        test_seeds,
-        test_layout_indices,
-        test_starts,
-        test_goals,
-    )
-
-    metadata = {
-        "generator": "random_obstacle_grid",
-        "height": args.height,
-        "width": args.width,
-        "wall_probability": args.wall_probability,
-        "min_path_length": args.min_path_length,
-        "master_seed": args.seed,
-        "train_mazes": args.train_mazes,
-        "validation_mazes": args.validation_mazes,
-        "test_mazes": args.test_mazes,
-        "tasks_per_maze": args.tasks_per_maze,
-        "min_tasks_per_maze": args.min_tasks_per_maze,
-        "max_tasks_per_maze": args.max_tasks_per_maze,
-        "local_search_budget": args.local_search_budget,
-        "global_repair_budget": args.global_repair_budget,
-        "stratify": args.stratify,
-        "dedupe_threshold": args.dedupe_threshold,
-        "bucket_budgets": args.bucket_budgets,
-        "difficulty_boundaries": (
-            stratification_metadata["difficulty_boundaries"]
-            if stratification_metadata is not None
-            else None
-        ),
-        "same_layout_new_goals": {
-            "source": "train_layouts",
-            "layout_count": same_layout_maze_count,
-            "tasks_per_maze": args.tasks_per_maze,
-        },
-    }
-    if stratification_metadata is not None:
-        metadata["stratification"] = {
-            "train": stratification_metadata,
-            "validation_stratified": validation_stratified_metadata,
-        }
-
-    with metadata_path.open("w") as file:
-        json.dump(
-            metadata,
-            file,
-            indent=2,
+    if same_layout_path.exists():
+        print("Loading existing same-layout split.")
+        (
+            same_layout_layouts,
+            _saved_same_layout_seeds,
+            same_layout_indices,
+            same_layout_starts,
+            same_layout_goals,
+        ) = _load_dataset_arrays(same_layout_path)
+    else:
+        same_layout_layouts = train_layouts[:same_layout_maze_count]
+        same_layout_seeds = train_seeds[:same_layout_maze_count]
+        (
+            same_layout_indices,
+            same_layout_starts,
+            same_layout_goals,
+        ) = generate_tasks_for_layouts(
+            layouts=same_layout_layouts,
+            seeds=same_layout_seeds,
+            tasks_per_maze=args.tasks_per_maze,
+            min_path_length=args.min_path_length,
+            excluded_tasks_by_layout=task_pairs_by_layout(
+                train_layout_indices,
+                train_starts,
+                train_goals,
+            ),
+            progress_callback=_simple_progress_callback(
+                "Generating same-layout tasks"
+            ),
         )
+        _finish_progress()
+        save_dataset(
+            same_layout_path,
+            same_layout_layouts,
+            same_layout_seeds,
+            same_layout_indices,
+            same_layout_starts,
+            same_layout_goals,
+        )
+        completed_splits.add("same_layout_new_goals")
+        checkpoint()
+
+    if test_path.exists():
+        print("Loading existing test split.")
+        (
+            test_layouts,
+            _saved_test_seeds,
+            test_layout_indices,
+            test_starts,
+            test_goals,
+        ) = _load_dataset_arrays(test_path)
+    else:
+        (
+            test_layouts,
+            test_layout_indices,
+            test_starts,
+            test_goals,
+        ) = generate_mazes(
+            seeds=test_seeds,
+            height=args.height,
+            width=args.width,
+            wall_probability=args.wall_probability,
+            min_path_length=args.min_path_length,
+            tasks_per_maze=args.tasks_per_maze,
+            progress_callback=_simple_progress_callback(
+                "Generating test mazes"
+            ),
+        )
+        _finish_progress()
+        save_dataset(
+            test_path,
+            test_layouts,
+            test_seeds,
+            test_layout_indices,
+            test_starts,
+            test_goals,
+        )
+        completed_splits.add("test")
+        checkpoint()
+
+    metadata = _build_metadata(
+        args,
+        same_layout_maze_count=same_layout_maze_count,
+        stratification_metadata=stratification_metadata,
+        validation_stratified_metadata=validation_stratified_metadata,
+        completed_splits=completed_splits,
+        complete=True,
+    )
+    _write_metadata(metadata_path, metadata)
 
     print()
     print("Dataset generated successfully.")

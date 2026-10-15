@@ -115,6 +115,7 @@ def test_cli_defaults_configure_stratification(monkeypatch):
 
     args = parse_args()
 
+    assert args.resume is False
     assert args.dedupe_threshold == 0.75
     assert args.min_tasks_per_maze == 3
     assert args.max_tasks_per_maze == 7

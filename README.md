@@ -30,6 +30,11 @@ between layouts within the configurable `--min-tasks-per-maze` and
 `--max-tasks-per-maze` bounds. Search diagnostics are recorded in
 `metadata.json`.
 
+Generation saves each completed split immediately. If generation is
+interrupted, rerun with `--resume` to load existing split files and generate
+only the missing splits. Without `--resume`, an existing dataset prompts for
+confirmation and removes the known dataset files before starting over.
+
 Print split, bucket, contribution, and optimal-path summaries with:
 
 ```bash
