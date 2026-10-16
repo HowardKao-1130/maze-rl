@@ -21,6 +21,7 @@ from maze_rl.maze.stratification import (
     DEFAULT_BUCKET_BUDGETS,
     DEFAULT_DIFFICULTY_BOUNDARIES,
     DifficultyBoundaries,
+    format_failure_diagnostics,
     generate_layouts,
     generate_stratified_tasks_for_layouts,
 )
@@ -62,11 +63,11 @@ def _simple_progress_callback(label: str):
     return update
 
 
-def _write_progress_line(line: str) -> None:
-    if sys.stdout.isatty():
-        print(f"\033[2K\r{line}", end="", flush=True)
-    else:
-        print(line, flush=True)
+def _write_progress_line(line: str, *, persist: bool = False) -> None:
+    # Keep live progress on one physical line even when stdout is wrapped by
+    # a terminal runner that does not report itself as a TTY.
+    end = "\n" if persist else ""
+    print(f"\033[2K\r{line}", end=end, flush=True)
 
 
 def _stratified_progress_callback(label: str):
@@ -90,15 +91,73 @@ def _stratified_progress_callback(label: str):
                 f"{status}"
             )
         else:
-            line = f"{short_label} | {status}"
-        _write_progress_line(line)
+            attempt = event.get("allocation_attempt")
+            attempts = event.get("allocation_attempts")
+            attempt_status = (
+                f"attempt {attempt}/{attempts} | "
+                if attempt is not None and attempts is not None
+                else ""
+            )
+            if phase == "allocation":
+                bucket = event.get("allocation_bucket")
+                bucket_completed = event.get("allocation_bucket_completed")
+                bucket_total = event.get("allocation_bucket_total")
+                slots_completed = event.get("allocation_slots_completed")
+                slots_total = event.get("allocation_slots_total")
+                if all(
+                    value is not None
+                    for value in (
+                        bucket,
+                        bucket_completed,
+                        bucket_total,
+                        slots_completed,
+                        slots_total,
+                    )
+                ):
+                    phase_status = (
+                        "allocating slots | "
+                        f"{str(bucket)[0].upper()} "
+                        f"{bucket_completed}/{bucket_total} | "
+                        f"total {slots_completed}/{slots_total} | "
+                    )
+                else:
+                    phase_status = "allocating slots | "
+            elif phase == "selection":
+                phase_status = (
+                    "selecting tasks | "
+                    f"layouts {event['layouts_completed']}/"
+                    f"{event['layout_count']} | "
+                )
+            elif phase == "repair":
+                phase_status = (
+                    "repairing allocations | "
+                    f"attempts {event['repair_attempts']}/"
+                    f"{event['repair_budget']} | "
+                )
+            else:
+                phase_status = f"{phase} | " if phase else ""
+            reason = event.get("reason")
+            reason_status = f" ({reason})" if reason else ""
+            diagnostics = event.get("diagnostics")
+            diagnostics_status = ""
+            if isinstance(diagnostics, dict):
+                diagnostics_status = (
+                    "; " + format_failure_diagnostics(diagnostics)
+                )
+            line = (
+                f"{short_label} | {attempt_status}{phase_status}"
+                f"{status}{reason_status}{diagnostics_status}"
+            )
+        _write_progress_line(
+            line,
+            persist=bool(event.get("persist")),
+        )
 
     return update
 
 
 def _finish_progress() -> None:
-    if sys.stdout.isatty():
-        print()
+    print()
 
 
 def _confirm_overwrite(output_paths: list[Path]) -> list[Path]:

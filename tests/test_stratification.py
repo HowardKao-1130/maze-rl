@@ -8,12 +8,19 @@ from maze_rl.maze.stratification import (
     build_candidate_index,
     bucket_quotas,
     directed_weighted_jaccard,
+    _failure_diagnostics,
+    format_failure_diagnostics,
     generate_stratified_tasks_for_layouts,
+    allocate_bucket_slots,
     threshold_schedule,
 )
 from maze_rl.maze.pathfinding import shortest_distances
 from scripts.experiment_naming import experiment_dataset_name
-from scripts.generate_dataset import _confirm_overwrite, parse_args
+from scripts.generate_dataset import (
+    _confirm_overwrite,
+    _write_progress_line,
+    parse_args,
+)
 
 
 def test_directed_profiles_have_expected_similarity_properties():
@@ -83,6 +90,69 @@ def test_bucket_quotas_use_configured_budget_and_sum_to_total():
     ) == 7
 
 
+def test_failure_diagnostics_distinguish_search_stopping_reasons():
+    diagnostics = _failure_diagnostics(
+        {
+            "budget_exhausted_layouts": [2],
+            "proven_infeasible_layouts": [4, 7],
+        },
+        unresolved_before_repair=[
+            (2, "long"),
+            (4, "medium"),
+            (7, "long"),
+        ],
+        unresolved_after_repair=[(7, "long")],
+        contributions=[5, 5, 4, 5, 2, 5, 5, 2],
+        min_tasks_per_maze=3,
+        max_tasks_per_maze=7,
+        repair_metadata={
+            "repair_attempts": 3,
+            "successful_reallocations": 2,
+        },
+    )
+
+    assert diagnostics["budget_exhausted_count"] == 1
+    assert diagnostics["infeasible_assignment_count"] == 2
+    assert diagnostics["contribution_below_min_layouts"] == [4, 7]
+    assert diagnostics["unresolved_after_repair_by_bucket"] == {
+        "short": 0,
+        "medium": 0,
+        "long": 1,
+    }
+    message = format_failure_diagnostics(diagnostics)
+    assert "budget-exhausted layouts=1 [2]" in message
+    assert "infeasible current assignments=2 [4,7]" in message
+    assert "repairs=2/3" in message
+
+
+def test_slot_allocator_preserves_contribution_bounds_and_bucket_quotas():
+    layouts = np.zeros((10, 11, 11), dtype=np.uint8)
+    indexes = [
+        build_candidate_index(maze, min_path_length=3)
+        for maze in layouts
+    ]
+    apply_difficulty_buckets(
+        indexes,
+        DifficultyBoundaries(short_max=5, medium_max=8),
+    )
+    quotas = {"short": 10, "medium": 20, "long": 20}
+
+    assignments = allocate_bucket_slots(
+        indexes,
+        tasks_per_maze=5,
+        quotas=quotas,
+        rng=np.random.default_rng(42),
+        min_tasks_per_maze=3,
+        max_tasks_per_maze=7,
+    )
+
+    assert all(sum(assignment.values()) == 5 for assignment in assignments)
+    assert {
+        bucket: sum(assignment[bucket] for assignment in assignments)
+        for bucket in ("short", "medium", "long")
+    } == quotas
+
+
 def test_threshold_fallback_does_not_relax_the_configured_threshold():
     assert threshold_schedule(0.75) == (0.75,)
 
@@ -144,6 +214,18 @@ def test_overwrite_confirmation_requires_explicit_yes(tmp_path, monkeypatch):
     _confirm_overwrite([existing_file])
 
 
+def test_live_progress_updates_stay_on_one_line(capsys):
+    _write_progress_line("selecting tasks | layouts 0/5000")
+    _write_progress_line("selecting tasks | layouts 1/5000")
+    _write_progress_line("selection complete", persist=True)
+
+    assert capsys.readouterr().out == (
+        "\033[2K\rselecting tasks | layouts 0/5000"
+        "\033[2K\rselecting tasks | layouts 1/5000"
+        "\033[2K\rselection complete\n"
+    )
+
+
 def test_stratified_generation_is_reproducible_and_records_configuration():
     layouts = np.zeros((2, 7, 7), dtype=np.uint8)
     seeds = np.array([11, 22])
@@ -182,8 +264,26 @@ def test_stratified_generation_is_reproducible_and_records_configuration():
         "medium_max": 8.0,
     }
     assert progress_events[0]["phase"] == "indexing"
+    assert progress_events[-1]["allocation_attempt"] == 1
+    assert progress_events[-1]["allocation_attempts"] == 8
     assert progress_events[-1]["bucket_counts"] == {
         "short": 2,
         "medium": 4,
         "long": 4,
     }
+    allocation_events = [
+        event
+        for event in progress_events
+        if event["phase"] == "allocation"
+        and "allocation_bucket" in event
+    ]
+    assert allocation_events[-1]["allocation_slots_completed"] == 10
+    assert allocation_events[-1]["allocation_slots_total"] == 10
+    selection_events = [
+        event
+        for event in progress_events
+        if event["phase"] == "selection"
+    ]
+    assert selection_events[0]["layouts_completed"] == 0
+    assert selection_events[0]["layout_count"] == 2
+    assert selection_events[-1]["layouts_completed"] == 2
