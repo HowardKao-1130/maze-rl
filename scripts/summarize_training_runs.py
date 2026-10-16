@@ -239,6 +239,15 @@ def resolve_summary_paths(
         args.output_dir = args.runs_dir / "summary_plots"
 
 
+def print_summary_section(
+    title: str,
+) -> None:
+    print(
+        f"\n=== {title} ===",
+        flush=True,
+    )
+
+
 def parse_float(value: str | None) -> float | None:
     if value in (None, ""):
         return None
@@ -1241,6 +1250,9 @@ def main() -> None:
             summary_metrics.append(metric)
 
     for metric in summary_metrics:
+        print_summary_section(
+            f"Summary: {metric_label(metric)} training history",
+        )
         series = collect_training_run_series(
             args.runs_dir,
             metric=metric,
@@ -1274,6 +1286,9 @@ def main() -> None:
     )
     path_length_output_path = (
         args.output_dir / "optimal_path_length_summary.png"
+    )
+    print_summary_section(
+        "Summary: optimal path length diagnostics",
     )
     path_length_count = plot_path_length_summary(
         path_series,

@@ -9,6 +9,7 @@ from scripts.summarize_training_runs import (
     format_saved_file_message,
     plot_path_length_summary,
     plot_training_run_summary,
+    print_summary_section,
     resolve_summary_paths,
     subplot_title,
 )
@@ -162,6 +163,16 @@ def test_format_saved_file_message_includes_clickable_url(
     ) == (
         f"Saved plot to {output_path} (1 item)\n"
         f"Open: {output_path.resolve().as_uri()}"
+    )
+
+
+def test_print_summary_section_matches_tuning_summary_style(
+    capsys,
+):
+    print_summary_section("Summary: training history")
+
+    assert capsys.readouterr().out == (
+        "\n=== Summary: training history ===\n"
     )
 
 
