@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from types import SimpleNamespace
 
 from maze_rl.maze.stratification import (
     DifficultyBoundaries,
@@ -220,9 +221,24 @@ def test_live_progress_updates_stay_on_one_line(capsys):
     _write_progress_line("selection complete", persist=True)
 
     assert capsys.readouterr().out == (
-        "\033[2K\rselecting tasks | layouts 0/5000"
-        "\033[2K\rselecting tasks | layouts 1/5000"
-        "\033[2K\rselection complete\n"
+        "selecting tasks | layouts 0/5000"
+        "\r\033[Jselecting tasks | layouts 1/5000"
+        "\r\033[Jselection complete\n"
+    )
+
+
+def test_live_progress_clears_wrapped_rows(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "scripts.generate_dataset.shutil.get_terminal_size",
+        lambda fallback: SimpleNamespace(columns=10),
+    )
+
+    _write_progress_line("123456789012345")
+    _write_progress_line("updated", persist=True)
+
+    assert capsys.readouterr().out == (
+        "123456789012345"
+        "\033[1A\r\033[Jupdated\n"
     )
 
 

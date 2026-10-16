@@ -1,6 +1,7 @@
 import argparse
 import json
 from pathlib import Path
+import shutil
 import sys
 
 import numpy as np
@@ -63,11 +64,35 @@ def _simple_progress_callback(label: str):
     return update
 
 
+_progress_line_text: str | None = None
+
+
+def _progress_line_rows(line: str) -> int:
+    terminal_width = max(
+        shutil.get_terminal_size(fallback=(80, 24)).columns,
+        1,
+    )
+    return max((len(line) + terminal_width - 1) // terminal_width, 1)
+
+
+def _clear_progress_line() -> None:
+    global _progress_line_text
+    if _progress_line_text is None:
+        return
+
+    rows = _progress_line_rows(_progress_line_text)
+    move_up = f"\033[{rows - 1}A" if rows > 1 else ""
+    print(f"{move_up}\r\033[J", end="", flush=True)
+    _progress_line_text = None
+
+
 def _write_progress_line(line: str, *, persist: bool = False) -> None:
-    # Keep live progress on one physical line even when stdout is wrapped by
-    # a terminal runner that does not report itself as a TTY.
-    end = "\n" if persist else ""
-    print(f"\033[2K\r{line}", end=end, flush=True)
+    # Clear all wrapped rows before redrawing. A plain carriage return only
+    # reaches the start of the final wrapped row after a terminal resize.
+    global _progress_line_text
+    _clear_progress_line()
+    print(f"{line}", end="\n" if persist else "", flush=True)
+    _progress_line_text = None if persist else line
 
 
 def _stratified_progress_callback(label: str):
@@ -157,7 +182,10 @@ def _stratified_progress_callback(label: str):
 
 
 def _finish_progress() -> None:
-    print()
+    global _progress_line_text
+    if _progress_line_text is not None:
+        print()
+        _progress_line_text = None
 
 
 def _confirm_overwrite(output_paths: list[Path]) -> list[Path]:
