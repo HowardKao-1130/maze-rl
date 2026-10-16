@@ -242,6 +242,13 @@ def test_live_progress_clears_wrapped_rows(monkeypatch, capsys):
     )
 
 
+def test_different_progress_streams_do_not_overwrite_each_other(capsys):
+    _write_progress_line("training", progress_key="training")
+    _write_progress_line("validation", progress_key="validation")
+
+    assert capsys.readouterr().out == "training\nvalidation"
+
+
 def test_stratified_generation_is_reproducible_and_records_configuration():
     layouts = np.zeros((2, 7, 7), dtype=np.uint8)
     seeds = np.array([11, 22])

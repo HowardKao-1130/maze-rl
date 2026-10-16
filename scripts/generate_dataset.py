@@ -59,12 +59,16 @@ def task_pairs_by_layout(
 
 def _simple_progress_callback(label: str):
     def update(completed: int, total: int) -> None:
-        _write_progress_line(f"{label}: {completed}/{total}")
+        _write_progress_line(
+            f"{label}: {completed}/{total}",
+            progress_key=label,
+        )
 
     return update
 
 
 _progress_line_text: str | None = None
+_progress_line_key: str | None = None
 
 
 def _progress_line_rows(line: str) -> int:
@@ -76,7 +80,7 @@ def _progress_line_rows(line: str) -> int:
 
 
 def _clear_progress_line() -> None:
-    global _progress_line_text
+    global _progress_line_key, _progress_line_text
     if _progress_line_text is None:
         return
 
@@ -84,15 +88,29 @@ def _clear_progress_line() -> None:
     move_up = f"\033[{rows - 1}A" if rows > 1 else ""
     print(f"{move_up}\r\033[J", end="", flush=True)
     _progress_line_text = None
+    _progress_line_key = None
 
 
-def _write_progress_line(line: str, *, persist: bool = False) -> None:
+def _write_progress_line(
+    line: str,
+    *,
+    persist: bool = False,
+    progress_key: str = "default",
+) -> None:
     # Clear all wrapped rows before redrawing. A plain carriage return only
     # reaches the start of the final wrapped row after a terminal resize.
-    global _progress_line_text
-    _clear_progress_line()
+    global _progress_line_key, _progress_line_text
+    if (
+        _progress_line_text is not None
+        and _progress_line_key != progress_key
+    ):
+        # A different progress stream must not overwrite the previous one.
+        _finish_progress()
+    if _progress_line_text is not None:
+        _clear_progress_line()
     print(f"{line}", end="\n" if persist else "", flush=True)
     _progress_line_text = None if persist else line
+    _progress_line_key = None if persist else progress_key
 
 
 def _stratified_progress_callback(label: str):
@@ -176,16 +194,18 @@ def _stratified_progress_callback(label: str):
         _write_progress_line(
             line,
             persist=bool(event.get("persist")),
+            progress_key=label,
         )
 
     return update
 
 
 def _finish_progress() -> None:
-    global _progress_line_text
+    global _progress_line_key, _progress_line_text
     if _progress_line_text is not None:
         print()
         _progress_line_text = None
+        _progress_line_key = None
 
 
 def _confirm_overwrite(output_paths: list[Path]) -> list[Path]:
