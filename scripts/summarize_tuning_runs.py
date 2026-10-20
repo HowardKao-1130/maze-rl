@@ -145,11 +145,13 @@ def training_summary_completion_status(
 SUMMARY_SPLITS = [
     "validation",
     "same_layout",
+    "natural_validation",
 ]
 SUMMARY_SPLIT_LABELS = {
     "train_greedy": "train-greedy",
     "validation": "val",
     "same_layout": "same-val",
+    "natural_validation": "val-natural",
 }
 SUMMARY_SPLIT_ALIASES = {
     "train": "train_greedy",
@@ -162,6 +164,9 @@ SUMMARY_SPLIT_ALIASES = {
     "val_with_same_layout": "same_layout",
     "same-val": "same_layout",
     "same_val": "same_layout",
+    "natural_validation": "natural_validation",
+    "val-natural": "natural_validation",
+    "natural-val": "natural_validation",
 }
 SUMMARY_MONTAGE_X_LIMIT = (
     0,
@@ -198,6 +203,11 @@ SUMMARY_SERIES_STYLES = {
         "color": "#ff7f0e",
         "linestyle": "-",
     },
+    "natural_validation": {
+        "label": "val-natural",
+        "color": "#9467bd",
+        "linestyle": "-",
+    },
     "train_greedy": {
         "label": "train-greedy",
         "color": "#d62728",
@@ -213,6 +223,7 @@ SUMMARY_SCORE_LABELS = {
     "train_greedy": "tg",
     "validation": "v",
     "same_layout": "vs",
+    "natural_validation": "vn",
     "train": "t",
 }
 SUMMARY_METRIC_LABELS = {

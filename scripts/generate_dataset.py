@@ -19,6 +19,7 @@ from maze_rl.maze.dataset import (
     save_dataset,
 )
 from maze_rl.maze.stratification import (
+    DEDUPE_SCOPE,
     DEFAULT_BUCKET_BUDGETS,
     DEFAULT_DIFFICULTY_BOUNDARIES,
     DifficultyBoundaries,
@@ -30,6 +31,9 @@ from scripts.experiment_naming import (
     DEFAULT_DATA_OUTPUT_ROOT,
     experiment_dataset_name,
 )
+
+
+NATURAL_SPLIT_SEED_OFFSET = 1_000_000_000
 
 
 def task_pairs_by_layout(
@@ -116,6 +120,8 @@ def _write_progress_line(
 def _stratified_progress_callback(label: str):
     if "validation" in label:
         short_label = "Stratified validation"
+    elif "test" in label:
+        short_label = "Stratified test"
     else:
         short_label = "Stratified training"
 
@@ -185,7 +191,11 @@ def _stratified_progress_callback(label: str):
             diagnostics_status = ""
             if isinstance(diagnostics, dict):
                 diagnostics_status = (
-                    "; " + format_failure_diagnostics(diagnostics)
+                    "\n  "
+                    + format_failure_diagnostics(diagnostics).replace(
+                        "\n",
+                        "\n  ",
+                    )
                 )
             line = (
                 f"{short_label} | {attempt_status}{phase_status}"
@@ -194,7 +204,10 @@ def _stratified_progress_callback(label: str):
         _write_progress_line(
             line,
             persist=bool(event.get("persist")),
-            progress_key=label,
+            # Keep each phase on its own terminal line. Updates within a
+            # phase still redraw in place, while a transition finalizes the
+            # previous phase's last status before starting the next one.
+            progress_key=f"{label}:{phase or 'unknown'}",
         )
 
     return update
@@ -273,7 +286,8 @@ def _build_metadata(
     *,
     same_layout_maze_count: int,
     stratification_metadata: dict[str, object] | None,
-    validation_stratified_metadata: dict[str, object] | None,
+    validation_metadata: dict[str, object] | None,
+    test_metadata: dict[str, object] | None,
     completed_splits: set[str],
     complete: bool,
 ) -> dict[str, object]:
@@ -292,7 +306,16 @@ def _build_metadata(
         "max_tasks_per_maze": args.max_tasks_per_maze,
         "local_search_budget": args.local_search_budget,
         "global_repair_budget": args.global_repair_budget,
+        "minimum_long_eligible_tasks": (
+            args.minimum_long_eligible_tasks
+        ),
         "stratify": args.stratify,
+        "dedupe_metric": (
+            "expected_pairwise_directed_path_jaccard"
+            if args.stratify
+            else None
+        ),
+        "dedupe_scope": DEDUPE_SCOPE if args.stratify else None,
         "dedupe_threshold": args.dedupe_threshold,
         "bucket_budgets": args.bucket_budgets,
         "difficulty_boundaries": (
@@ -312,13 +335,21 @@ def _build_metadata(
             "layout_count": same_layout_maze_count,
             "tasks_per_maze": args.tasks_per_maze,
         },
+        "dataset_roles": {
+            "validation.npz": "val",
+            "same_layout_new_goals.npz": "val-same",
+            "validation_natural.npz": "val-natural",
+            "test.npz": "test",
+            "test_natural.npz": "test-natural",
+        },
         "generation_status": "complete" if complete else "in_progress",
         "completed_splits": sorted(completed_splits),
     }
     if args.stratify:
         metadata["stratification"] = {
             "train": stratification_metadata,
-            "validation_stratified": validation_stratified_metadata,
+            "validation": validation_metadata,
+            "test": test_metadata,
         }
     return metadata
 
@@ -344,12 +375,16 @@ def _validate_resume_metadata(
         "max_tasks_per_maze": args.max_tasks_per_maze,
         "local_search_budget": args.local_search_budget,
         "global_repair_budget": args.global_repair_budget,
+        "minimum_long_eligible_tasks": (
+            args.minimum_long_eligible_tasks
+        ),
     }
     if args.stratify:
         expected["difficulty_boundaries"] = {
             "short_max": float(args.short_max_path_length),
             "medium_max": float(args.medium_max_path_length),
         }
+        expected["dedupe_scope"] = DEDUPE_SCOPE
     comparable_metadata = dict(metadata)
     if "difficulty_boundaries" not in comparable_metadata:
         stratification = comparable_metadata.get("stratification")
@@ -365,6 +400,12 @@ def _validate_resume_metadata(
         if field in comparable_metadata
         and comparable_metadata[field] != value
     ]
+    if args.stratify and "dedupe_scope" not in comparable_metadata:
+        mismatches.append("dedupe_scope")
+    if args.stratify:
+        roles = comparable_metadata.get("dataset_roles")
+        if not isinstance(roles, dict) or roles.get("validation.npz") != "val":
+            mismatches.append("dataset_roles")
     if mismatches:
         raise SystemExit(
             "Resume configuration does not match existing metadata for: "
@@ -462,7 +503,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--min-path-length",
         type=int,
-        default=10,
+        default=3,
     )
 
     parser.add_argument(
@@ -490,7 +531,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Select training tasks using difficulty buckets and "
-            "directed weighted Jaccard deduplication."
+            "expected pairwise directed path-Jaccard deduplication."
         ),
     )
 
@@ -506,15 +547,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dedupe-threshold",
         type=float,
-        default=0.75,
-        help="Maximum directed weighted Jaccard similarity threshold.",
+        default=0.7,
+        help=(
+            "Maximum expected pairwise directed path-Jaccard "
+            "similarity threshold."
+        ),
     )
 
     parser.add_argument(
         "--short-budget",
         type=float,
         default=DEFAULT_BUCKET_BUDGETS["short"],
-        help="Fraction of stratified tasks allocated to short paths.",
+        help="Fraction allocated to short paths; defaults to unused (0).",
     )
 
     parser.add_argument(
@@ -532,10 +576,20 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--minimum-long-eligible-tasks",
+        type=int,
+        default=None,
+        help=(
+            "Minimum long-task candidates required in each filtered "
+            "layout. Defaults to ceil(tasks-per-maze * long-budget)."
+        ),
+    )
+
+    parser.add_argument(
         "--short-max-path-length",
         type=int,
         default=int(DEFAULT_DIFFICULTY_BOUNDARIES.short_max),
-        help="Maximum shortest-path length in the short bucket.",
+        help="Maximum shortest-path length in the unused short bucket.",
     )
 
     parser.add_argument(
@@ -596,6 +650,14 @@ def parse_args() -> argparse.Namespace:
         parser.error("Bucket budgets must be non-negative.")
     if not np.isclose(sum(args.bucket_budgets.values()), 1.0):
         parser.error("Bucket budgets must sum to 1.0.")
+    if args.minimum_long_eligible_tasks is None:
+        args.minimum_long_eligible_tasks = int(
+            np.ceil(
+                args.tasks_per_maze * args.bucket_budgets["long"]
+            )
+        )
+    if args.minimum_long_eligible_tasks < 0:
+        parser.error("--minimum-long-eligible-tasks must be non-negative.")
 
     if args.output_dir is None:
         args.output_dir = args.output_root / experiment_dataset_name(
@@ -617,20 +679,22 @@ def main() -> None:
     args = parse_args()
     train_path = args.output_dir / "train.npz"
     validation_path = args.output_dir / "validation.npz"
-    validation_stratified_path = (
-        args.output_dir / "validation_stratified.npz"
+    validation_natural_path = (
+        args.output_dir / "validation_natural.npz"
     )
     same_layout_path = (
         args.output_dir / "same_layout_new_goals.npz"
     )
     test_path = args.output_dir / "test.npz"
+    test_natural_path = args.output_dir / "test_natural.npz"
     metadata_path = args.output_dir / "metadata.json"
     output_paths = [
         train_path,
         validation_path,
-        validation_stratified_path,
+        validation_natural_path,
         same_layout_path,
         test_path,
+        test_natural_path,
         metadata_path,
     ]
     if args.validation_mazes > args.train_mazes:
@@ -650,14 +714,15 @@ def main() -> None:
 
     print(f"Writing datasets to {args.output_dir}")
     print(f"  train:        {train_path}")
-    print(f"  validation:   {validation_path}")
     if args.stratify:
-        print(
-            "  val-stratified: "
-            f"{validation_stratified_path}"
-        )
-    print(f"  same-layout:  {same_layout_path}")
+        print(f"  val:          {validation_path}")
+        print(f"  val-natural:  {validation_natural_path}")
+    else:
+        print(f"  validation:   {validation_path}")
+    print(f"  val-same:     {same_layout_path}")
     print(f"  test:         {test_path}")
+    if args.stratify:
+        print(f"  test-natural: {test_natural_path}")
     print(f"  metadata:     {metadata_path}")
 
     (
@@ -678,8 +743,11 @@ def main() -> None:
         ("test", test_path),
     ]
     if args.stratify:
-        split_paths.append(
-            ("validation_stratified", validation_stratified_path)
+        split_paths.extend(
+            [
+                ("validation_natural", validation_natural_path),
+                ("test_natural", test_natural_path),
+            ]
         )
     completed_splits = {
         split for split, path in split_paths if path.exists()
@@ -693,11 +761,14 @@ def main() -> None:
     stratification_metadata = stratification_checkpoint.get("train")
     if not isinstance(stratification_metadata, dict):
         stratification_metadata = None
-    validation_stratified_metadata = stratification_checkpoint.get(
-        "validation_stratified"
+    validation_metadata = stratification_checkpoint.get(
+        "validation"
     )
-    if not isinstance(validation_stratified_metadata, dict):
-        validation_stratified_metadata = None
+    if not isinstance(validation_metadata, dict):
+        validation_metadata = None
+    test_metadata = stratification_checkpoint.get("test")
+    if not isinstance(test_metadata, dict):
+        test_metadata = None
 
     same_layout_maze_count = args.validation_mazes
 
@@ -708,7 +779,8 @@ def main() -> None:
                 args,
                 same_layout_maze_count=same_layout_maze_count,
                 stratification_metadata=stratification_metadata,
-                validation_stratified_metadata=validation_stratified_metadata,
+                validation_metadata=validation_metadata,
+                test_metadata=test_metadata,
                 completed_splits=completed_splits,
                 complete=False,
             ),
@@ -732,6 +804,10 @@ def main() -> None:
                 wall_probability=args.wall_probability,
                 min_path_length=args.min_path_length,
                 minimum_eligible_tasks=args.min_tasks_per_maze,
+                minimum_long_eligible_tasks=(
+                    args.minimum_long_eligible_tasks
+                ),
+                long_path_min_length=args.medium_max_path_length + 1,
                 progress_callback=_simple_progress_callback(
                     "Generating training mazes"
                 ),
@@ -806,6 +882,11 @@ def main() -> None:
         completed_splits.add("train")
         checkpoint()
 
+    boundaries = DifficultyBoundaries(
+        short_max=args.short_max_path_length,
+        medium_max=args.medium_max_path_length,
+    )
+
     if validation_path.exists():
         print("Loading existing validation split.")
         (
@@ -815,6 +896,57 @@ def main() -> None:
             validation_starts,
             validation_goals,
         ) = _load_dataset_arrays(validation_path)
+    elif args.stratify:
+        validation_layouts = generate_layouts(
+            seeds=validation_seeds,
+            height=args.height,
+            width=args.width,
+            wall_probability=args.wall_probability,
+            min_path_length=args.min_path_length,
+            minimum_eligible_tasks=args.min_tasks_per_maze,
+            minimum_long_eligible_tasks=(
+                args.minimum_long_eligible_tasks
+            ),
+            long_path_min_length=args.medium_max_path_length + 1,
+            progress_callback=_simple_progress_callback(
+                "Generating filtered validation mazes"
+            ),
+        )
+        _finish_progress()
+        (
+            validation_layout_indices,
+            validation_starts,
+            validation_goals,
+            validation_metadata,
+        ) = generate_stratified_tasks_for_layouts(
+            validation_layouts,
+            validation_seeds,
+            tasks_per_maze=args.tasks_per_maze,
+            min_path_length=args.min_path_length,
+            dedupe_threshold=args.dedupe_threshold,
+            bucket_budgets=args.bucket_budgets,
+            random_seed=args.seed + 1,
+            allocation_attempts=args.allocation_attempts,
+            min_tasks_per_maze=args.min_tasks_per_maze,
+            max_tasks_per_maze=args.max_tasks_per_maze,
+            local_search_budget=args.local_search_budget,
+            global_repair_budget=args.global_repair_budget,
+            difficulty_boundaries=boundaries,
+            progress_callback=_stratified_progress_callback(
+                "Selecting stratified validation tasks"
+            ),
+        )
+        _finish_progress()
+        save_dataset(
+            validation_path,
+            validation_layouts,
+            validation_seeds,
+            validation_layout_indices,
+            validation_starts,
+            validation_goals,
+        )
+        completed_splits.add("validation")
+        checkpoint()
     else:
         (
             validation_layouts,
@@ -845,53 +977,45 @@ def main() -> None:
         checkpoint()
 
     if args.stratify:
-        if validation_stratified_path.exists():
-            print("Loading existing stratified validation split.")
+        natural_validation_seeds = (
+            validation_seeds + NATURAL_SPLIT_SEED_OFFSET
+        )
+        if validation_natural_path.exists():
+            print("Loading existing natural validation split.")
             (
-                _validation_stratified_layouts,
-                _saved_validation_stratified_seeds,
-                validation_stratified_indices,
-                validation_stratified_starts,
-                validation_stratified_goals,
-            ) = _load_dataset_arrays(validation_stratified_path)
+                validation_natural_layouts,
+                _saved_validation_natural_seeds,
+                validation_natural_indices,
+                validation_natural_starts,
+                validation_natural_goals,
+            ) = _load_dataset_arrays(validation_natural_path)
         else:
-            train_boundaries = DifficultyBoundaries(
-                short_max=args.short_max_path_length,
-                medium_max=args.medium_max_path_length,
-            )
             (
-                validation_stratified_indices,
-                validation_stratified_starts,
-                validation_stratified_goals,
-                validation_stratified_metadata,
-            ) = generate_stratified_tasks_for_layouts(
-                validation_layouts,
-                validation_seeds,
-                tasks_per_maze=args.tasks_per_maze,
+                validation_natural_layouts,
+                validation_natural_indices,
+                validation_natural_starts,
+                validation_natural_goals,
+            ) = generate_mazes(
+                seeds=natural_validation_seeds,
+                height=args.height,
+                width=args.width,
+                wall_probability=args.wall_probability,
                 min_path_length=args.min_path_length,
-                dedupe_threshold=args.dedupe_threshold,
-                bucket_budgets=args.bucket_budgets,
-                random_seed=args.seed + 1,
-                allocation_attempts=args.allocation_attempts,
-                min_tasks_per_maze=args.min_tasks_per_maze,
-                max_tasks_per_maze=args.max_tasks_per_maze,
-                local_search_budget=args.local_search_budget,
-                global_repair_budget=args.global_repair_budget,
-                difficulty_boundaries=train_boundaries,
-                progress_callback=_stratified_progress_callback(
-                    "Selecting stratified validation tasks"
+                tasks_per_maze=args.tasks_per_maze,
+                progress_callback=_simple_progress_callback(
+                    "Generating natural validation mazes"
                 ),
             )
             _finish_progress()
             save_dataset(
-                validation_stratified_path,
-                validation_layouts,
-                validation_seeds,
-                validation_stratified_indices,
-                validation_stratified_starts,
-                validation_stratified_goals,
+                validation_natural_path,
+                validation_natural_layouts,
+                natural_validation_seeds,
+                validation_natural_indices,
+                validation_natural_starts,
+                validation_natural_goals,
             )
-            completed_splits.add("validation_stratified")
+            completed_splits.add("validation_natural")
             checkpoint()
 
     if same_layout_path.exists():
@@ -945,6 +1069,57 @@ def main() -> None:
             test_starts,
             test_goals,
         ) = _load_dataset_arrays(test_path)
+    elif args.stratify:
+        test_layouts = generate_layouts(
+            seeds=test_seeds,
+            height=args.height,
+            width=args.width,
+            wall_probability=args.wall_probability,
+            min_path_length=args.min_path_length,
+            minimum_eligible_tasks=args.min_tasks_per_maze,
+            minimum_long_eligible_tasks=(
+                args.minimum_long_eligible_tasks
+            ),
+            long_path_min_length=args.medium_max_path_length + 1,
+            progress_callback=_simple_progress_callback(
+                "Generating filtered test mazes"
+            ),
+        )
+        _finish_progress()
+        (
+            test_layout_indices,
+            test_starts,
+            test_goals,
+            test_metadata,
+        ) = generate_stratified_tasks_for_layouts(
+            test_layouts,
+            test_seeds,
+            tasks_per_maze=args.tasks_per_maze,
+            min_path_length=args.min_path_length,
+            dedupe_threshold=args.dedupe_threshold,
+            bucket_budgets=args.bucket_budgets,
+            random_seed=args.seed + 2,
+            allocation_attempts=args.allocation_attempts,
+            min_tasks_per_maze=args.min_tasks_per_maze,
+            max_tasks_per_maze=args.max_tasks_per_maze,
+            local_search_budget=args.local_search_budget,
+            global_repair_budget=args.global_repair_budget,
+            difficulty_boundaries=boundaries,
+            progress_callback=_stratified_progress_callback(
+                "Selecting stratified test tasks"
+            ),
+        )
+        _finish_progress()
+        save_dataset(
+            test_path,
+            test_layouts,
+            test_seeds,
+            test_layout_indices,
+            test_starts,
+            test_goals,
+        )
+        completed_splits.add("test")
+        checkpoint()
     else:
         (
             test_layouts,
@@ -974,11 +1149,52 @@ def main() -> None:
         completed_splits.add("test")
         checkpoint()
 
+    if args.stratify:
+        natural_test_seeds = test_seeds + NATURAL_SPLIT_SEED_OFFSET
+        if test_natural_path.exists():
+            print("Loading existing natural test split.")
+            (
+                test_natural_layouts,
+                _saved_test_natural_seeds,
+                test_natural_indices,
+                test_natural_starts,
+                test_natural_goals,
+            ) = _load_dataset_arrays(test_natural_path)
+        else:
+            (
+                test_natural_layouts,
+                test_natural_indices,
+                test_natural_starts,
+                test_natural_goals,
+            ) = generate_mazes(
+                seeds=natural_test_seeds,
+                height=args.height,
+                width=args.width,
+                wall_probability=args.wall_probability,
+                min_path_length=args.min_path_length,
+                tasks_per_maze=args.tasks_per_maze,
+                progress_callback=_simple_progress_callback(
+                    "Generating natural test mazes"
+                ),
+            )
+            _finish_progress()
+            save_dataset(
+                test_natural_path,
+                test_natural_layouts,
+                natural_test_seeds,
+                test_natural_indices,
+                test_natural_starts,
+                test_natural_goals,
+            )
+            completed_splits.add("test_natural")
+            checkpoint()
+
     metadata = _build_metadata(
         args,
         same_layout_maze_count=same_layout_maze_count,
         stratification_metadata=stratification_metadata,
-        validation_stratified_metadata=validation_stratified_metadata,
+        validation_metadata=validation_metadata,
+        test_metadata=test_metadata,
         completed_splits=completed_splits,
         complete=True,
     )
@@ -989,14 +1205,15 @@ def main() -> None:
     print(f"Output directory:   {args.output_dir}")
     print("Stored files:")
     print(f"  train:        {train_path}")
-    print(f"  validation:   {validation_path}")
     if args.stratify:
-        print(
-            "  val-stratified: "
-            f"{validation_stratified_path}"
-        )
-    print(f"  same-layout:  {same_layout_path}")
+        print(f"  val:          {validation_path}")
+        print(f"  val-natural:  {validation_natural_path}")
+    else:
+        print(f"  validation:   {validation_path}")
+    print(f"  val-same:     {same_layout_path}")
     print(f"  test:         {test_path}")
+    if args.stratify:
+        print(f"  test-natural: {test_natural_path}")
     print(f"  metadata:     {metadata_path}")
     print(
         f"Train layouts:      {train_layouts.shape}"
@@ -1016,6 +1233,13 @@ def main() -> None:
         f"{len(same_layout_starts)}"
     )
     print(f"Test tasks:         {len(test_starts)}")
+    if args.stratify:
+        print(
+            f"Natural validation tasks: {len(validation_natural_starts)}"
+        )
+        print(
+            f"Natural test tasks:       {len(test_natural_starts)}"
+        )
 
 
 if __name__ == "__main__":

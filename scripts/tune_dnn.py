@@ -311,7 +311,9 @@ TUNING_ARGUMENT_FIELDS = [
     "train_dataset",
     "validation_dataset",
     "same_layout_dataset",
+    "natural_validation_dataset",
     "test_dataset",
+    "natural_test_dataset",
     "evaluate_best_on_test",
     "search_space",
     "validation_all_tasks",
@@ -323,6 +325,8 @@ TUNING_ARGUMENT_FIELDS = [
 ]
 TUNING_OPTIONAL_ARGUMENT_DEFAULTS = {
     "dataset": None,
+    "natural_validation_dataset": None,
+    "natural_test_dataset": None,
     "q_snapshot_count": 11,
     "sampler": "random",
     "validation_all_tasks": True,
@@ -332,7 +336,9 @@ TUNING_PATH_ARGUMENT_FIELDS = {
     "train_dataset",
     "validation_dataset",
     "same_layout_dataset",
+    "natural_validation_dataset",
     "test_dataset",
+    "natural_test_dataset",
     "search_space",
 }
 COMMAND_TERMINATION_TIMEOUT_SECONDS = 10.0
@@ -463,7 +469,8 @@ def parse_args(
         help=(
             "Dataset bundle name under data/datasets, containing "
             "train.npz, validation.npz, same_layout_new_goals.npz, "
-            "and optionally test.npz. Also determines the tuning "
+            "validation_natural.npz, and optionally test.npz and "
+            "test_natural.npz. Also determines the tuning "
             "output directory unless --output-dir or "
             "--experiment-name is provided."
         ),
@@ -498,6 +505,16 @@ def parse_args(
         ),
     )
     parser.add_argument(
+        "--natural-validation-dataset",
+        type=Path,
+        default=None,
+        help=(
+            "Explicit natural-layout validation split to monitor "
+            "beside the primary val split. Prefer --dataset for "
+            "standard dataset bundles."
+        ),
+    )
+    parser.add_argument(
         "--test-dataset",
         type=Path,
         default=None,
@@ -505,6 +522,15 @@ def parse_args(
             "Explicit test split path. Used only with "
             "--evaluate-best-on-test. Prefer --dataset for standard "
             "dataset bundles."
+        ),
+    )
+    parser.add_argument(
+        "--natural-test-dataset",
+        type=Path,
+        default=None,
+        help=(
+            "Explicit natural-layout test split path. Used with "
+            "--evaluate-best-on-test when provided."
         ),
     )
     parser.add_argument(
@@ -1225,6 +1251,19 @@ def build_training_command(
         str(args.q_snapshot_count),
     ]
 
+    natural_validation_dataset = getattr(
+        args,
+        "natural_validation_dataset",
+        None,
+    )
+    if natural_validation_dataset is not None:
+        command.extend(
+            [
+                "--natural-validation-dataset",
+                str(natural_validation_dataset),
+            ]
+        )
+
     if args.tensorboard:
         command.append("--tensorboard")
     else:
@@ -1374,7 +1413,11 @@ def resolve_dataset_bundle_args(
     same_layout_dataset = (
         dataset_dir / "same_layout_new_goals.npz"
     )
+    natural_validation_dataset = (
+        dataset_dir / "validation_natural.npz"
+    )
     test_dataset = dataset_dir / "test.npz"
+    natural_test_dataset = dataset_dir / "test_natural.npz"
 
     if not train_dataset.exists():
         raise ValueError(
@@ -1391,8 +1434,20 @@ def resolve_dataset_bundle_args(
     if args.same_layout_dataset is None:
         args.same_layout_dataset = same_layout_dataset
 
+    if getattr(args, "natural_validation_dataset", None) is None:
+        if natural_validation_dataset.exists():
+            args.natural_validation_dataset = (
+                natural_validation_dataset
+            )
+
     if args.test_dataset is None and test_dataset.exists():
         args.test_dataset = test_dataset
+
+    if (
+        getattr(args, "natural_test_dataset", None) is None
+        and natural_test_dataset.exists()
+    ):
+        args.natural_test_dataset = natural_test_dataset
 
     if (
         args.output_dir is None
@@ -2940,6 +2995,44 @@ def main() -> None:
                 f"{test_summary['mean_path_efficiency']:.3f}",
                 flush=True,
             )
+
+            natural_test_dataset = getattr(
+                args,
+                "natural_test_dataset",
+                None,
+            )
+            if natural_test_dataset is not None:
+                natural_test_evaluation_path = (
+                    args.output_dir
+                    / "best_test_natural_evaluation.csv"
+                )
+                run_command(
+                    build_evaluation_command(
+                        args=args,
+                        checkpoint_path=Path(
+                            best_result[
+                                "checkpoint_path"
+                            ]
+                        ),
+                        validation_dataset=natural_test_dataset,
+                        evaluation_path=(
+                            natural_test_evaluation_path
+                        ),
+                        trial_seed=int(
+                            best_result["seed"]
+                        ),
+                    ),
+                    dry_run=False,
+                )
+                natural_test_summary = summarize_evaluation(
+                    natural_test_evaluation_path
+                )
+                print(
+                    "Best-combination test-natural mean path "
+                    "efficiency: "
+                    f"{natural_test_summary['mean_path_efficiency']:.3f}",
+                    flush=True,
+                )
 
 
 if __name__ == "__main__":

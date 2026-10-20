@@ -21,9 +21,10 @@ BUCKETS = ("short", "medium", "long")
 SPLITS = (
     "train",
     "validation",
-    "validation_stratified",
     "same_layout_new_goals",
+    "validation_natural",
     "test",
+    "test_natural",
 )
 
 

@@ -69,7 +69,9 @@ def write_dataset_bundle(
         "train.npz",
         "validation.npz",
         "same_layout_new_goals.npz",
+        "validation_natural.npz",
         "test.npz",
+        "test_natural.npz",
     ]:
         (dataset_dir / split).write_bytes(b"")
     return dataset_dir
@@ -313,8 +315,14 @@ def test_dataset_bundle_resolution_infers_splits_and_output(
     assert args.same_layout_dataset == (
         resolved_dataset_dir / "same_layout_new_goals.npz"
     )
+    assert args.natural_validation_dataset == (
+        resolved_dataset_dir / "validation_natural.npz"
+    )
     assert args.test_dataset == (
         resolved_dataset_dir / "test.npz"
+    )
+    assert args.natural_test_dataset == (
+        resolved_dataset_dir / "test_natural.npz"
     )
     assert args.output_dir == (
         tmp_path

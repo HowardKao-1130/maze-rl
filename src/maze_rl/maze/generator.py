@@ -24,7 +24,7 @@ def generate_valid_maze(
     width: int,
     wall_probability: float,
     rng: np.random.Generator,
-    min_path_length: int = 10,
+    min_path_length: int = 3,
     max_attempts: int = 1000,
 ):
     for _ in range(max_attempts):
@@ -74,7 +74,7 @@ def generate_valid_tasks_for_maze(
     maze: np.ndarray,
     task_count: int,
     rng: np.random.Generator,
-    min_path_length: int = 10,
+    min_path_length: int = 3,
     excluded_tasks: set[
         tuple[tuple[int, int], tuple[int, int]]
     ] | None = None,
@@ -131,3 +131,30 @@ def generate_valid_tasks_for_maze(
         goals[i] = goal
 
     return starts, goals
+
+
+def count_valid_tasks_by_min_path_length(
+    maze: np.ndarray,
+    minimum_path_lengths: tuple[int, ...],
+) -> dict[int, int]:
+    """Count eligible directed tasks for several thresholds in one scan.
+
+    The shortest-distance map for each traversable start is shared across
+    thresholds. This is used while filtering layouts so total-task and
+    long-task capacity checks do not repeat the same BFS work.
+    """
+    counts = {
+        int(minimum_path_length): 0
+        for minimum_path_length in minimum_path_lengths
+    }
+
+    for start in traversable_positions(maze):
+        distances = shortest_distances(maze, start)
+        for goal, distance in distances.items():
+            if goal == start:
+                continue
+            for minimum_path_length in counts:
+                if distance >= minimum_path_length:
+                    counts[minimum_path_length] += 1
+
+    return counts

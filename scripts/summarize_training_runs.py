@@ -113,6 +113,11 @@ SERIES_STYLES = {
         "color": "#ff7f0e",
         "linestyle": "-",
     },
+    "natural_validation": {
+        "label": "val-natural",
+        "color": "#9467bd",
+        "linestyle": "-",
+    },
     "train": {
         "label": "train",
         "color": "#2ca02c",
@@ -128,6 +133,7 @@ SCORE_LABELS = {
     "train": "t",
     "validation": "v",
     "same_layout": "vs",
+    "natural_validation": "vn",
     "train_greedy": "tg",
 }
 SPLIT_ALIASES = {
@@ -137,6 +143,9 @@ SPLIT_ALIASES = {
     "val_with_same_layout": "same_layout",
     "same-val": "same_layout",
     "same_val": "same_layout",
+    "natural_validation": "natural_validation",
+    "val-natural": "natural_validation",
+    "natural-val": "natural_validation",
     "train": "train_greedy",
     "train_greedy": "train_greedy",
     "greedy_train": "train_greedy",
@@ -145,6 +154,7 @@ SPLIT_ALIASES = {
 PLOTTED_EVALUATION_SPLITS = (
     "validation",
     "same_layout",
+    "natural_validation",
     "train_greedy",
 )
 

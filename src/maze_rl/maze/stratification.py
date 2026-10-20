@@ -14,20 +14,29 @@ from maze_rl.maze.pathfinding import (
     traversable_positions,
 )
 from maze_rl.maze.generator import (
+    count_valid_tasks_by_min_path_length,
     generate_valid_maze,
-    generate_valid_tasks_for_maze,
 )
 
 
 BUCKETS = ("short", "medium", "long")
 ALLOCATION_ORDER = ("long", "medium", "short")
 DEFAULT_BUCKET_BUDGETS = {
-    "short": 0.20,
-    "medium": 0.40,
+    "short": 0.00,
+    "medium": 0.60,
     "long": 0.40,
 }
 Edge = tuple[Position, Position]
 TaskKey = tuple[Position, Position]
+Path = tuple[Edge, ...]
+
+# Exact path-pair enumeration is useful for small shortest-path DAGs, while
+# open layouts can contain too many shortest paths to enumerate safely.  The
+# fallback remains an unbiased, reproducible estimate of the same expectation.
+PATH_SAMPLE_COUNT = 128
+MAX_EXACT_PATHS = 256
+MAX_EXACT_PAIR_COUNT = 4_096
+DEDUPE_SCOPE = "within_layout_bucket"
 
 
 def _shortest_distances_and_counts(
@@ -82,6 +91,13 @@ class TaskCandidate:
 
 
 @dataclass(frozen=True)
+class PathCollection:
+    paths: tuple[frozenset[Edge], ...]
+    exact: bool
+    total_paths: int
+
+
+@dataclass(frozen=True)
 class DifficultyBoundaries:
     short_max: float
     medium_max: float
@@ -101,8 +117,8 @@ class DifficultyBoundaries:
 
 
 DEFAULT_DIFFICULTY_BOUNDARIES = DifficultyBoundaries(
-    short_max=10.0,
-    medium_max=20.0,
+    short_max=2.0,
+    medium_max=15.0,
 )
 
 
@@ -114,7 +130,7 @@ class MazeCandidateIndex:
         Position,
         tuple[dict[Position, int], dict[Position, int]],
     ] = field(default_factory=dict)
-    profile_cache: dict[TaskKey, dict[Edge, float]] = field(
+    path_cache: dict[TaskKey, PathCollection] = field(
         default_factory=dict,
     )
     similarity_cache: dict[tuple[TaskKey, TaskKey], float] = field(
@@ -142,22 +158,18 @@ class MazeCandidateIndex:
             )
         return self.source_data[source]
 
-    def profile(self, candidate: TaskCandidate) -> dict[Edge, float]:
-        if candidate.key in self.profile_cache:
-            return self.profile_cache[candidate.key]
-
-        start_distances, start_counts = self.source_analysis(
-            candidate.start,
-        )
-        goal_distances, goal_counts = self.source_analysis(
-            candidate.goal,
-        )
+    def _shortest_path_successors(
+        self,
+        candidate: TaskCandidate,
+    ) -> tuple[dict[Position, tuple[Position, ...]], dict[Position, int]]:
+        start_distances, _ = self.source_analysis(candidate.start)
+        goal_distances, goal_counts = self.source_analysis(candidate.goal)
         shortest_length = start_distances[candidate.goal]
-        total_paths = start_counts[candidate.goal]
-        profile: dict[Edge, float] = {}
+        successors: dict[Position, tuple[Position, ...]] = {}
 
         for position, distance_from_start in start_distances.items():
             row, col = position
+            next_positions = []
             for next_position in (
                 (row - 1, col),
                 (row + 1, col),
@@ -166,7 +178,6 @@ class MazeCandidateIndex:
             ):
                 if next_position not in goal_distances:
                     continue
-
                 if (
                     distance_from_start
                     + 1
@@ -174,15 +185,102 @@ class MazeCandidateIndex:
                     != shortest_length
                 ):
                     continue
+                next_positions.append(next_position)
+            if next_positions:
+                successors[position] = tuple(next_positions)
 
-                profile[(position, next_position)] = (
-                    start_counts[position]
-                    * goal_counts[next_position]
-                    / total_paths
-                )
+        return successors, goal_counts
 
-        self.profile_cache[candidate.key] = profile
-        return profile
+    @staticmethod
+    def _path_to_edges(
+        positions: list[Position],
+    ) -> frozenset[Edge]:
+        return frozenset(
+            (positions[index], positions[index + 1])
+            for index in range(len(positions) - 1)
+        )
+
+    def _enumerate_shortest_paths(
+        self,
+        candidate: TaskCandidate,
+        successors: dict[Position, tuple[Position, ...]],
+    ) -> tuple[frozenset[Edge], ...]:
+        paths: list[frozenset[Edge]] = []
+
+        def visit(position: Position, positions: list[Position]) -> None:
+            if position == candidate.goal:
+                paths.append(self._path_to_edges(positions))
+                return
+            for next_position in successors[position]:
+                positions.append(next_position)
+                visit(next_position, positions)
+                positions.pop()
+
+        visit(candidate.start, [candidate.start])
+        return tuple(paths)
+
+    def _sample_shortest_paths(
+        self,
+        candidate: TaskCandidate,
+        successors: dict[Position, tuple[Position, ...]],
+        goal_counts: dict[Position, int],
+        rng: np.random.Generator,
+        sample_count: int,
+    ) -> tuple[frozenset[Edge], ...]:
+        paths: list[frozenset[Edge]] = []
+        for _ in range(sample_count):
+            position = candidate.start
+            positions = [position]
+            while position != candidate.goal:
+                next_positions = successors[position]
+                weights = [goal_counts[next_position] for next_position in next_positions]
+                draw = int(rng.integers(sum(weights)))
+                for next_position, weight in zip(next_positions, weights):
+                    if draw < weight:
+                        position = next_position
+                        positions.append(position)
+                        break
+                    draw -= weight
+            paths.append(self._path_to_edges(positions))
+        return tuple(paths)
+
+    def paths(self, candidate: TaskCandidate) -> PathCollection:
+        if candidate.key in self.path_cache:
+            return self.path_cache[candidate.key]
+
+        successors, goal_counts = self._shortest_path_successors(candidate)
+        total_paths = int(goal_counts[candidate.start])
+        if total_paths <= MAX_EXACT_PATHS:
+            paths = self._enumerate_shortest_paths(candidate, successors)
+            collection = PathCollection(
+                paths=paths,
+                exact=True,
+                total_paths=total_paths,
+            )
+        else:
+            seed = np.random.SeedSequence(
+                [
+                    candidate.start[0],
+                    candidate.start[1],
+                    candidate.goal[0],
+                    candidate.goal[1],
+                ]
+            )
+            paths = self._sample_shortest_paths(
+                candidate,
+                successors,
+                goal_counts,
+                np.random.default_rng(seed),
+                PATH_SAMPLE_COUNT,
+            )
+            collection = PathCollection(
+                paths=paths,
+                exact=False,
+                total_paths=total_paths,
+            )
+
+        self.path_cache[candidate.key] = collection
+        return collection
 
     def similarity(
         self,
@@ -191,10 +289,26 @@ class MazeCandidateIndex:
     ) -> float:
         cache_key = tuple(sorted((first.key, second.key)))
         if cache_key not in self.similarity_cache:
-            self.similarity_cache[cache_key] = directed_weighted_jaccard(
-                self.profile(first),
-                self.profile(second),
-            )
+            first_collection = self.paths(first)
+            second_collection = self.paths(second)
+            if (
+                first_collection.exact
+                and second_collection.exact
+                and len(first_collection.paths) * len(second_collection.paths)
+                <= MAX_EXACT_PAIR_COUNT
+            ):
+                similarity = expected_pairwise_directed_path_jaccard(
+                    first_collection.paths,
+                    second_collection.paths,
+                )
+            else:
+                similarity = _sampled_expected_pairwise_similarity(
+                    first,
+                    second,
+                    first_collection,
+                    second_collection,
+                )
+            self.similarity_cache[cache_key] = similarity
         return self.similarity_cache[cache_key]
 
 
@@ -310,26 +424,38 @@ def format_failure_diagnostics(
 
     before = diagnostics.get("unresolved_before_repair_by_bucket", {})
     after = diagnostics.get("unresolved_after_repair_by_bucket", {})
-    return (
-        "budget-exhausted layouts="
-        f"{diagnostics.get('budget_exhausted_count', 0)}"
-        f" [{preview('budget_exhausted_layouts')}]; "
-        "infeasible current assignments="
-        f"{diagnostics.get('infeasible_assignment_count', 0)}"
-        f" [{preview('infeasible_assignment_layouts')}]; "
-        "below-min layouts="
-        f"{diagnostics.get('contribution_below_min_count', 0)}"
-        f" [{preview('contribution_below_min_layouts')}]; "
-        "unresolved before repair="
-        f"S {before.get('short', 0)}/M {before.get('medium', 0)}"
-        f"/L {before.get('long', 0)}; "
-        "after repair="
-        f"S {after.get('short', 0)}/M {after.get('medium', 0)}"
-        f"/L {after.get('long', 0)}; "
-        "repairs="
-        f"{diagnostics.get('successful_reallocations', 0)}"
-        f"/{diagnostics.get('repair_attempts', 0)}"
-    )
+    return "\n".join((
+        (
+            "budget-exhausted layouts="
+            f"{diagnostics.get('budget_exhausted_count', 0)}"
+            f" [{preview('budget_exhausted_layouts')}]"
+        ),
+        (
+            "infeasible current assignments="
+            f"{diagnostics.get('infeasible_assignment_count', 0)}"
+            f" [{preview('infeasible_assignment_layouts')}]"
+        ),
+        (
+            "below-min layouts="
+            f"{diagnostics.get('contribution_below_min_count', 0)}"
+            f" [{preview('contribution_below_min_layouts')}]"
+        ),
+        (
+            "unresolved before repair="
+            f"S {before.get('short', 0)}/M {before.get('medium', 0)}"
+            f"/L {before.get('long', 0)}"
+        ),
+        (
+            "unresolved after repair="
+            f"S {after.get('short', 0)}/M {after.get('medium', 0)}"
+            f"/L {after.get('long', 0)}"
+        ),
+        (
+            "repairs="
+            f"{diagnostics.get('successful_reallocations', 0)}"
+            f"/{diagnostics.get('repair_attempts', 0)}"
+        ),
+    ))
 
 
 def _empty_assignment() -> dict[str, int]:
@@ -352,9 +478,28 @@ def generate_layouts(
     wall_probability: float,
     min_path_length: int,
     minimum_eligible_tasks: int = 1,
+    minimum_long_eligible_tasks: int = 0,
+    long_path_min_length: int | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> np.ndarray:
-    """Generate layouts independently of stratified task selection."""
+    """Generate layouts with capacity for later stratified selection.
+
+    The optional long-task requirement is checked before task selection, so
+    layouts are not rejected later merely because their geometry cannot
+    support the requested long-task quota.
+    """
+    if minimum_eligible_tasks < 0:
+        raise ValueError("minimum_eligible_tasks must be non-negative.")
+    if minimum_long_eligible_tasks < 0:
+        raise ValueError(
+            "minimum_long_eligible_tasks must be non-negative."
+        )
+    if minimum_long_eligible_tasks and long_path_min_length is None:
+        raise ValueError(
+            "long_path_min_length is required when long-task capacity "
+            "is requested."
+        )
+
     layouts = np.empty(
         (len(seeds), height, width),
         dtype=np.uint8,
@@ -372,15 +517,24 @@ def generate_layouts(
                 rng=rng,
                 min_path_length=min_path_length,
             )
-            try:
-                generate_valid_tasks_for_maze(
-                    maze=maze,
-                    task_count=minimum_eligible_tasks,
-                    rng=rng,
-                    min_path_length=min_path_length,
-                )
-            except RuntimeError:
+            thresholds = [min_path_length]
+            if minimum_long_eligible_tasks:
+                thresholds.append(int(long_path_min_length))
+            capacities = count_valid_tasks_by_min_path_length(
+                maze,
+                tuple(thresholds),
+            )
+
+            if capacities[min_path_length] < minimum_eligible_tasks:
                 continue
+
+            if (
+                minimum_long_eligible_tasks
+                and capacities[int(long_path_min_length)]
+                < minimum_long_eligible_tasks
+            ):
+                continue
+
             layouts[layout_index] = maze
             if progress_callback is not None:
                 progress_callback(layout_index + 1, len(seeds))
@@ -711,15 +865,82 @@ def allocate_bucket_slots(
     return assignments
 
 
-def directed_weighted_jaccard(
-    first: Mapping[Edge, float],
-    second: Mapping[Edge, float],
+def directed_path_jaccard(
+    first: Iterable[Edge],
+    second: Iterable[Edge],
 ) -> float:
-    """Return weighted Jaccard similarity for directed sparse profiles."""
-    keys = first.keys() | second.keys()
-    numerator = sum(min(first.get(edge, 0.0), second.get(edge, 0.0)) for edge in keys)
-    denominator = sum(max(first.get(edge, 0.0), second.get(edge, 0.0)) for edge in keys)
-    return numerator / denominator if denominator else 0.0
+    """Return Jaccard similarity while preserving edge direction."""
+    first_edges = frozenset(first)
+    second_edges = frozenset(second)
+    union_size = len(first_edges | second_edges)
+    if union_size == 0:
+        return 1.0
+    return len(first_edges & second_edges) / union_size
+
+
+def expected_pairwise_directed_path_jaccard(
+    first_paths: Iterable[Iterable[Edge]],
+    second_paths: Iterable[Iterable[Edge]],
+) -> float:
+    """Return the expected directed path-Jaccard over path pairs.
+
+    Each input path collection is treated as a uniform distribution.  The
+    caller may therefore pass all shortest paths for an exact result or
+    independent uniform samples for an unbiased estimate of that result.
+    """
+    first_paths = tuple(frozenset(path) for path in first_paths)
+    second_paths = tuple(frozenset(path) for path in second_paths)
+    if not first_paths or not second_paths:
+        raise ValueError("Both path collections must be non-empty.")
+    return sum(
+        directed_path_jaccard(first, second)
+        for first in first_paths
+        for second in second_paths
+    ) / (len(first_paths) * len(second_paths))
+
+
+def _sampled_expected_pairwise_similarity(
+    first: TaskCandidate,
+    second: TaskCandidate,
+    first_collection: PathCollection,
+    second_collection: PathCollection,
+) -> float:
+    if first.key == second.key:
+        return 1.0
+
+    if first.key > second.key:
+        first, second = second, first
+        first_collection, second_collection = (
+            second_collection,
+            first_collection,
+        )
+    ordered = (first, second)
+    rng = np.random.default_rng(
+        np.random.SeedSequence(
+            [
+                coordinate
+                for candidate in ordered
+                for position in candidate.key
+                for coordinate in position
+            ]
+        )
+    )
+
+    def draw_paths(
+        collection: PathCollection,
+    ) -> tuple[frozenset[Edge], ...]:
+        if not collection.exact:
+            return collection.paths
+        indices = rng.integers(
+            len(collection.paths),
+            size=PATH_SAMPLE_COUNT,
+        )
+        return tuple(collection.paths[int(index)] for index in indices)
+
+    return expected_pairwise_directed_path_jaccard(
+        draw_paths(first_collection),
+        draw_paths(second_collection),
+    )
 
 
 def _select_tasks_for_maze(
@@ -740,6 +961,10 @@ def _select_tasks_for_maze(
         )
 
     selected: list[TaskCandidate] = []
+    selected_by_bucket: dict[str, list[TaskCandidate]] = {
+        bucket: []
+        for bucket in BUCKETS
+    }
     best_selected: list[TaskCandidate] = []
     selected_keys: set[TaskKey] = set()
     candidate_attempts = 0
@@ -767,15 +992,17 @@ def _select_tasks_for_maze(
                 continue
             if any(
                 index.similarity(candidate, previous) >= threshold
-                for previous in selected
+                for previous in selected_by_bucket[candidate.bucket]
             ):
                 continue
 
             selected.append(candidate)
+            selected_by_bucket[candidate.bucket].append(candidate)
             selected_keys.add(candidate.key)
             if visit(slot_index + 1):
                 return True
             selected.pop()
+            selected_by_bucket[candidate.bucket].pop()
             selected_keys.remove(candidate.key)
             backtracking_events += 1
 
@@ -1091,7 +1318,7 @@ def generate_stratified_tasks_for_layouts(
     *,
     tasks_per_maze: int,
     min_path_length: int,
-    dedupe_threshold: float = 0.75,
+    dedupe_threshold: float = 0.7,
     bucket_budgets: Mapping[str, float] | None = None,
     random_seed: int = 0,
     excluded_tasks_by_layout: dict[int, set[TaskKey]] | None = None,
@@ -1401,6 +1628,8 @@ def generate_stratified_tasks_for_layouts(
                 output_index += 1
 
         metadata: dict[str, object] = {
+            "dedupe_metric": "expected_pairwise_directed_path_jaccard",
+            "dedupe_scope": DEDUPE_SCOPE,
             "dedupe_threshold": dedupe_threshold,
             "bucket_budgets": budgets,
             "bucket_quotas": quotas,
@@ -1416,6 +1645,9 @@ def generate_stratified_tasks_for_layouts(
             "allocation_attempts": allocation_attempt + 1,
             "local_search_budget": local_search_budget,
             "global_repair_budget": repair_budget,
+            "path_sample_count": PATH_SAMPLE_COUNT,
+            "max_exact_paths": MAX_EXACT_PATHS,
+            "max_exact_pair_count": MAX_EXACT_PAIR_COUNT,
             "search": search_metadata,
             "repair": {
                 **repair_totals,
@@ -1436,8 +1668,9 @@ def generate_stratified_tasks_for_layouts(
     failure_details = ""
     if last_failure_diagnostics is not None:
         failure_details = (
-            " Diagnostics: "
+            "\nDiagnostics:\n  "
             + format_failure_diagnostics(last_failure_diagnostics)
+            .replace("\n", "\n  ")
         )
     raise RuntimeError(
         "Could not select stratified tasks after retries without "

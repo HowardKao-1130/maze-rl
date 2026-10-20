@@ -42,3 +42,31 @@ _Avoid_: Reward when referring to a full episode total
 **TD Error**:
 The temporal-difference update residual produced by a TD learning step.
 _Avoid_: Loss when referring to tabular TD updates
+
+**Expected Pairwise Directed Path Similarity**:
+The mean directed edge-Jaccard similarity over independently paired shortest
+paths for two tasks.
+_Avoid_: Directed weighted Jaccard when referring to this task-level metric
+
+**Within-Bucket Deduplication**:
+Path similarity is constrained independently among tasks in the same layout
+and difficulty bucket.
+_Avoid_: Cross-bucket deduplication when this scope is intended
+
+**Filtered/Stratified Validation (`val`)**:
+The primary validation split, generated with the same layout-capacity filter,
+difficulty quotas, and within-bucket task deduplication as training.
+_Avoid_: Natural validation when referring to this split
+
+**Same-Layout Validation (`val-same`)**:
+Randomly selected held-out tasks on layouts seen during training.
+_Avoid_: Validation layout when referring to this split
+
+**Natural Validation (`val-natural`)**:
+Randomly selected tasks on independently generated layouts that follow the
+ordinary natural layout-generation process.
+_Avoid_: Filtered validation when referring to this split
+
+**Filtered/Stratified Test (`test`)** and **Natural Test (`test-natural`)**:
+The held-out counterparts of `val` and `val-natural`, respectively. Neither is
+used for tuning or early stopping.

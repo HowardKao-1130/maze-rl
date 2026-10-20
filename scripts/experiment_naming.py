@@ -14,10 +14,11 @@ DEFAULT_EXPERIMENT_OUTPUT_ROOT = DEFAULT_DNN_TRAINING_OUTPUT_ROOT
 DEFAULT_TABULAR_OUTPUT_ROOT = Path("runs") / "tabular"
 DEFAULT_DATASET_EXPERIMENT_NAME = "dataset"
 DEFAULT_STRATIFIED_BUCKET_BUDGETS = {
-    "short": 0.20,
-    "medium": 0.40,
+    "short": 0.00,
+    "medium": 0.60,
     "long": 0.40,
 }
+DEFAULT_DEDUPE_SCOPE = "within_layout_bucket"
 
 
 def slugify_experiment_name(
@@ -60,8 +61,9 @@ def experiment_dataset_name(
     tasks_per_maze: int,
     seed: int,
     stratify: bool = False,
-    dedupe_threshold: float = 0.75,
+    dedupe_threshold: float = 0.7,
     bucket_budgets: dict[str, float] | None = None,
+    dedupe_scope: str = DEFAULT_DEDUPE_SCOPE,
 ) -> str:
     name = (
         DEFAULT_DATASET_EXPERIMENT_NAME
@@ -87,7 +89,21 @@ def experiment_dataset_name(
         for bucket in ("short", "medium", "long")
     )
     threshold_suffix = f"{int(round(dedupe_threshold * 100)):03d}"
-    return f"{dataset_name}_stratified_{budget_suffix}_dedupe{threshold_suffix}"
+    scope_suffixes = {
+        "within_layout_bucket": "withinbucket",
+        "within_layout_cross_bucket": "crossbucket",
+    }
+    try:
+        scope_suffix = scope_suffixes[dedupe_scope]
+    except KeyError as error:
+        raise ValueError(
+            "dedupe_scope must be 'within_layout_bucket' or "
+            "'within_layout_cross_bucket'."
+        ) from error
+    return (
+        f"{dataset_name}_stratified_{budget_suffix}"
+        f"_dedupe{threshold_suffix}_{scope_suffix}"
+    )
 
 
 def load_dataset_metadata(
@@ -141,9 +157,17 @@ def experiment_dataset_name_from_metadata(
         seed=int(metadata["master_seed"]),
         stratify=bool(metadata.get("stratify", False)),
         dedupe_threshold=float(
-            metadata.get("dedupe_threshold", 0.75)
+            metadata.get("dedupe_threshold", 0.7)
         ),
         bucket_budgets=metadata.get("bucket_budgets"),
+        dedupe_scope=(
+            str(
+                metadata.get(
+                    "dedupe_scope",
+                    "within_layout_cross_bucket",
+                )
+            )
+        ),
     )
 
 
