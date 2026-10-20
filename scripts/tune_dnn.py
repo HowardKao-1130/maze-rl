@@ -468,7 +468,8 @@ def parse_args(
         default=None,
         help=(
             "Dataset bundle name under data/datasets, containing "
-            "train.npz, validation.npz, same_layout_new_goals.npz, "
+            "train.npz, validation.npz, validation_tune.npz, "
+            "same_layout_new_goals.npz, "
             "validation_natural.npz, and optionally test.npz and "
             "test_natural.npz. Also determines the tuning "
             "output directory unless --output-dir or "
@@ -1410,6 +1411,7 @@ def resolve_dataset_bundle_args(
 
     train_dataset = dataset_dir / "train.npz"
     validation_dataset = dataset_dir / "validation.npz"
+    validation_tune_dataset = dataset_dir / "validation_tune.npz"
     same_layout_dataset = (
         dataset_dir / "same_layout_new_goals.npz"
     )
@@ -1429,7 +1431,11 @@ def resolve_dataset_bundle_args(
         args.train_dataset = train_dataset
 
     if args.validation_dataset is None:
-        args.validation_dataset = validation_dataset
+        args.validation_dataset = (
+            validation_tune_dataset
+            if validation_tune_dataset.exists()
+            else validation_dataset
+        )
 
     if args.same_layout_dataset is None:
         args.same_layout_dataset = same_layout_dataset

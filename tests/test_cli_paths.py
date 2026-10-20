@@ -1103,7 +1103,9 @@ def test_same_layout_dataset_matches_validation_size(monkeypatch, tmp_path):
         tmp_path / "validation.npz"
     ) as validation_data, np.load(
         tmp_path / "same_layout_new_goals.npz"
-    ) as same_layout_data:
+    ) as same_layout_data, np.load(
+        tmp_path / "validation_tune.npz"
+    ) as validation_tune_data:
         assert validation_data[
             "layouts"
         ].shape == same_layout_data[
@@ -1114,6 +1116,7 @@ def test_same_layout_dataset_matches_validation_size(monkeypatch, tmp_path):
         ) == len(
             same_layout_data["starts"]
         )
+        assert len(validation_tune_data["layouts"]) == 1
 
 
 def test_generate_dataset_experiment_name_derives_output_dir(

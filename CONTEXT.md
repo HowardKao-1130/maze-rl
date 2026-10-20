@@ -64,6 +64,13 @@ The primary validation split, generated with the same layout-capacity filter,
 difficulty quotas, and within-bucket task deduplication as training.
 _Avoid_: Natural validation when referring to this split
 
+**Tuning Validation (`val-tune`)**:
+A smaller validation split generated through the same path as `val` (filtered
+and stratified when `--stratify` is enabled), containing one fifth of the
+requested validation layouts (rounded up, with at least one layout). It is
+used only as the automatic objective and early stopping split for
+hyperparameter-tuning child runs; ordinary training does not load it.
+
 **Same-Layout Validation (`val-same`)**:
 Randomly selected held-out tasks on layouts seen during training.
 _Avoid_: Validation layout when referring to this split

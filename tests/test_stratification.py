@@ -25,6 +25,7 @@ from scripts.experiment_naming import experiment_dataset_name
 from scripts.generate_dataset import (
     _confirm_overwrite,
     _finish_progress,
+    _prompt_existing_dataset_action,
     _stratified_progress_callback,
     _write_progress_line,
     parse_args,
@@ -360,6 +361,24 @@ def test_overwrite_confirmation_requires_explicit_yes(tmp_path, monkeypatch):
 
     monkeypatch.setattr("builtins.input", lambda _: "yes")
     _confirm_overwrite([existing_file])
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [("override", "override"), ("resume", "resume")],
+)
+def test_existing_dataset_prompt_selects_action(
+    tmp_path,
+    monkeypatch,
+    response,
+    expected,
+):
+    existing_file = tmp_path / "train.npz"
+    existing_file.touch()
+
+    monkeypatch.setattr("builtins.input", lambda _: response)
+
+    assert _prompt_existing_dataset_action([existing_file]) == expected
 
 
 def test_live_progress_updates_stay_on_one_line(capsys):

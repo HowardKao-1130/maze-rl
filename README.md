@@ -9,6 +9,10 @@ Generate datasets with multiple tasks per layout:
 python scripts/generate_dataset.py --train-mazes 1000 --validation-mazes 200 --test-mazes 200 --tasks-per-maze 5
 ```
 
+If known dataset files already exist in the output directory, the generator
+prompts to override them or resume. Resume loads the existing components and
+generates only missing splits; `--resume` selects that behavior directly.
+
 The split sizes control the number of unique layouts. `--train`,
 `--validation`, and `--test` remain accepted aliases for those maze counts.
 Each layout gets `--tasks-per-maze` valid start/goal tasks.
@@ -61,11 +65,15 @@ python scripts/summarize_dataset.py \
 
 When training against a stratified dataset bundle, periodic validation reports
 `train`, `train-greedy`, `val`, `val-same`, and `val-natural`. `val` is the
-primary filtered/stratified split used for tuning, best-checkpoint selection,
-and early stopping.
+primary filtered/stratified split used for ordinary training's best-checkpoint
+selection and early stopping. The generator also writes `validation_tune.npz`,
+but ordinary training does not load or plot it.
 
 - `data/train.npz`: seen tasks for training and memorization evaluation.
 - `data/validation.npz`: `val`, filtered layouts with stratified tasks.
+- `data/validation_tune.npz`: `val-tune`, a validation subset generated like
+  `val` with one fifth as many layouts (rounded up, minimum one), used
+  automatically only by tuning.
 - `data/same_layout_new_goals.npz`: `val-same`, validation-sized randomly
   selected tasks on training layouts.
 - `data/validation_natural.npz`: `val-natural`, independently generated
@@ -293,7 +301,7 @@ python scripts/tune_dnn.py --algorithm ppo --dataset generalization_followup_500
 
 The tuner requires an explicit dataset or split paths. With a dataset
 name, it reads `data/datasets/<dataset>/train.npz`,
-`validation.npz`, `same_layout_new_goals.npz`, and
+`validation.npz`, `validation_tune.npz`, `same_layout_new_goals.npz`, and
 `validation_natural.npz`, samples 100 hyperparameter
 combinations with a random-search sampler and a 200 rollouts-per-task maximum
 budget per combination, stores per-combination trial directories under the
@@ -326,12 +334,13 @@ instead of guessing the old arguments.
 
 Keep `--rollouts-per-task` as the training budget for comparable combinations.
 Increasing it usually improves final performance but also changes compute cost,
-so it is best treated as a generous fixed maximum budget for the sweep. The
-tuner asks training to evaluate `val` mean path efficiency after every
-internal task-selection pass, also evaluates `val-same` and `val-natural`,
-saves each combination's `best_checkpoint.pt`, and uses the best `val`
-checkpoint for combination selection. The ordinary `checkpoint.pt` remains
-the training state.
+so it is best treated as a generous fixed maximum budget for the sweep. When
+`validation_tune.npz` is present, the tuner uses `val-tune` as the primary
+validation dataset for child-run evaluation, early stopping, and combination
+selection; it falls back to `validation.npz` for older bundles. It also
+evaluates `val-same` and `val-natural`, saves each combination's
+`best_checkpoint.pt`, and leaves the ordinary `checkpoint.pt` as the training
+state.
 
 After tuning, train a longer final run from the stored best hyperparameter
 combination instead of copying values by hand. `--dataset` may name a bundle

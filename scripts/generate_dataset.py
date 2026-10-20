@@ -35,6 +35,7 @@ from scripts.experiment_naming import (
 
 
 NATURAL_SPLIT_SEED_OFFSET = 1_000_000_000
+VAL_TUNE_SPLIT_SEED_OFFSET = 2_000_000_000
 
 
 def task_pairs_by_layout(
@@ -119,7 +120,9 @@ def _write_progress_line(
 
 
 def _stratified_progress_callback(label: str):
-    if "validation" in label:
+    if "validation-tune" in label:
+        short_label = "Stratified validation-tune"
+    elif "validation" in label:
         short_label = "Stratified validation"
     elif "test" in label:
         short_label = "Stratified test"
@@ -228,7 +231,36 @@ def _finish_progress() -> None:
         _progress_line_key = None
 
 
+def _existing_dataset_paths(output_paths: list[Path]) -> list[Path]:
+    return [path for path in output_paths if path.exists()]
+
+
+def _prompt_existing_dataset_action(
+    output_paths: list[Path],
+) -> str:
+    existing_paths = _existing_dataset_paths(output_paths)
+    if not existing_paths:
+        return "new"
+
+    print("Existing dataset files detected:")
+    for path in existing_paths:
+        print(f"  {path}")
+    try:
+        response = input(
+            "Choose override or resume [override/resume]: "
+        )
+    except EOFError:
+        response = ""
+    normalized = response.strip().lower()
+    if normalized in {"override", "o", "yes", "y"}:
+        return "override"
+    if normalized in {"resume", "r"}:
+        return "resume"
+    raise SystemExit("Dataset generation cancelled.")
+
+
 def _confirm_overwrite(output_paths: list[Path]) -> list[Path]:
+    """Backward-compatible overwrite confirmation for callers and tests."""
     existing_paths = [path for path in output_paths if path.exists()]
     if not existing_paths:
         return []
@@ -292,8 +324,10 @@ def _build_metadata(
     args: argparse.Namespace,
     *,
     same_layout_maze_count: int,
+    val_tune_maze_count: int,
     stratification_metadata: dict[str, object] | None,
     validation_metadata: dict[str, object] | None,
+    validation_tune_metadata: dict[str, object] | None,
     test_metadata: dict[str, object] | None,
     completed_splits: set[str],
     complete: bool,
@@ -307,6 +341,7 @@ def _build_metadata(
         "master_seed": args.seed,
         "train_mazes": args.train_mazes,
         "validation_mazes": args.validation_mazes,
+        "validation_tune_mazes": val_tune_maze_count,
         "test_mazes": args.test_mazes,
         "tasks_per_maze": args.tasks_per_maze,
         "min_tasks_per_maze": args.min_tasks_per_maze,
@@ -344,6 +379,7 @@ def _build_metadata(
         },
         "dataset_roles": {
             "validation.npz": "val",
+            "validation_tune.npz": "val-tune",
             "same_layout_new_goals.npz": "val-same",
             "validation_natural.npz": "val-natural",
             "test.npz": "test",
@@ -356,6 +392,7 @@ def _build_metadata(
         metadata["stratification"] = {
             "train": stratification_metadata,
             "validation": validation_metadata,
+            "validation_tune": validation_tune_metadata,
             "test": test_metadata,
         }
     return metadata
@@ -373,6 +410,10 @@ def _validate_resume_metadata(
         "master_seed": args.seed,
         "train_mazes": args.train_mazes,
         "validation_mazes": args.validation_mazes,
+        "validation_tune_mazes": max(
+            1,
+            int(np.ceil(args.validation_mazes / 5)),
+        ),
         "test_mazes": args.test_mazes,
         "tasks_per_maze": args.tasks_per_maze,
         "stratify": args.stratify,
@@ -695,6 +736,7 @@ def main() -> None:
     args = parse_args()
     train_path = args.output_dir / "train.npz"
     validation_path = args.output_dir / "validation.npz"
+    validation_tune_path = args.output_dir / "validation_tune.npz"
     validation_natural_path = (
         args.output_dir / "validation_natural.npz"
     )
@@ -707,6 +749,7 @@ def main() -> None:
     output_paths = [
         train_path,
         validation_path,
+        validation_tune_path,
         validation_natural_path,
         same_layout_path,
         test_path,
@@ -720,21 +763,27 @@ def main() -> None:
             "tasks on unique training layouts."
         )
     checkpoint_metadata = {}
-    if args.resume:
+    existing_action = "resume" if args.resume else (
+        _prompt_existing_dataset_action(output_paths)
+    )
+    if existing_action == "resume":
+        args.resume = True
         checkpoint_metadata = _load_metadata(metadata_path)
         if checkpoint_metadata:
             _validate_resume_metadata(args, checkpoint_metadata)
     else:
-        existing_paths = _confirm_overwrite(output_paths)
+        existing_paths = _existing_dataset_paths(output_paths)
         _remove_dataset_files(existing_paths)
 
     print(f"Writing datasets to {args.output_dir}")
     print(f"  train:        {train_path}")
     if args.stratify:
         print(f"  val:          {validation_path}")
+        print(f"  val-tune:     {validation_tune_path}")
         print(f"  val-natural:  {validation_natural_path}")
     else:
         print(f"  validation:   {validation_path}")
+        print(f"  val-tune:     {validation_tune_path}")
     print(f"  val-same:     {same_layout_path}")
     print(f"  test:         {test_path}")
     if args.stratify:
@@ -751,6 +800,14 @@ def main() -> None:
         test_size=args.test_mazes,
         master_seed=args.seed,
     )
+    val_tune_maze_count = max(
+        1,
+        int(np.ceil(args.validation_mazes / 5)),
+    )
+    validation_tune_seeds = (
+        validation_seeds[:val_tune_maze_count]
+        + VAL_TUNE_SPLIT_SEED_OFFSET
+    )
     boundaries = DifficultyBoundaries(
         short_max=args.short_max_path_length,
         medium_max=args.medium_max_path_length,
@@ -763,6 +820,7 @@ def main() -> None:
     split_paths = [
         ("train", train_path),
         ("validation", validation_path),
+        ("validation_tune", validation_tune_path),
         ("same_layout_new_goals", same_layout_path),
         ("test", test_path),
     ]
@@ -790,6 +848,11 @@ def main() -> None:
     )
     if not isinstance(validation_metadata, dict):
         validation_metadata = None
+    validation_tune_metadata = stratification_checkpoint.get(
+        "validation_tune"
+    )
+    if not isinstance(validation_tune_metadata, dict):
+        validation_tune_metadata = None
     test_metadata = stratification_checkpoint.get("test")
     if not isinstance(test_metadata, dict):
         test_metadata = None
@@ -802,8 +865,10 @@ def main() -> None:
             _build_metadata(
                 args,
                 same_layout_maze_count=same_layout_maze_count,
+                val_tune_maze_count=val_tune_maze_count,
                 stratification_metadata=stratification_metadata,
                 validation_metadata=validation_metadata,
+                validation_tune_metadata=validation_tune_metadata,
                 test_metadata=test_metadata,
                 completed_splits=completed_splits,
                 complete=False,
@@ -1000,6 +1065,100 @@ def main() -> None:
             validation_goals,
         )
         completed_splits.add("validation")
+        checkpoint()
+
+    if validation_tune_path.exists():
+        print("Loading existing validation-tune split.")
+        (
+            validation_tune_layouts,
+            _saved_validation_tune_seeds,
+            validation_tune_indices,
+            validation_tune_starts,
+            validation_tune_goals,
+        ) = _load_dataset_arrays(validation_tune_path)
+    elif args.stratify:
+        validation_tune_layouts = generate_layouts(
+            seeds=validation_tune_seeds,
+            height=args.height,
+            width=args.width,
+            wall_probability=args.wall_probability,
+            min_path_length=args.min_path_length,
+            minimum_eligible_tasks=args.min_tasks_per_maze,
+            minimum_long_eligible_tasks=(
+                args.minimum_long_eligible_tasks
+            ),
+            long_path_min_length=args.medium_max_path_length + 1,
+            required_bucket_counts=per_layout_bucket_quotas,
+            dedupe_threshold=args.dedupe_threshold,
+            selection_random_seed=args.seed + 3,
+            selection_search_budget=args.local_search_budget,
+            difficulty_boundaries=boundaries,
+            progress_callback=_simple_progress_callback(
+                "Generating filtered validation-tune mazes"
+            ),
+        )
+        _finish_progress()
+        (
+            validation_tune_indices,
+            validation_tune_starts,
+            validation_tune_goals,
+            validation_tune_metadata,
+        ) = generate_stratified_tasks_for_layouts(
+            validation_tune_layouts,
+            validation_tune_seeds,
+            tasks_per_maze=args.tasks_per_maze,
+            min_path_length=args.min_path_length,
+            dedupe_threshold=args.dedupe_threshold,
+            bucket_budgets=args.bucket_budgets,
+            random_seed=args.seed + 3,
+            allocation_attempts=args.allocation_attempts,
+            min_tasks_per_maze=args.min_tasks_per_maze,
+            max_tasks_per_maze=args.max_tasks_per_maze,
+            local_search_budget=args.local_search_budget,
+            global_repair_budget=args.global_repair_budget,
+            difficulty_boundaries=boundaries,
+            progress_callback=_stratified_progress_callback(
+                "Selecting stratified validation-tune tasks"
+            ),
+        )
+        _finish_progress()
+        save_dataset(
+            validation_tune_path,
+            validation_tune_layouts,
+            validation_tune_seeds,
+            validation_tune_indices,
+            validation_tune_starts,
+            validation_tune_goals,
+        )
+        completed_splits.add("validation_tune")
+        checkpoint()
+    else:
+        (
+            validation_tune_layouts,
+            validation_tune_indices,
+            validation_tune_starts,
+            validation_tune_goals,
+        ) = generate_mazes(
+            seeds=validation_tune_seeds,
+            height=args.height,
+            width=args.width,
+            wall_probability=args.wall_probability,
+            min_path_length=args.min_path_length,
+            tasks_per_maze=args.tasks_per_maze,
+            progress_callback=_simple_progress_callback(
+                "Generating validation-tune mazes"
+            ),
+        )
+        _finish_progress()
+        save_dataset(
+            validation_tune_path,
+            validation_tune_layouts,
+            validation_tune_seeds,
+            validation_tune_indices,
+            validation_tune_starts,
+            validation_tune_goals,
+        )
+        completed_splits.add("validation_tune")
         checkpoint()
 
     if args.stratify:
@@ -1223,8 +1382,10 @@ def main() -> None:
     metadata = _build_metadata(
         args,
         same_layout_maze_count=same_layout_maze_count,
+        val_tune_maze_count=val_tune_maze_count,
         stratification_metadata=stratification_metadata,
         validation_metadata=validation_metadata,
+        validation_tune_metadata=validation_tune_metadata,
         test_metadata=test_metadata,
         completed_splits=completed_splits,
         complete=True,
@@ -1238,9 +1399,11 @@ def main() -> None:
     print(f"  train:        {train_path}")
     if args.stratify:
         print(f"  val:          {validation_path}")
+        print(f"  val-tune:     {validation_tune_path}")
         print(f"  val-natural:  {validation_natural_path}")
     else:
         print(f"  validation:   {validation_path}")
+        print(f"  val-tune:     {validation_tune_path}")
     print(f"  val-same:     {same_layout_path}")
     print(f"  test:         {test_path}")
     if args.stratify:
@@ -1253,11 +1416,17 @@ def main() -> None:
         f"Validation layouts: {validation_layouts.shape}"
     )
     print(
+        f"Val-tune layouts:   {validation_tune_layouts.shape}"
+    )
+    print(
         f"Test layouts:       {test_layouts.shape}"
     )
     print(f"Train tasks:        {len(train_starts)}")
     print(
         f"Validation tasks:   {len(validation_starts)}"
+    )
+    print(
+        f"Val-tune tasks:     {len(validation_tune_starts)}"
     )
     print(
         "Same-layout tasks:  "

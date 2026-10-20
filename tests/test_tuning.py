@@ -331,6 +331,37 @@ def test_dataset_bundle_resolution_infers_splits_and_output(
     )
 
 
+def test_dataset_bundle_resolution_prefers_validation_tune_for_tuning(
+    tmp_path,
+    monkeypatch,
+):
+    dataset_dir = write_dataset_bundle(
+        tmp_path / "data" / "datasets",
+        "tuning_200x50x50_t5_seed42",
+    )
+    (dataset_dir / "validation_tune.npz").write_bytes(b"")
+    monkeypatch.chdir(tmp_path)
+    args = SimpleNamespace(
+        dataset=dataset_dir.name,
+        train_dataset=None,
+        validation_dataset=None,
+        same_layout_dataset=None,
+        test_dataset=None,
+        output_dir=None,
+        experiment_name=None,
+        experiment_root=tmp_path / "runs",
+    )
+
+    resolve_dataset_bundle_args(args)
+
+    assert args.validation_dataset == (
+        Path("data")
+        / "datasets"
+        / "tuning_200x50x50_t5_seed42"
+        / "validation_tune.npz"
+    )
+
+
 def test_dataset_bundle_dir_for_reference_expands_dataset_name():
     assert dataset_bundle_dir_for_reference(
         Path("tuning_200x50x50_t5_seed42")
