@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -15,6 +16,7 @@ def generate_mazes(
     wall_probability: float,
     min_path_length: int,
     tasks_per_maze: int,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> tuple[
     np.ndarray,
     np.ndarray,
@@ -43,6 +45,8 @@ def generate_mazes(
         dtype=np.int64,
     )
 
+    if progress_callback is not None:
+        progress_callback(0, len(seeds))
     for i, seed in enumerate(seeds):
         rng = np.random.default_rng(int(seed))
 
@@ -80,6 +84,8 @@ def generate_mazes(
         layout_indices[task_start:task_end] = i
         starts[task_start:task_end] = task_starts
         goals[task_start:task_end] = task_goals
+        if progress_callback is not None:
+            progress_callback(i + 1, len(seeds))
 
     return layouts, layout_indices, starts, goals
 
@@ -94,6 +100,7 @@ def generate_tasks_for_layouts(
         set[tuple[tuple[int, int], tuple[int, int]]],
     ] | None = None,
     seed_offset: int = 1_000_000_000,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     task_count = len(layouts) * tasks_per_maze
 
@@ -116,6 +123,8 @@ def generate_tasks_for_layouts(
         excluded_tasks_by_layout or {}
     )
 
+    if progress_callback is not None:
+        progress_callback(0, len(layouts))
     for layout_index, maze in enumerate(layouts):
         rng = np.random.default_rng(
             int(seeds[layout_index]) + seed_offset
@@ -140,6 +149,8 @@ def generate_tasks_for_layouts(
         )
         starts[task_start:task_end] = task_starts
         goals[task_start:task_end] = task_goals
+        if progress_callback is not None:
+            progress_callback(layout_index + 1, len(layouts))
 
     return layout_indices, starts, goals
 

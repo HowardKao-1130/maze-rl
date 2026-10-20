@@ -116,7 +116,13 @@ def infer_dataset_label(
         return "val"
 
     if filename == "same_layout_new_goals.npz":
-        return "val_with_same_layout"
+        return "val-same"
+
+    if filename == "validation_natural.npz":
+        return "val-natural"
+
+    if filename == "test_natural.npz":
+        return "test-natural"
 
     return Path(dataset_path).stem
 
@@ -286,8 +292,9 @@ def parse_args():
         default=None,
         help=(
             "Label used in rollout animations. Defaults to val "
-            "for validation.npz, val_with_same_layout for "
-            "same_layout_new_goals.npz, otherwise the dataset stem."
+            "for validation.npz, val-same for "
+            "same_layout_new_goals.npz, val-natural for "
+            "validation_natural.npz, otherwise the dataset stem."
         ),
     )
 
@@ -895,13 +902,13 @@ def main():
                 fixed_index=args.fixed_index,
                 all_tasks=args.all_tasks,
                 capture_rollouts=True,
-                progress_label="Evaluate val_with_same_layout",
+                    progress_label="Evaluate val-same",
             )
             animation_inputs.append(
                 (
                     same_layout_env,
                     same_layout_results,
-                    "val_with_same_layout",
+                    "val-same",
                 )
             )
 

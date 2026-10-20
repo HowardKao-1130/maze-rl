@@ -28,6 +28,14 @@ X_AXIS_LABELS = {
 
 HTML_MAX_POINTS_PER_SERIES = 2000
 
+VALIDATION_SPLIT_LABELS = {
+    "validation": "val",
+    "same_layout": "val-same",
+    "natural_validation": "val-natural",
+    "stratified_validation": "val-stratified",
+    "train_greedy": "train-greedy",
+}
+
 
 def parse_optional_float(value) -> float | None:
     if value is None or value == "":
@@ -1201,7 +1209,10 @@ def plot_validation_metrics(
                 [value for _, value in points],
                 marker="o",
                 linewidth=1.5,
-                label=split,
+                label=VALIDATION_SPLIT_LABELS.get(
+                    split,
+                    split,
+                ),
             )
 
         axis.set_ylabel(ylabel)

@@ -69,7 +69,9 @@ def write_dataset_bundle(
         "train.npz",
         "validation.npz",
         "same_layout_new_goals.npz",
+        "validation_natural.npz",
         "test.npz",
+        "test_natural.npz",
     ]:
         (dataset_dir / split).write_bytes(b"")
     return dataset_dir
@@ -313,13 +315,50 @@ def test_dataset_bundle_resolution_infers_splits_and_output(
     assert args.same_layout_dataset == (
         resolved_dataset_dir / "same_layout_new_goals.npz"
     )
+    assert args.natural_validation_dataset == (
+        resolved_dataset_dir / "validation_natural.npz"
+    )
     assert args.test_dataset == (
         resolved_dataset_dir / "test.npz"
+    )
+    assert args.natural_test_dataset == (
+        resolved_dataset_dir / "test_natural.npz"
     )
     assert args.output_dir == (
         tmp_path
         / "runs"
         / "tuning_200x50x50_t5_seed42"
+    )
+
+
+def test_dataset_bundle_resolution_prefers_validation_tune_for_tuning(
+    tmp_path,
+    monkeypatch,
+):
+    dataset_dir = write_dataset_bundle(
+        tmp_path / "data" / "datasets",
+        "tuning_200x50x50_t5_seed42",
+    )
+    (dataset_dir / "validation_tune.npz").write_bytes(b"")
+    monkeypatch.chdir(tmp_path)
+    args = SimpleNamespace(
+        dataset=dataset_dir.name,
+        train_dataset=None,
+        validation_dataset=None,
+        same_layout_dataset=None,
+        test_dataset=None,
+        output_dir=None,
+        experiment_name=None,
+        experiment_root=tmp_path / "runs",
+    )
+
+    resolve_dataset_bundle_args(args)
+
+    assert args.validation_dataset == (
+        Path("data")
+        / "datasets"
+        / "tuning_200x50x50_t5_seed42"
+        / "validation_tune.npz"
     )
 
 

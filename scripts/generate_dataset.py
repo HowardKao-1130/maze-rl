@@ -1,14 +1,16 @@
 import argparse
 import json
 from pathlib import Path
+import shutil
 import sys
 
+import numpy as np
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(
-        0,
-        str(REPO_ROOT),
-    )
+SRC_ROOT = REPO_ROOT / "src"
+for import_root in (REPO_ROOT, SRC_ROOT):
+    if str(import_root) not in sys.path:
+        sys.path.insert(0, str(import_root))
 
 from maze_rl.maze.dataset import (
     generate_mazes,
@@ -16,10 +18,24 @@ from maze_rl.maze.dataset import (
     generate_split_seeds,
     save_dataset,
 )
+from maze_rl.maze.stratification import (
+    DEDUPE_SCOPE,
+    DEFAULT_BUCKET_BUDGETS,
+    DEFAULT_DIFFICULTY_BOUNDARIES,
+    DifficultyBoundaries,
+    bucket_quotas,
+    format_failure_diagnostics,
+    generate_layouts,
+    generate_stratified_tasks_for_layouts,
+)
 from scripts.experiment_naming import (
     DEFAULT_DATA_OUTPUT_ROOT,
     experiment_dataset_name,
 )
+
+
+NATURAL_SPLIT_SEED_OFFSET = 1_000_000_000
+VAL_TUNE_SPLIT_SEED_OFFSET = 2_000_000_000
 
 
 def task_pairs_by_layout(
@@ -45,6 +61,404 @@ def task_pairs_by_layout(
         )
 
     return pairs_by_layout
+
+
+def _simple_progress_callback(label: str):
+    def update(completed: int, total: int) -> None:
+        _write_progress_line(
+            f"{label}: {completed}/{total}",
+            progress_key=label,
+        )
+
+    return update
+
+
+_progress_line_text: str | None = None
+_progress_line_key: str | None = None
+
+
+def _progress_line_rows(line: str) -> int:
+    terminal_width = max(
+        shutil.get_terminal_size(fallback=(80, 24)).columns,
+        1,
+    )
+    return max((len(line) + terminal_width - 1) // terminal_width, 1)
+
+
+def _clear_progress_line() -> None:
+    global _progress_line_key, _progress_line_text
+    if _progress_line_text is None:
+        return
+
+    rows = _progress_line_rows(_progress_line_text)
+    move_up = f"\033[{rows - 1}A" if rows > 1 else ""
+    print(f"{move_up}\r\033[J", end="", flush=True)
+    _progress_line_text = None
+    _progress_line_key = None
+
+
+def _write_progress_line(
+    line: str,
+    *,
+    persist: bool = False,
+    progress_key: str = "default",
+) -> None:
+    # Clear all wrapped rows before redrawing. A plain carriage return only
+    # reaches the start of the final wrapped row after a terminal resize.
+    global _progress_line_key, _progress_line_text
+    if (
+        _progress_line_text is not None
+        and _progress_line_key != progress_key
+    ):
+        # A different progress stream must not overwrite the previous one.
+        _finish_progress()
+    if _progress_line_text is not None:
+        _clear_progress_line()
+    print(f"{line}", end="\n" if persist else "", flush=True)
+    _progress_line_text = None if persist else line
+    _progress_line_key = None if persist else progress_key
+
+
+def _stratified_progress_callback(label: str):
+    if "validation-tune" in label:
+        short_label = "Stratified validation-tune"
+    elif "validation" in label:
+        short_label = "Stratified validation"
+    elif "test" in label:
+        short_label = "Stratified test"
+    else:
+        short_label = "Stratified training"
+
+    def update(event: dict[str, object]) -> None:
+        counts = event["bucket_counts"]
+        quotas = event["bucket_quotas"]
+        status = " | ".join(
+            f"{bucket[0].upper()} {counts[bucket]}/{quotas[bucket]}"
+            for bucket in ("short", "medium", "long")
+        )
+        phase = event.get("phase")
+        if phase == "indexing":
+            line = (
+                f"{short_label} | index "
+                f"{event['layouts_completed']}/{event['layout_count']} | "
+                f"{status}"
+            )
+        else:
+            attempt = event.get(
+                "selection_attempt",
+                event.get("allocation_attempt"),
+            )
+            attempts = event.get(
+                "selection_attempts",
+                event.get("allocation_attempts"),
+            )
+            attempt_status = (
+                f"attempt {attempt}/{attempts} | "
+                if attempt is not None and attempts is not None
+                else ""
+            )
+            if phase == "allocation":
+                bucket = event.get("allocation_bucket")
+                bucket_completed = event.get("allocation_bucket_completed")
+                bucket_total = event.get("allocation_bucket_total")
+                slots_completed = event.get("allocation_slots_completed")
+                slots_total = event.get("allocation_slots_total")
+                if all(
+                    value is not None
+                    for value in (
+                        bucket,
+                        bucket_completed,
+                        bucket_total,
+                        slots_completed,
+                        slots_total,
+                    )
+                ):
+                    phase_status = (
+                        "allocating slots | "
+                        f"{str(bucket)[0].upper()} "
+                        f"{bucket_completed}/{bucket_total} | "
+                        f"total {slots_completed}/{slots_total} | "
+                    )
+                else:
+                    phase_status = "allocating slots | "
+            elif phase == "selection":
+                phase_status = (
+                    "selecting tasks | "
+                    f"layouts {event['layouts_completed']}/"
+                    f"{event['layout_count']} | "
+                )
+            elif phase == "repair":
+                phase_status = (
+                    "repairing allocations | "
+                    f"attempts {event['repair_attempts']}/"
+                    f"{event['repair_budget']} | "
+                )
+            else:
+                phase_status = f"{phase} | " if phase else ""
+            reason = event.get("reason")
+            reason_status = f" ({reason})" if reason else ""
+            diagnostics = event.get("diagnostics")
+            diagnostics_status = ""
+            if isinstance(diagnostics, dict):
+                diagnostics_status = (
+                    "\n  "
+                    + format_failure_diagnostics(diagnostics).replace(
+                        "\n",
+                        "\n  ",
+                    )
+                )
+            line = (
+                f"{short_label} | {attempt_status}{phase_status}"
+                f"{status}{reason_status}{diagnostics_status}"
+            )
+        _write_progress_line(
+            line,
+            persist=bool(event.get("persist")),
+            # Keep each phase on its own terminal line. Updates within a
+            # phase still redraw in place, while a transition finalizes the
+            # previous phase's last status before starting the next one.
+            progress_key=f"{label}:{phase or 'unknown'}",
+        )
+
+    return update
+
+
+def _finish_progress() -> None:
+    global _progress_line_key, _progress_line_text
+    if _progress_line_text is not None:
+        print()
+        _progress_line_text = None
+        _progress_line_key = None
+
+
+def _existing_dataset_paths(output_paths: list[Path]) -> list[Path]:
+    return [path for path in output_paths if path.exists()]
+
+
+def _prompt_existing_dataset_action(
+    output_paths: list[Path],
+) -> str:
+    existing_paths = _existing_dataset_paths(output_paths)
+    if not existing_paths:
+        return "new"
+
+    print("Existing dataset files detected:")
+    for path in existing_paths:
+        print(f"  {path}")
+    try:
+        response = input(
+            "Choose override or resume [override/resume]: "
+        )
+    except EOFError:
+        response = ""
+    normalized = response.strip().lower()
+    if normalized in {"override", "o", "yes", "y"}:
+        return "override"
+    if normalized in {"resume", "r"}:
+        return "resume"
+    raise SystemExit("Dataset generation cancelled.")
+
+
+def _confirm_overwrite(output_paths: list[Path]) -> list[Path]:
+    """Backward-compatible overwrite confirmation for callers and tests."""
+    existing_paths = [path for path in output_paths if path.exists()]
+    if not existing_paths:
+        return []
+
+    print("Existing dataset files would be overwritten:")
+    for path in existing_paths:
+        print(f"  {path}")
+    try:
+        response = input("Overwrite these files? [y/N]: ")
+    except EOFError:
+        response = ""
+    if response.strip().lower() not in {"y", "yes"}:
+        raise SystemExit("Dataset generation cancelled.")
+    return existing_paths
+
+
+def _remove_dataset_files(output_paths: list[Path]) -> None:
+    for path in output_paths:
+        if not path.exists():
+            continue
+        if not path.is_file():
+            raise SystemExit(
+                f"Cannot remove existing dataset path that is not a file: "
+                f"{path}"
+            )
+        print(f"Removing old dataset file: {path}")
+        path.unlink()
+
+
+def _load_dataset_arrays(
+    path: Path,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    with np.load(path) as data:
+        layouts = data["layouts"] if "layouts" in data else data["mazes"]
+        return (
+            layouts,
+            data["seeds"],
+            data["layout_indices"],
+            data["starts"],
+            data["goals"],
+        )
+
+
+def _load_metadata(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    with path.open() as file:
+        value = json.load(file)
+    if not isinstance(value, dict):
+        raise SystemExit(f"Dataset metadata must be an object: {path}")
+    return value
+
+
+def _write_metadata(path: Path, metadata: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as file:
+        json.dump(metadata, file, indent=2)
+
+
+def _build_metadata(
+    args: argparse.Namespace,
+    *,
+    same_layout_maze_count: int,
+    val_tune_maze_count: int,
+    stratification_metadata: dict[str, object] | None,
+    validation_metadata: dict[str, object] | None,
+    validation_tune_metadata: dict[str, object] | None,
+    test_metadata: dict[str, object] | None,
+    completed_splits: set[str],
+    complete: bool,
+) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "generator": "random_obstacle_grid",
+        "height": args.height,
+        "width": args.width,
+        "wall_probability": args.wall_probability,
+        "min_path_length": args.min_path_length,
+        "master_seed": args.seed,
+        "train_mazes": args.train_mazes,
+        "validation_mazes": args.validation_mazes,
+        "validation_tune_mazes": val_tune_maze_count,
+        "test_mazes": args.test_mazes,
+        "tasks_per_maze": args.tasks_per_maze,
+        "min_tasks_per_maze": args.min_tasks_per_maze,
+        "max_tasks_per_maze": args.max_tasks_per_maze,
+        "local_search_budget": args.local_search_budget,
+        "global_repair_budget": args.global_repair_budget,
+        "minimum_long_eligible_tasks": (
+            args.minimum_long_eligible_tasks
+        ),
+        "stratify": args.stratify,
+        "dedupe_metric": (
+            "expected_pairwise_directed_path_jaccard"
+            if args.stratify
+            else None
+        ),
+        "dedupe_scope": DEDUPE_SCOPE if args.stratify else None,
+        "dedupe_threshold": args.dedupe_threshold,
+        "bucket_budgets": args.bucket_budgets,
+        "difficulty_boundaries": (
+            stratification_metadata["difficulty_boundaries"]
+            if stratification_metadata is not None
+            else (
+                {
+                    "short_max": float(args.short_max_path_length),
+                    "medium_max": float(args.medium_max_path_length),
+                }
+                if args.stratify
+                else None
+            )
+        ),
+        "same_layout_new_goals": {
+            "source": "train_layouts",
+            "layout_count": same_layout_maze_count,
+            "tasks_per_maze": args.tasks_per_maze,
+        },
+        "dataset_roles": {
+            "validation.npz": "val",
+            "validation_tune.npz": "val-tune",
+            "same_layout_new_goals.npz": "val-same",
+            "validation_natural.npz": "val-natural",
+            "test.npz": "test",
+            "test_natural.npz": "test-natural",
+        },
+        "generation_status": "complete" if complete else "in_progress",
+        "completed_splits": sorted(completed_splits),
+    }
+    if args.stratify:
+        metadata["stratification"] = {
+            "train": stratification_metadata,
+            "validation": validation_metadata,
+            "validation_tune": validation_tune_metadata,
+            "test": test_metadata,
+        }
+    return metadata
+
+
+def _validate_resume_metadata(
+    args: argparse.Namespace,
+    metadata: dict[str, object],
+) -> None:
+    expected: dict[str, object] = {
+        "height": args.height,
+        "width": args.width,
+        "wall_probability": args.wall_probability,
+        "min_path_length": args.min_path_length,
+        "master_seed": args.seed,
+        "train_mazes": args.train_mazes,
+        "validation_mazes": args.validation_mazes,
+        "validation_tune_mazes": max(
+            1,
+            int(np.ceil(args.validation_mazes / 5)),
+        ),
+        "test_mazes": args.test_mazes,
+        "tasks_per_maze": args.tasks_per_maze,
+        "stratify": args.stratify,
+        "dedupe_threshold": args.dedupe_threshold,
+        "bucket_budgets": args.bucket_budgets,
+        "min_tasks_per_maze": args.min_tasks_per_maze,
+        "max_tasks_per_maze": args.max_tasks_per_maze,
+        "local_search_budget": args.local_search_budget,
+        "global_repair_budget": args.global_repair_budget,
+        "minimum_long_eligible_tasks": (
+            args.minimum_long_eligible_tasks
+        ),
+    }
+    if args.stratify:
+        expected["difficulty_boundaries"] = {
+            "short_max": float(args.short_max_path_length),
+            "medium_max": float(args.medium_max_path_length),
+        }
+        expected["dedupe_scope"] = DEDUPE_SCOPE
+    comparable_metadata = dict(metadata)
+    if "difficulty_boundaries" not in comparable_metadata:
+        stratification = comparable_metadata.get("stratification")
+        if isinstance(stratification, dict):
+            train_metadata = stratification.get("train")
+            if isinstance(train_metadata, dict):
+                comparable_metadata["difficulty_boundaries"] = (
+                    train_metadata.get("difficulty_boundaries")
+                )
+    mismatches = [
+        field
+        for field, value in expected.items()
+        if field in comparable_metadata
+        and comparable_metadata[field] != value
+    ]
+    if args.stratify and "dedupe_scope" not in comparable_metadata:
+        mismatches.append("dedupe_scope")
+    if args.stratify:
+        roles = comparable_metadata.get("dataset_roles")
+        if not isinstance(roles, dict) or roles.get("validation.npz") != "val":
+            mismatches.append("dataset_roles")
+    if mismatches:
+        raise SystemExit(
+            "Resume configuration does not match existing metadata for: "
+            + ", ".join(mismatches)
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -137,7 +551,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--min-path-length",
         type=int,
-        default=10,
+        default=3,
     )
 
     parser.add_argument(
@@ -146,7 +560,161 @@ def parse_args() -> argparse.Namespace:
         default=5,
     )
 
+    parser.add_argument(
+        "--min-tasks-per-maze",
+        type=int,
+        default=3,
+        help=(
+            "Compatibility lower bound for stratified generation; fixed "
+            "assignments use tasks-per-maze tasks per layout."
+        ),
+    )
+
+    parser.add_argument(
+        "--max-tasks-per-maze",
+        type=int,
+        default=7,
+        help=(
+            "Compatibility upper bound for stratified generation; fixed "
+            "assignments use tasks-per-maze tasks per layout."
+        ),
+    )
+
+    parser.add_argument(
+        "--stratify",
+        action="store_true",
+        help=(
+            "Select training tasks using difficulty buckets and "
+            "expected pairwise directed path-Jaccard deduplication."
+        ),
+    )
+
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Resume generation by loading existing split files and "
+            "generating only missing splits."
+        ),
+    )
+
+    parser.add_argument(
+        "--dedupe-threshold",
+        type=float,
+        default=0.7,
+        help=(
+            "Maximum expected pairwise directed path-Jaccard "
+            "similarity threshold."
+        ),
+    )
+
+    parser.add_argument(
+        "--short-budget",
+        type=float,
+        default=DEFAULT_BUCKET_BUDGETS["short"],
+        help="Fraction allocated to short paths; defaults to unused (0).",
+    )
+
+    parser.add_argument(
+        "--medium-budget",
+        type=float,
+        default=DEFAULT_BUCKET_BUDGETS["medium"],
+        help="Fraction of stratified tasks allocated to medium paths.",
+    )
+
+    parser.add_argument(
+        "--long-budget",
+        type=float,
+        default=DEFAULT_BUCKET_BUDGETS["long"],
+        help="Fraction of stratified tasks allocated to long paths.",
+    )
+
+    parser.add_argument(
+        "--minimum-long-eligible-tasks",
+        type=int,
+        default=None,
+        help=(
+            "Minimum long-task candidates required in each filtered "
+            "layout. Defaults to ceil(tasks-per-maze * long-budget)."
+        ),
+    )
+
+    parser.add_argument(
+        "--short-max-path-length",
+        type=int,
+        default=int(DEFAULT_DIFFICULTY_BOUNDARIES.short_max),
+        help="Maximum shortest-path length in the unused short bucket.",
+    )
+
+    parser.add_argument(
+        "--medium-max-path-length",
+        type=int,
+        default=int(DEFAULT_DIFFICULTY_BOUNDARIES.medium_max),
+        help="Maximum shortest-path length in the medium bucket.",
+    )
+
+    parser.add_argument(
+        "--allocation-attempts",
+        type=int,
+        default=8,
+        help="Number of seeded fixed-assignment selection attempts.",
+    )
+
+    parser.add_argument(
+        "--local-search-budget",
+        type=int,
+        default=2_000,
+        help="Candidate-extension attempts allowed per layout.",
+    )
+
+    parser.add_argument(
+        "--global-repair-budget",
+        type=int,
+        default=None,
+        help=(
+            "Deprecated compatibility option; fixed assignments do not "
+            "transfer tasks between layouts."
+        ),
+    )
+
     args = parser.parse_args()
+
+    if not 0 < args.dedupe_threshold <= 1:
+        parser.error("--dedupe-threshold must be in (0, 1].")
+    if args.stratify and not 0 < args.min_tasks_per_maze <= args.tasks_per_maze <= args.max_tasks_per_maze:
+        parser.error(
+            "Require --min-tasks-per-maze <= --tasks-per-maze <= "
+            "--max-tasks-per-maze."
+        )
+    if args.allocation_attempts <= 0 or args.local_search_budget <= 0:
+        parser.error("Allocation and search budgets must be positive.")
+    if args.global_repair_budget is not None and args.global_repair_budget <= 0:
+        parser.error("--global-repair-budget must be positive.")
+    if (
+        args.short_max_path_length < 0
+        or args.medium_max_path_length <= args.short_max_path_length
+    ):
+        parser.error(
+            "Require 0 <= --short-max-path-length < "
+            "--medium-max-path-length."
+        )
+    args.bucket_budgets = {
+        "short": args.short_budget,
+        "medium": args.medium_budget,
+        "long": args.long_budget,
+    }
+    if any(value < 0 for value in args.bucket_budgets.values()):
+        parser.error("Bucket budgets must be non-negative.")
+    if not np.isclose(sum(args.bucket_budgets.values()), 1.0):
+        parser.error("Bucket budgets must sum to 1.0.")
+    if args.minimum_long_eligible_tasks is None:
+        args.minimum_long_eligible_tasks = int(
+            np.ceil(
+                args.tasks_per_maze * args.bucket_budgets["long"]
+            )
+        )
+    if args.minimum_long_eligible_tasks < 0:
+        parser.error("--minimum-long-eligible-tasks must be non-negative.")
 
     if args.output_dir is None:
         args.output_dir = args.output_root / experiment_dataset_name(
@@ -156,6 +724,9 @@ def parse_args() -> argparse.Namespace:
             test_mazes=args.test_mazes,
             tasks_per_maze=args.tasks_per_maze,
             seed=args.seed,
+            stratify=args.stratify,
+            dedupe_threshold=args.dedupe_threshold,
+            bucket_budgets=args.bucket_budgets,
         )
 
     return args
@@ -165,24 +736,58 @@ def main() -> None:
     args = parse_args()
     train_path = args.output_dir / "train.npz"
     validation_path = args.output_dir / "validation.npz"
+    validation_tune_path = args.output_dir / "validation_tune.npz"
+    validation_natural_path = (
+        args.output_dir / "validation_natural.npz"
+    )
     same_layout_path = (
         args.output_dir / "same_layout_new_goals.npz"
     )
     test_path = args.output_dir / "test.npz"
+    test_natural_path = args.output_dir / "test_natural.npz"
     metadata_path = args.output_dir / "metadata.json"
-
+    output_paths = [
+        train_path,
+        validation_path,
+        validation_tune_path,
+        validation_natural_path,
+        same_layout_path,
+        test_path,
+        test_natural_path,
+        metadata_path,
+    ]
     if args.validation_mazes > args.train_mazes:
         raise SystemExit(
             "--validation-mazes cannot exceed --train-mazes because "
             "same_layout_new_goals.npz uses validation-sized held-out "
             "tasks on unique training layouts."
         )
+    checkpoint_metadata = {}
+    existing_action = "resume" if args.resume else (
+        _prompt_existing_dataset_action(output_paths)
+    )
+    if existing_action == "resume":
+        args.resume = True
+        checkpoint_metadata = _load_metadata(metadata_path)
+        if checkpoint_metadata:
+            _validate_resume_metadata(args, checkpoint_metadata)
+    else:
+        existing_paths = _existing_dataset_paths(output_paths)
+        _remove_dataset_files(existing_paths)
 
     print(f"Writing datasets to {args.output_dir}")
     print(f"  train:        {train_path}")
-    print(f"  validation:   {validation_path}")
-    print(f"  same-layout:  {same_layout_path}")
+    if args.stratify:
+        print(f"  val:          {validation_path}")
+        print(f"  val-tune:     {validation_tune_path}")
+        print(f"  val-natural:  {validation_natural_path}")
+    else:
+        print(f"  validation:   {validation_path}")
+        print(f"  val-tune:     {validation_tune_path}")
+    print(f"  val-same:     {same_layout_path}")
     print(f"  test:         {test_path}")
+    if args.stratify:
+        print(f"  test-natural: {test_natural_path}")
     print(f"  metadata:     {metadata_path}")
 
     (
@@ -195,151 +800,623 @@ def main() -> None:
         test_size=args.test_mazes,
         master_seed=args.seed,
     )
-
-    print("Generating training mazes...")
-    (
-        train_layouts,
-        train_layout_indices,
-        train_starts,
-        train_goals,
-    ) = generate_mazes(
-        seeds=train_seeds,
-        height=args.height,
-        width=args.width,
-        wall_probability=args.wall_probability,
-        min_path_length=args.min_path_length,
-        tasks_per_maze=args.tasks_per_maze,
+    val_tune_maze_count = max(
+        1,
+        int(np.ceil(args.validation_mazes / 5)),
+    )
+    validation_tune_seeds = (
+        validation_seeds[:val_tune_maze_count]
+        + VAL_TUNE_SPLIT_SEED_OFFSET
+    )
+    boundaries = DifficultyBoundaries(
+        short_max=args.short_max_path_length,
+        medium_max=args.medium_max_path_length,
+    )
+    per_layout_bucket_quotas = bucket_quotas(
+        args.tasks_per_maze,
+        args.bucket_budgets,
     )
 
-    print("Generating validation mazes...")
-    (
-        validation_layouts,
-        validation_layout_indices,
-        validation_starts,
-        validation_goals,
-    ) = generate_mazes(
-        seeds=validation_seeds,
-        height=args.height,
-        width=args.width,
-        wall_probability=args.wall_probability,
-        min_path_length=args.min_path_length,
-        tasks_per_maze=args.tasks_per_maze,
+    split_paths = [
+        ("train", train_path),
+        ("validation", validation_path),
+        ("validation_tune", validation_tune_path),
+        ("same_layout_new_goals", same_layout_path),
+        ("test", test_path),
+    ]
+    if args.stratify:
+        split_paths.extend(
+            [
+                ("validation_natural", validation_natural_path),
+                ("test_natural", test_natural_path),
+            ]
+        )
+    completed_splits = {
+        split for split, path in split_paths if path.exists()
+    }
+    stratification_checkpoint = checkpoint_metadata.get(
+        "stratification",
+        {},
     )
+    if not isinstance(stratification_checkpoint, dict):
+        stratification_checkpoint = {}
+    stratification_metadata = stratification_checkpoint.get("train")
+    if not isinstance(stratification_metadata, dict):
+        stratification_metadata = None
+    validation_metadata = stratification_checkpoint.get(
+        "validation"
+    )
+    if not isinstance(validation_metadata, dict):
+        validation_metadata = None
+    validation_tune_metadata = stratification_checkpoint.get(
+        "validation_tune"
+    )
+    if not isinstance(validation_tune_metadata, dict):
+        validation_tune_metadata = None
+    test_metadata = stratification_checkpoint.get("test")
+    if not isinstance(test_metadata, dict):
+        test_metadata = None
 
-    print("Generating same-layout held-out tasks...")
     same_layout_maze_count = args.validation_mazes
-    same_layout_layouts = train_layouts[
-        :same_layout_maze_count
-    ]
-    same_layout_seeds = train_seeds[
-        :same_layout_maze_count
-    ]
-    (
-        same_layout_indices,
-        same_layout_starts,
-        same_layout_goals,
-    ) = generate_tasks_for_layouts(
-        layouts=same_layout_layouts,
-        seeds=same_layout_seeds,
-        tasks_per_maze=args.tasks_per_maze,
-        min_path_length=args.min_path_length,
-        excluded_tasks_by_layout=task_pairs_by_layout(
+
+    def checkpoint() -> None:
+        _write_metadata(
+            metadata_path,
+            _build_metadata(
+                args,
+                same_layout_maze_count=same_layout_maze_count,
+                val_tune_maze_count=val_tune_maze_count,
+                stratification_metadata=stratification_metadata,
+                validation_metadata=validation_metadata,
+                validation_tune_metadata=validation_tune_metadata,
+                test_metadata=test_metadata,
+                completed_splits=completed_splits,
+                complete=False,
+            ),
+        )
+
+    if train_path.exists():
+        print("Loading existing train split.")
+        (
+            train_layouts,
+            _saved_train_seeds,
             train_layout_indices,
             train_starts,
             train_goals,
-        ),
-    )
+        ) = _load_dataset_arrays(train_path)
+    else:
+        if args.stratify:
+            train_layouts = generate_layouts(
+                seeds=train_seeds,
+                height=args.height,
+                width=args.width,
+                wall_probability=args.wall_probability,
+                min_path_length=args.min_path_length,
+                minimum_eligible_tasks=args.min_tasks_per_maze,
+                minimum_long_eligible_tasks=(
+                    args.minimum_long_eligible_tasks
+                ),
+                long_path_min_length=args.medium_max_path_length + 1,
+                required_bucket_counts=per_layout_bucket_quotas,
+                dedupe_threshold=args.dedupe_threshold,
+                selection_random_seed=args.seed,
+                selection_search_budget=args.local_search_budget,
+                difficulty_boundaries=boundaries,
+                progress_callback=_simple_progress_callback(
+                    "Generating training mazes"
+                ),
+            )
+            train_layout_indices = None
+            train_starts = None
+            train_goals = None
+        else:
+            (
+                train_layouts,
+                train_layout_indices,
+                train_starts,
+                train_goals,
+            ) = generate_mazes(
+                seeds=train_seeds,
+                height=args.height,
+                width=args.width,
+                wall_probability=args.wall_probability,
+                min_path_length=args.min_path_length,
+                tasks_per_maze=args.tasks_per_maze,
+                progress_callback=_simple_progress_callback(
+                    "Generating training mazes"
+                ),
+            )
+        _finish_progress()
 
-    print("Generating test mazes...")
-    (
-        test_layouts,
-        test_layout_indices,
-        test_starts,
-        test_goals,
-    ) = generate_mazes(
-        seeds=test_seeds,
-        height=args.height,
-        width=args.width,
-        wall_probability=args.wall_probability,
-        min_path_length=args.min_path_length,
-        tasks_per_maze=args.tasks_per_maze,
-    )
-
-    save_dataset(
-        train_path,
-        train_layouts,
-        train_seeds,
-        train_layout_indices,
-        train_starts,
-        train_goals,
-    )
-
-    save_dataset(
-        validation_path,
-        validation_layouts,
-        validation_seeds,
-        validation_layout_indices,
-        validation_starts,
-        validation_goals,
-    )
-
-    save_dataset(
-        same_layout_path,
-        same_layout_layouts,
-        same_layout_seeds,
-        same_layout_indices,
-        same_layout_starts,
-        same_layout_goals,
-    )
-
-    save_dataset(
-        test_path,
-        test_layouts,
-        test_seeds,
-        test_layout_indices,
-        test_starts,
-        test_goals,
-    )
-
-    metadata = {
-        "generator": "random_obstacle_grid",
-        "height": args.height,
-        "width": args.width,
-        "wall_probability": args.wall_probability,
-        "min_path_length": args.min_path_length,
-        "master_seed": args.seed,
-        "train_mazes": args.train_mazes,
-        "validation_mazes": args.validation_mazes,
-        "test_mazes": args.test_mazes,
-        "tasks_per_maze": args.tasks_per_maze,
-        "same_layout_new_goals": {
-            "source": "train_layouts",
-            "layout_count": same_layout_maze_count,
-            "tasks_per_maze": args.tasks_per_maze,
-        },
-    }
-
-    with metadata_path.open("w") as file:
-        json.dump(
-            metadata,
-            file,
-            indent=2,
+    if not args.stratify:
+        stratification_metadata = None
+    elif not train_path.exists():
+        (
+            train_layout_indices,
+            train_starts,
+            train_goals,
+            stratification_metadata,
+        ) = generate_stratified_tasks_for_layouts(
+            train_layouts,
+            train_seeds,
+            tasks_per_maze=args.tasks_per_maze,
+            min_path_length=args.min_path_length,
+            dedupe_threshold=args.dedupe_threshold,
+            bucket_budgets=args.bucket_budgets,
+            random_seed=args.seed,
+            difficulty_boundaries=boundaries,
+            allocation_attempts=args.allocation_attempts,
+            min_tasks_per_maze=args.min_tasks_per_maze,
+            max_tasks_per_maze=args.max_tasks_per_maze,
+            local_search_budget=args.local_search_budget,
+            global_repair_budget=args.global_repair_budget,
+            progress_callback=_stratified_progress_callback(
+                "Selecting stratified training tasks"
+            ),
         )
+        _finish_progress()
+    elif stratification_metadata is None:
+        raise SystemExit(
+            "Cannot resume stratified generation: train metadata is "
+            "missing from metadata.json."
+        )
+
+    if not train_path.exists():
+        save_dataset(
+            train_path,
+            train_layouts,
+            train_seeds,
+            train_layout_indices,
+            train_starts,
+            train_goals,
+        )
+        completed_splits.add("train")
+        checkpoint()
+
+    if validation_path.exists():
+        print("Loading existing validation split.")
+        (
+            validation_layouts,
+            _saved_validation_seeds,
+            validation_layout_indices,
+            validation_starts,
+            validation_goals,
+        ) = _load_dataset_arrays(validation_path)
+    elif args.stratify:
+        validation_layouts = generate_layouts(
+            seeds=validation_seeds,
+            height=args.height,
+            width=args.width,
+            wall_probability=args.wall_probability,
+            min_path_length=args.min_path_length,
+            minimum_eligible_tasks=args.min_tasks_per_maze,
+            minimum_long_eligible_tasks=(
+                args.minimum_long_eligible_tasks
+            ),
+            long_path_min_length=args.medium_max_path_length + 1,
+            required_bucket_counts=per_layout_bucket_quotas,
+            dedupe_threshold=args.dedupe_threshold,
+            selection_random_seed=args.seed + 1,
+            selection_search_budget=args.local_search_budget,
+            difficulty_boundaries=boundaries,
+            progress_callback=_simple_progress_callback(
+                "Generating filtered validation mazes"
+            ),
+        )
+        _finish_progress()
+        (
+            validation_layout_indices,
+            validation_starts,
+            validation_goals,
+            validation_metadata,
+        ) = generate_stratified_tasks_for_layouts(
+            validation_layouts,
+            validation_seeds,
+            tasks_per_maze=args.tasks_per_maze,
+            min_path_length=args.min_path_length,
+            dedupe_threshold=args.dedupe_threshold,
+            bucket_budgets=args.bucket_budgets,
+            random_seed=args.seed + 1,
+            allocation_attempts=args.allocation_attempts,
+            min_tasks_per_maze=args.min_tasks_per_maze,
+            max_tasks_per_maze=args.max_tasks_per_maze,
+            local_search_budget=args.local_search_budget,
+            global_repair_budget=args.global_repair_budget,
+            difficulty_boundaries=boundaries,
+            progress_callback=_stratified_progress_callback(
+                "Selecting stratified validation tasks"
+            ),
+        )
+        _finish_progress()
+        save_dataset(
+            validation_path,
+            validation_layouts,
+            validation_seeds,
+            validation_layout_indices,
+            validation_starts,
+            validation_goals,
+        )
+        completed_splits.add("validation")
+        checkpoint()
+    else:
+        (
+            validation_layouts,
+            validation_layout_indices,
+            validation_starts,
+            validation_goals,
+        ) = generate_mazes(
+            seeds=validation_seeds,
+            height=args.height,
+            width=args.width,
+            wall_probability=args.wall_probability,
+            min_path_length=args.min_path_length,
+            tasks_per_maze=args.tasks_per_maze,
+            progress_callback=_simple_progress_callback(
+                "Generating validation mazes"
+            ),
+        )
+        _finish_progress()
+        save_dataset(
+            validation_path,
+            validation_layouts,
+            validation_seeds,
+            validation_layout_indices,
+            validation_starts,
+            validation_goals,
+        )
+        completed_splits.add("validation")
+        checkpoint()
+
+    if validation_tune_path.exists():
+        print("Loading existing validation-tune split.")
+        (
+            validation_tune_layouts,
+            _saved_validation_tune_seeds,
+            validation_tune_indices,
+            validation_tune_starts,
+            validation_tune_goals,
+        ) = _load_dataset_arrays(validation_tune_path)
+    elif args.stratify:
+        validation_tune_layouts = generate_layouts(
+            seeds=validation_tune_seeds,
+            height=args.height,
+            width=args.width,
+            wall_probability=args.wall_probability,
+            min_path_length=args.min_path_length,
+            minimum_eligible_tasks=args.min_tasks_per_maze,
+            minimum_long_eligible_tasks=(
+                args.minimum_long_eligible_tasks
+            ),
+            long_path_min_length=args.medium_max_path_length + 1,
+            required_bucket_counts=per_layout_bucket_quotas,
+            dedupe_threshold=args.dedupe_threshold,
+            selection_random_seed=args.seed + 3,
+            selection_search_budget=args.local_search_budget,
+            difficulty_boundaries=boundaries,
+            progress_callback=_simple_progress_callback(
+                "Generating filtered validation-tune mazes"
+            ),
+        )
+        _finish_progress()
+        (
+            validation_tune_indices,
+            validation_tune_starts,
+            validation_tune_goals,
+            validation_tune_metadata,
+        ) = generate_stratified_tasks_for_layouts(
+            validation_tune_layouts,
+            validation_tune_seeds,
+            tasks_per_maze=args.tasks_per_maze,
+            min_path_length=args.min_path_length,
+            dedupe_threshold=args.dedupe_threshold,
+            bucket_budgets=args.bucket_budgets,
+            random_seed=args.seed + 3,
+            allocation_attempts=args.allocation_attempts,
+            min_tasks_per_maze=args.min_tasks_per_maze,
+            max_tasks_per_maze=args.max_tasks_per_maze,
+            local_search_budget=args.local_search_budget,
+            global_repair_budget=args.global_repair_budget,
+            difficulty_boundaries=boundaries,
+            progress_callback=_stratified_progress_callback(
+                "Selecting stratified validation-tune tasks"
+            ),
+        )
+        _finish_progress()
+        save_dataset(
+            validation_tune_path,
+            validation_tune_layouts,
+            validation_tune_seeds,
+            validation_tune_indices,
+            validation_tune_starts,
+            validation_tune_goals,
+        )
+        completed_splits.add("validation_tune")
+        checkpoint()
+    else:
+        (
+            validation_tune_layouts,
+            validation_tune_indices,
+            validation_tune_starts,
+            validation_tune_goals,
+        ) = generate_mazes(
+            seeds=validation_tune_seeds,
+            height=args.height,
+            width=args.width,
+            wall_probability=args.wall_probability,
+            min_path_length=args.min_path_length,
+            tasks_per_maze=args.tasks_per_maze,
+            progress_callback=_simple_progress_callback(
+                "Generating validation-tune mazes"
+            ),
+        )
+        _finish_progress()
+        save_dataset(
+            validation_tune_path,
+            validation_tune_layouts,
+            validation_tune_seeds,
+            validation_tune_indices,
+            validation_tune_starts,
+            validation_tune_goals,
+        )
+        completed_splits.add("validation_tune")
+        checkpoint()
+
+    if args.stratify:
+        natural_validation_seeds = (
+            validation_seeds + NATURAL_SPLIT_SEED_OFFSET
+        )
+        if validation_natural_path.exists():
+            print("Loading existing natural validation split.")
+            (
+                validation_natural_layouts,
+                _saved_validation_natural_seeds,
+                validation_natural_indices,
+                validation_natural_starts,
+                validation_natural_goals,
+            ) = _load_dataset_arrays(validation_natural_path)
+        else:
+            (
+                validation_natural_layouts,
+                validation_natural_indices,
+                validation_natural_starts,
+                validation_natural_goals,
+            ) = generate_mazes(
+                seeds=natural_validation_seeds,
+                height=args.height,
+                width=args.width,
+                wall_probability=args.wall_probability,
+                min_path_length=args.min_path_length,
+                tasks_per_maze=args.tasks_per_maze,
+                progress_callback=_simple_progress_callback(
+                    "Generating natural validation mazes"
+                ),
+            )
+            _finish_progress()
+            save_dataset(
+                validation_natural_path,
+                validation_natural_layouts,
+                natural_validation_seeds,
+                validation_natural_indices,
+                validation_natural_starts,
+                validation_natural_goals,
+            )
+            completed_splits.add("validation_natural")
+            checkpoint()
+
+    if same_layout_path.exists():
+        print("Loading existing same-layout split.")
+        (
+            same_layout_layouts,
+            _saved_same_layout_seeds,
+            same_layout_indices,
+            same_layout_starts,
+            same_layout_goals,
+        ) = _load_dataset_arrays(same_layout_path)
+    else:
+        same_layout_layouts = train_layouts[:same_layout_maze_count]
+        same_layout_seeds = train_seeds[:same_layout_maze_count]
+        (
+            same_layout_indices,
+            same_layout_starts,
+            same_layout_goals,
+        ) = generate_tasks_for_layouts(
+            layouts=same_layout_layouts,
+            seeds=same_layout_seeds,
+            tasks_per_maze=args.tasks_per_maze,
+            min_path_length=args.min_path_length,
+            excluded_tasks_by_layout=task_pairs_by_layout(
+                train_layout_indices,
+                train_starts,
+                train_goals,
+            ),
+            progress_callback=_simple_progress_callback(
+                "Generating same-layout tasks"
+            ),
+        )
+        _finish_progress()
+        save_dataset(
+            same_layout_path,
+            same_layout_layouts,
+            same_layout_seeds,
+            same_layout_indices,
+            same_layout_starts,
+            same_layout_goals,
+        )
+        completed_splits.add("same_layout_new_goals")
+        checkpoint()
+
+    if test_path.exists():
+        print("Loading existing test split.")
+        (
+            test_layouts,
+            _saved_test_seeds,
+            test_layout_indices,
+            test_starts,
+            test_goals,
+        ) = _load_dataset_arrays(test_path)
+    elif args.stratify:
+        test_layouts = generate_layouts(
+            seeds=test_seeds,
+            height=args.height,
+            width=args.width,
+            wall_probability=args.wall_probability,
+            min_path_length=args.min_path_length,
+            minimum_eligible_tasks=args.min_tasks_per_maze,
+            minimum_long_eligible_tasks=(
+                args.minimum_long_eligible_tasks
+            ),
+            long_path_min_length=args.medium_max_path_length + 1,
+            required_bucket_counts=per_layout_bucket_quotas,
+            dedupe_threshold=args.dedupe_threshold,
+            selection_random_seed=args.seed + 2,
+            selection_search_budget=args.local_search_budget,
+            difficulty_boundaries=boundaries,
+            progress_callback=_simple_progress_callback(
+                "Generating filtered test mazes"
+            ),
+        )
+        _finish_progress()
+        (
+            test_layout_indices,
+            test_starts,
+            test_goals,
+            test_metadata,
+        ) = generate_stratified_tasks_for_layouts(
+            test_layouts,
+            test_seeds,
+            tasks_per_maze=args.tasks_per_maze,
+            min_path_length=args.min_path_length,
+            dedupe_threshold=args.dedupe_threshold,
+            bucket_budgets=args.bucket_budgets,
+            random_seed=args.seed + 2,
+            allocation_attempts=args.allocation_attempts,
+            min_tasks_per_maze=args.min_tasks_per_maze,
+            max_tasks_per_maze=args.max_tasks_per_maze,
+            local_search_budget=args.local_search_budget,
+            global_repair_budget=args.global_repair_budget,
+            difficulty_boundaries=boundaries,
+            progress_callback=_stratified_progress_callback(
+                "Selecting stratified test tasks"
+            ),
+        )
+        _finish_progress()
+        save_dataset(
+            test_path,
+            test_layouts,
+            test_seeds,
+            test_layout_indices,
+            test_starts,
+            test_goals,
+        )
+        completed_splits.add("test")
+        checkpoint()
+    else:
+        (
+            test_layouts,
+            test_layout_indices,
+            test_starts,
+            test_goals,
+        ) = generate_mazes(
+            seeds=test_seeds,
+            height=args.height,
+            width=args.width,
+            wall_probability=args.wall_probability,
+            min_path_length=args.min_path_length,
+            tasks_per_maze=args.tasks_per_maze,
+            progress_callback=_simple_progress_callback(
+                "Generating test mazes"
+            ),
+        )
+        _finish_progress()
+        save_dataset(
+            test_path,
+            test_layouts,
+            test_seeds,
+            test_layout_indices,
+            test_starts,
+            test_goals,
+        )
+        completed_splits.add("test")
+        checkpoint()
+
+    if args.stratify:
+        natural_test_seeds = test_seeds + NATURAL_SPLIT_SEED_OFFSET
+        if test_natural_path.exists():
+            print("Loading existing natural test split.")
+            (
+                test_natural_layouts,
+                _saved_test_natural_seeds,
+                test_natural_indices,
+                test_natural_starts,
+                test_natural_goals,
+            ) = _load_dataset_arrays(test_natural_path)
+        else:
+            (
+                test_natural_layouts,
+                test_natural_indices,
+                test_natural_starts,
+                test_natural_goals,
+            ) = generate_mazes(
+                seeds=natural_test_seeds,
+                height=args.height,
+                width=args.width,
+                wall_probability=args.wall_probability,
+                min_path_length=args.min_path_length,
+                tasks_per_maze=args.tasks_per_maze,
+                progress_callback=_simple_progress_callback(
+                    "Generating natural test mazes"
+                ),
+            )
+            _finish_progress()
+            save_dataset(
+                test_natural_path,
+                test_natural_layouts,
+                natural_test_seeds,
+                test_natural_indices,
+                test_natural_starts,
+                test_natural_goals,
+            )
+            completed_splits.add("test_natural")
+            checkpoint()
+
+    metadata = _build_metadata(
+        args,
+        same_layout_maze_count=same_layout_maze_count,
+        val_tune_maze_count=val_tune_maze_count,
+        stratification_metadata=stratification_metadata,
+        validation_metadata=validation_metadata,
+        validation_tune_metadata=validation_tune_metadata,
+        test_metadata=test_metadata,
+        completed_splits=completed_splits,
+        complete=True,
+    )
+    _write_metadata(metadata_path, metadata)
 
     print()
     print("Dataset generated successfully.")
     print(f"Output directory:   {args.output_dir}")
     print("Stored files:")
     print(f"  train:        {train_path}")
-    print(f"  validation:   {validation_path}")
-    print(f"  same-layout:  {same_layout_path}")
+    if args.stratify:
+        print(f"  val:          {validation_path}")
+        print(f"  val-tune:     {validation_tune_path}")
+        print(f"  val-natural:  {validation_natural_path}")
+    else:
+        print(f"  validation:   {validation_path}")
+        print(f"  val-tune:     {validation_tune_path}")
+    print(f"  val-same:     {same_layout_path}")
     print(f"  test:         {test_path}")
+    if args.stratify:
+        print(f"  test-natural: {test_natural_path}")
     print(f"  metadata:     {metadata_path}")
     print(
         f"Train layouts:      {train_layouts.shape}"
     )
     print(
         f"Validation layouts: {validation_layouts.shape}"
+    )
+    print(
+        f"Val-tune layouts:   {validation_tune_layouts.shape}"
     )
     print(
         f"Test layouts:       {test_layouts.shape}"
@@ -349,10 +1426,20 @@ def main() -> None:
         f"Validation tasks:   {len(validation_starts)}"
     )
     print(
+        f"Val-tune tasks:     {len(validation_tune_starts)}"
+    )
+    print(
         "Same-layout tasks:  "
         f"{len(same_layout_starts)}"
     )
     print(f"Test tasks:         {len(test_starts)}")
+    if args.stratify:
+        print(
+            f"Natural validation tasks: {len(validation_natural_starts)}"
+        )
+        print(
+            f"Natural test tasks:       {len(test_natural_starts)}"
+        )
 
 
 if __name__ == "__main__":

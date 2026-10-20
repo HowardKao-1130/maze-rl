@@ -359,6 +359,9 @@ def resolve_dataset_bundle_args(args) -> None:
     same_layout_dataset = (
         dataset_dir / "same_layout_new_goals.npz"
     )
+    natural_validation_dataset = (
+        dataset_dir / "validation_natural.npz"
+    )
 
     if not train_dataset.exists():
         raise ValueError(
@@ -375,6 +378,12 @@ def resolve_dataset_bundle_args(args) -> None:
     if args.same_layout_dataset is None:
         if same_layout_dataset.exists():
             args.same_layout_dataset = same_layout_dataset
+
+    if getattr(args, "natural_validation_dataset", None) is None:
+        if natural_validation_dataset.exists():
+            args.natural_validation_dataset = (
+                natural_validation_dataset
+            )
 
     if (
         args.output_dir is None
@@ -415,6 +424,12 @@ RESUME_METADATA_CLI_OPTIONS = {
     ),
     "same_layout_dataset": (
         "--same-layout-dataset",
+    ),
+    "stratified_validation_dataset": (
+        "--stratified-validation-dataset",
+    ),
+    "natural_validation_dataset": (
+        "--natural-validation-dataset",
     ),
     "validation_episodes": (
         "--validation-episodes",
@@ -640,7 +655,8 @@ def parse_args():
             "Training dataset .npz file, dataset directory, or "
             "dataset bundle name under data/datasets containing "
             "train.npz, validation.npz, and "
-            "same_layout_new_goals.npz."
+            "same_layout_new_goals.npz. Stratified bundles also "
+            "contain validation_natural.npz and test_natural.npz."
         ),
     )
 
@@ -857,6 +873,24 @@ def parse_args():
             "Optional same-layout new-task dataset to evaluate "
             "alongside validation during periodic neural-agent "
             "selection."
+        ),
+    )
+    parser.add_argument(
+        "--stratified-validation-dataset",
+        type=Path,
+        default=None,
+        help=(
+            "Legacy optional stratified validation dataset. New "
+            "bundles use --validation-dataset for val."
+        ),
+    )
+    parser.add_argument(
+        "--natural-validation-dataset",
+        type=Path,
+        default=None,
+        help=(
+            "Optional natural-layout validation dataset evaluated "
+            "as val-natural."
         ),
     )
     parser.add_argument(
@@ -1782,6 +1816,16 @@ def training_state_metadata(
             if args.same_layout_dataset is None
             else str(args.same_layout_dataset)
         ),
+        "stratified_validation_dataset": (
+            None
+            if getattr(args, "stratified_validation_dataset", None) is None
+            else str(args.stratified_validation_dataset)
+        ),
+        "natural_validation_dataset": (
+            None
+            if getattr(args, "natural_validation_dataset", None) is None
+            else str(args.natural_validation_dataset)
+        ),
         "validation_episodes": args.validation_episodes,
         "validation_all_tasks": args.validation_all_tasks,
         "early_stopping_patience": (
@@ -2019,6 +2063,14 @@ def apply_retroactive_resume_metadata(
         metadata,
         "same_layout_dataset",
     )
+    args.stratified_validation_dataset = optional_metadata_path(
+        metadata,
+        "stratified_validation_dataset",
+    )
+    args.natural_validation_dataset = optional_metadata_path(
+        metadata,
+        "natural_validation_dataset",
+    )
     args.validation_episodes = int(
         metadata["validation_episodes"]
     )
@@ -2073,6 +2125,14 @@ def apply_resume_training_state_defaults(
         "same_layout_dataset": optional_metadata_path(
             metadata,
             "same_layout_dataset",
+        ),
+        "stratified_validation_dataset": optional_metadata_path(
+            metadata,
+            "stratified_validation_dataset",
+        ),
+        "natural_validation_dataset": optional_metadata_path(
+            metadata,
+            "natural_validation_dataset",
         ),
         "validation_episodes": int(
             metadata["validation_episodes"]
@@ -2669,6 +2729,8 @@ def format_validation_progress_message(
     split_label = {
         "validation": "val",
         "same_layout": "same-val",
+        "natural_validation": "val-natural",
+        "stratified_validation": "val-stratified",
         "train_greedy": "train-greedy",
     }.get(split, split)
     message = (
@@ -3499,6 +3561,22 @@ def main():
                 max_steps=args.max_steps,
             )
 
+        if args.stratified_validation_dataset is not None:
+            validation_envs[
+                "stratified_validation"
+            ] = MazeEnv(
+                dataset_path=args.stratified_validation_dataset,
+                max_steps=args.max_steps,
+            )
+
+        if getattr(args, "natural_validation_dataset", None) is not None:
+            validation_envs[
+                "natural_validation"
+            ] = MazeEnv(
+                dataset_path=args.natural_validation_dataset,
+                max_steps=args.max_steps,
+            )
+
     elif args.same_layout_dataset is not None:
         raise ValueError(
             "--same-layout-dataset requires --validation-dataset."
@@ -4092,6 +4170,8 @@ def main():
                     "train_greedy",
                     "validation",
                     "same_layout",
+                    "natural_validation",
+                    "stratified_validation",
                 )
                 if split in validation_envs
             ] + [
@@ -4102,6 +4182,7 @@ def main():
                     "train_greedy",
                     "validation",
                     "same_layout",
+                    "natural_validation",
                 }
             ]
 

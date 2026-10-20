@@ -484,10 +484,16 @@ def test_infer_dataset_label_recognizes_validation_splits():
     ) == "val"
     assert infer_dataset_label(
         Path("data/same_layout_new_goals.npz")
-    ) == "val_with_same_layout"
+    ) == "val-same"
     assert infer_dataset_label(
         Path("data/test.npz")
     ) == "test"
+    assert infer_dataset_label(
+        Path("data/validation_natural.npz")
+    ) == "val-natural"
+    assert infer_dataset_label(
+        Path("data/test_natural.npz")
+    ) == "test-natural"
 
 
 def test_same_layout_dataset_for_validation_sibling(tmp_path):
@@ -975,6 +981,20 @@ def test_validation_progress_formats_train_greedy_label():
     )
 
 
+def test_validation_progress_formats_natural_validation_label():
+    assert (
+        format_validation_progress_message(
+            "natural_validation",
+            dataset_epoch=5,
+            task_selection_pass_budget=1000,
+            validation_score=0.512,
+            success_rate=0.6,
+        )
+        == "                        val-natural  eff=0.512 "
+        "succ=0.600"
+    )
+
+
 def test_task_selection_pass_progress_formats_task_counter():
     assert (
         format_task_selection_pass_task_progress_message(
@@ -1083,7 +1103,9 @@ def test_same_layout_dataset_matches_validation_size(monkeypatch, tmp_path):
         tmp_path / "validation.npz"
     ) as validation_data, np.load(
         tmp_path / "same_layout_new_goals.npz"
-    ) as same_layout_data:
+    ) as same_layout_data, np.load(
+        tmp_path / "validation_tune.npz"
+    ) as validation_tune_data:
         assert validation_data[
             "layouts"
         ].shape == same_layout_data[
@@ -1094,6 +1116,7 @@ def test_same_layout_dataset_matches_validation_size(monkeypatch, tmp_path):
         ) == len(
             same_layout_data["starts"]
         )
+        assert len(validation_tune_data["layouts"]) == 1
 
 
 def test_generate_dataset_experiment_name_derives_output_dir(
@@ -1366,10 +1389,12 @@ def test_resolve_dataset_bundle_args_infers_splits_and_output(
     train_path = dataset_dir / "train.npz"
     validation_path = dataset_dir / "validation.npz"
     same_layout_path = dataset_dir / "same_layout_new_goals.npz"
+    natural_validation_path = dataset_dir / "validation_natural.npz"
 
     train_path.write_bytes(b"train")
     validation_path.write_bytes(b"validation")
     same_layout_path.write_bytes(b"same-layout")
+    natural_validation_path.write_bytes(b"natural-validation")
 
     args = SimpleNamespace(
         algorithm="ppo",
@@ -1386,6 +1411,7 @@ def test_resolve_dataset_bundle_args_infers_splits_and_output(
     assert args.dataset == train_path
     assert args.validation_dataset == validation_path
     assert args.same_layout_dataset == same_layout_path
+    assert args.natural_validation_dataset == natural_validation_path
     assert args.output_dir == (
         tmp_path
         / "runs"

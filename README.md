@@ -9,15 +9,78 @@ Generate datasets with multiple tasks per layout:
 python scripts/generate_dataset.py --train-mazes 1000 --validation-mazes 200 --test-mazes 200 --tasks-per-maze 5
 ```
 
+If known dataset files already exist in the output directory, the generator
+prompts to override them or resume. Resume loads the existing components and
+generates only missing splits; `--resume` selects that behavior directly.
+
 The split sizes control the number of unique layouts. `--train`,
 `--validation`, and `--test` remain accepted aliases for those maze counts.
 Each layout gets `--tasks-per-maze` valid start/goal tasks.
+The minimum eligible shortest-path length defaults to `3` and is configurable
+with `--min-path-length`.
+
+Pass `--stratify` to select training, validation, and test tasks using common distance buckets and
+expected pairwise directed path-Jaccard deduplication. The deduplication
+threshold defaults to `0.7` and is configurable with `--dedupe-threshold`.
+For each task pair, the metric averages directed edge-Jaccard similarity over
+independently selected shortest-path pairs. Small path sets are evaluated
+exactly; larger path sets use a reproducible uniform-path estimate. Similarity
+deduplication is applied independently within each layout and difficulty bucket;
+tasks in different buckets are not compared. Bucket budgets are
+configurable with `--short-budget`, `--medium-budget`, and `--long-budget`,
+which default to `0.00`, `0.60`, and `0.40`; the short bucket is therefore
+unused by default and the medium:long ratio is 3:2. Stratified dataset names record
+these settings and the deduplication scope, for example
+`stratified_s00_m60_l40_dedupe070_withinbucket`.
+
+In stratified mode, every filtered split requires enough candidate geometry
+for the configured long-task quota before task selection begins. The default
+minimum is `ceil(tasks-per-maze * long-budget)` candidates per layout; override
+it with `--minimum-long-eligible-tasks`. This prevents a layout from being
+accepted when its geometry cannot support long tasks.
+
+The filtered/stratified validation and test splits use shared absolute
+difficulty boundaries. By default, short tasks are unused, the minimum path
+length is `3`, Medium tasks have length `3-15`, and Long tasks have length
+`> 15`. Override the first two cutoffs with `--short-max-path-length` and
+`--medium-max-path-length`. Stratified generation assigns the same bucket
+quota to every layout; with the defaults, every layout starts with three
+Medium and two Long tasks. Layouts must have enough raw candidates and must
+successfully produce that fixed assignment under the configured deduplication
+search. Tasks are never transferred between layouts. Search diagnostics are
+recorded in `metadata.json`.
+
+Generation saves each completed split immediately. If generation is
+interrupted, rerun with `--resume` to load existing split files and generate
+only the missing splits. Without `--resume`, an existing dataset prompts for
+confirmation and removes the known dataset files before starting over.
+
+Print split, bucket, contribution, and optimal-path summaries with:
+
+```bash
+python scripts/summarize_dataset.py \
+  --dataset data/datasets/<dataset-name> \
+  --output-json data/datasets/<dataset-name>/dataset_summary.json
+```
+
+When training against a stratified dataset bundle, periodic validation reports
+`train`, `train-greedy`, `val`, `val-same`, and `val-natural`. `val` is the
+primary filtered/stratified split used for ordinary training's best-checkpoint
+selection and early stopping. The generator also writes `validation_tune.npz`,
+but ordinary training does not load or plot it.
 
 - `data/train.npz`: seen tasks for training and memorization evaluation.
-- `data/same_layout_new_goals.npz`: validation-sized held-out start/goal tasks
-  on training layouts.
-- `data/validation.npz`: held-out validation layouts.
-- `data/test.npz`: held-out test layouts.
+- `data/validation.npz`: `val`, filtered layouts with stratified tasks.
+- `data/validation_tune.npz`: `val-tune`, a validation subset generated like
+  `val` with one fifth as many layouts (rounded up, minimum one), used
+  automatically only by tuning.
+- `data/same_layout_new_goals.npz`: `val-same`, validation-sized randomly
+  selected tasks on training layouts.
+- `data/validation_natural.npz`: `val-natural`, independently generated
+  natural layouts and randomly selected tasks.
+- `data/test.npz`: `test`, filtered layouts with stratified tasks.
+- `data/test_natural.npz`: `test-natural`, independently generated natural
+  layouts and randomly selected tasks.
 
 ## Training Metrics
 
@@ -43,8 +106,8 @@ python scripts/plot_training_metrics.py --metrics runs/tabular/q_learning/metric
 ```
 
 Plot DNN training histories for a dataset into one image. When validation
-metrics are available, the plot includes train, validation, same-layout
-validation, and greedy train-evaluation curves:
+metrics are available, the plot includes train, `val`, `val-same`,
+`val-natural`, and greedy train-evaluation curves:
 
 ```bash
 python scripts/summarize_training_runs.py --dataset generalization_followup_5000x500x500_t5_seed42
@@ -238,7 +301,8 @@ python scripts/tune_dnn.py --algorithm ppo --dataset generalization_followup_500
 
 The tuner requires an explicit dataset or split paths. With a dataset
 name, it reads `data/datasets/<dataset>/train.npz`,
-`validation.npz`, and `same_layout_new_goals.npz`, samples 100 hyperparameter
+`validation.npz`, `validation_tune.npz`, `same_layout_new_goals.npz`, and
+`validation_natural.npz`, samples 100 hyperparameter
 combinations with a random-search sampler and a 200 rollouts-per-task maximum
 budget per combination, stores per-combination trial directories under the
 matching
@@ -270,18 +334,19 @@ instead of guessing the old arguments.
 
 Keep `--rollouts-per-task` as the training budget for comparable combinations.
 Increasing it usually improves final performance but also changes compute cost,
-so it is best treated as a generous fixed maximum budget for the sweep. The
-tuner asks training to evaluate validation mean path efficiency after every
-internal task-selection pass, also evaluates
-`--same-layout-dataset` when provided, saves each combination's
-`best_checkpoint.pt`, and uses the best validation-layout checkpoint for
-combination selection. The ordinary `checkpoint.pt` remains the training
+so it is best treated as a generous fixed maximum budget for the sweep. When
+`validation_tune.npz` is present, the tuner uses `val-tune` as the primary
+validation dataset for child-run evaluation, early stopping, and combination
+selection; it falls back to `validation.npz` for older bundles. It also
+evaluates `val-same` and `val-natural`, saves each combination's
+`best_checkpoint.pt`, and leaves the ordinary `checkpoint.pt` as the training
 state.
 
 After tuning, train a longer final run from the stored best hyperparameter
 combination instead of copying values by hand. `--dataset` may name a bundle
 under `data/datasets` or point at a dataset directory; training then uses its
-`train.npz`, `validation.npz`, and `same_layout_new_goals.npz` files and writes
+`train.npz`, `validation.npz`, `same_layout_new_goals.npz`, and
+`validation_natural.npz` files and writes
 under the matching `runs/dnn/training/<dataset-directory>/<algorithm>` directory:
 
 ```bash
@@ -299,8 +364,8 @@ a dataset directory is provided. With
 Explicit training flags still override loaded values.
 
 Training writes `validation_metrics.png` beside `validation_metrics.csv`; the
-plot overlays greedy train-evaluation, validation-layout performance, and
-same-layout new-task performance when those splits are available. Tuning and
+plot overlays greedy train-evaluation, `val`, `val-same`, and `val-natural`
+performance when those splits are available. Tuning and
 training progress logs show combination percentages and task-selection-pass
 percentages at validation checks.
 
@@ -312,17 +377,17 @@ python scripts/summarize_tuning_runs.py --dataset generalization_followup_5000x5
 
 The command writes
 `runs/dnn/tuning/<dataset>/summary_plots/mean_path_efficiency_heatmap.png` for
-best validation and same-layout performance across trials, plus
+best `val` and secondary validation performance across trials, plus
 `mean_path_efficiency_training_progress_by_agent.png`, which shows full
 `metrics.csv` training curves for every completed DNN trial grouped by agent
 and highlights the trial(s) with the best validation score. It also writes
 `mean_path_efficiency_best_trial_training_history_summary.png`, a single
 subplot summary of the best validation trial for each agent, and one
 `<algorithm>_validation_metrics_trials.png` grid per neural agent containing
-per-trial validation and same-layout validation curves overlaid with the
+per-trial `val`, `val-same`, and `val-natural` curves overlaid with the
 matching epoch-aligned training curve when `metrics.csv` is available.
 Trial subplot titles show performance at the validation-selected checkpoint and
-use short score labels (`t`, `v`, `vs`). Red `INCOMPLETE` badges mark unfinished
+use short score labels (`t`, `v`, `vs`, `vn`). Red `INCOMPLETE` badges mark unfinished
 trials or missing grid slots when they cannot be confirmed complete from
 `training_summary.json`. The best validation score for that agent is
 highlighted, including ties. DNN summary grids use a single 5x4 sheet with
@@ -349,7 +414,9 @@ rate and other dynamics, inspect `validation_metrics.csv` and
 `training_summary.json` after a sweep to check whether the selected combination
 was limited by the stopping rule or by the maximum budget. Use
 `--evaluate-best-on-test` only after tuning to score the best
-validation-selected checkpoint on `--test-dataset`.
+validation-selected checkpoint on the filtered/stratified `test.npz`.
+When the bundle contains `test_natural.npz`, the same command also writes a
+separate `best_test_natural_evaluation.csv` generalization report.
 
 Neural checkpoints for `dqn`, `a2c`, and `ppo` include model snapshots using the
 same epoch schedule as tabular Q-table snapshots. Evaluation renders `dqn`
@@ -378,7 +445,7 @@ python scripts/evaluate.py --algorithm q_learning --dataset data/train.npz
 By default, evaluation runs every task in the dataset exactly once with a fixed
 seed for deterministic tie-breaking. For `validation.npz`, evaluation also
 looks for a sibling `same_layout_new_goals.npz` split and renders rollout videos
-for both validation views when MP4 support is installed. Use `--best-trial` to
+for the `val` and `val-same` views when MP4 support is installed. Use `--best-trial` to
 evaluate the best checkpoint recorded in `runs/dnn/tuning/tuning_results.csv`, or
 `--no-rollout-animations` to skip rollout videos.
 Legacy sampling flags remain accepted: use `--episodes N` to sample random
