@@ -89,20 +89,9 @@ def experiment_dataset_name(
         for bucket in ("short", "medium", "long")
     )
     threshold_suffix = f"{int(round(dedupe_threshold * 100)):03d}"
-    scope_suffixes = {
-        "within_layout_bucket": "withinbucket",
-        "within_layout_cross_bucket": "crossbucket",
-    }
-    try:
-        scope_suffix = scope_suffixes[dedupe_scope]
-    except KeyError as error:
-        raise ValueError(
-            "dedupe_scope must be 'within_layout_bucket' or "
-            "'within_layout_cross_bucket'."
-        ) from error
     return (
         f"{dataset_name}_stratified_{budget_suffix}"
-        f"_dedupe{threshold_suffix}_{scope_suffix}"
+        f"_dedupe{threshold_suffix}"
     )
 
 

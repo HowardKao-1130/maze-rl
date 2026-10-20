@@ -30,8 +30,8 @@ tasks in different buckets are not compared. Bucket budgets are
 configurable with `--short-budget`, `--medium-budget`, and `--long-budget`,
 which default to `0.00`, `0.60`, and `0.40`; the short bucket is therefore
 unused by default and the medium:long ratio is 3:2. Stratified dataset names record
-these settings and the deduplication scope, for example
-`stratified_s00_m60_l40_dedupe070_withinbucket`.
+these settings, for example
+`stratified_s00_m60_l40_dedupe070`.
 
 In stratified mode, every filtered split requires enough candidate geometry
 for the configured long-task quota before task selection begins. The default

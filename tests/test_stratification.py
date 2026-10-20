@@ -320,7 +320,7 @@ def test_stratified_dataset_name_includes_budgets_and_threshold():
     )
 
     assert name.endswith(
-        "_stratified_s20_m40_l40_dedupe075_withinbucket"
+        "_stratified_s20_m40_l40_dedupe075"
     )
 
 
@@ -347,7 +347,7 @@ def test_cli_defaults_configure_stratification(monkeypatch):
     }
     assert args.minimum_long_eligible_tasks == 2
     assert args.output_dir.name.endswith(
-        "_stratified_s00_m60_l40_dedupe070_withinbucket"
+        "_stratified_s00_m60_l40_dedupe070"
     )
 
 
