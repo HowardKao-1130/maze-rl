@@ -53,6 +53,12 @@ Path similarity is constrained independently among tasks in the same layout
 and difficulty bucket.
 _Avoid_: Cross-bucket deduplication when this scope is intended
 
+**Fixed Per-Layout Bucket Quotas**:
+Each filtered stratified layout starts with the same bucket assignment derived
+from the configured per-layout task budget. Layouts that cannot satisfy that
+assignment under the deduplication search are rejected; task quotas are not
+transferred between layouts.
+
 **Filtered/Stratified Validation (`val`)**:
 The primary validation split, generated with the same layout-capacity filter,
 difficulty quotas, and within-bucket task deduplication as training.

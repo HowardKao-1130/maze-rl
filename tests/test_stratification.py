@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 from types import SimpleNamespace
 
+from maze_rl.maze import stratification as stratification_module
 from maze_rl.maze.stratification import (
     DifficultyBoundaries,
     TaskCandidate,
@@ -12,6 +13,7 @@ from maze_rl.maze.stratification import (
     expected_pairwise_directed_path_jaccard,
     _failure_diagnostics,
     format_failure_diagnostics,
+    generate_layouts,
     generate_stratified_tasks_for_layouts,
     allocate_bucket_slots,
     _select_tasks_for_maze,
@@ -163,6 +165,59 @@ def test_task_capacity_counts_multiple_thresholds_in_one_result():
     )
 
     assert counts == {1: 12, 3: 2}
+
+
+def test_layout_generation_rejects_selection_infeasible_candidates(monkeypatch):
+    attempts = []
+
+    def fake_generate_valid_maze(**kwargs):
+        maze = np.zeros((1, 20), dtype=np.uint8)
+        return maze, (0, 0), (0, 19)
+
+    def fake_select_tasks(index, assignment, **kwargs):
+        attempts.append(dict(assignment))
+        return SimpleNamespace(
+            selected=[],
+            completed=len(attempts) == 2,
+            candidate_attempts=1,
+            backtracking_events=1,
+            budget_exhausted=False,
+        )
+
+    monkeypatch.setattr(
+        stratification_module,
+        "generate_valid_maze",
+        fake_generate_valid_maze,
+    )
+    monkeypatch.setattr(
+        stratification_module,
+        "_select_tasks_for_maze",
+        fake_select_tasks,
+    )
+
+    layouts = generate_layouts(
+        seeds=np.array([7]),
+        height=1,
+        width=20,
+        wall_probability=0.0,
+        min_path_length=3,
+        minimum_eligible_tasks=2,
+        minimum_long_eligible_tasks=1,
+        long_path_min_length=16,
+        required_bucket_counts={
+            "short": 0,
+            "medium": 1,
+            "long": 1,
+        },
+        difficulty_boundaries=DifficultyBoundaries(
+            short_max=2,
+            medium_max=15,
+        ),
+    )
+
+    assert layouts.shape == (1, 1, 20)
+    assert len(attempts) == 2
+    assert attempts[0] == {"short": 0, "medium": 0, "long": 1}
 
 
 def test_bucket_quotas_use_configured_budget_and_sum_to_total():
@@ -355,8 +410,8 @@ def test_stratified_progress_separates_phase_messages(capsys):
     update(
         {
             "phase": "allocation",
-            "allocation_attempt": 1,
-            "allocation_attempts": 1,
+            "selection_attempt": 1,
+            "selection_attempts": 1,
             "allocation_bucket": "long",
             "allocation_bucket_completed": 1,
             "allocation_bucket_total": 4,
@@ -412,21 +467,23 @@ def test_stratified_generation_is_reproducible_and_records_configuration():
         "medium_max": 8.0,
     }
     assert progress_events[0]["phase"] == "indexing"
-    assert progress_events[-1]["allocation_attempt"] == 1
-    assert progress_events[-1]["allocation_attempts"] == 8
+    assert progress_events[-1]["selection_attempt"] == 1
+    assert progress_events[-1]["selection_attempts"] == 8
     assert progress_events[-1]["bucket_counts"] == {
         "short": 2,
         "medium": 4,
         "long": 4,
     }
-    allocation_events = [
-        event
+    assert first[3]["bucket_quotas_per_layout"] == {
+        "short": 1,
+        "medium": 2,
+        "long": 2,
+    }
+    assert first[3]["contributions_by_layout"] == [5, 5]
+    assert not any(
+        event["phase"] == "allocation"
         for event in progress_events
-        if event["phase"] == "allocation"
-        and "allocation_bucket" in event
-    ]
-    assert allocation_events[-1]["allocation_slots_completed"] == 10
-    assert allocation_events[-1]["allocation_slots_total"] == 10
+    )
     selection_events = [
         event
         for event in progress_events

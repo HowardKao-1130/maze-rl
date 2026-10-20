@@ -39,11 +39,12 @@ The filtered/stratified validation and test splits use shared absolute
 difficulty boundaries. By default, short tasks are unused, the minimum path
 length is `3`, Medium tasks have length `3-15`, and Long tasks have length
 `> 15`. Override the first two cutoffs with `--short-max-path-length` and
-`--medium-max-path-length`. Training normally targets
-`--tasks-per-maze` tasks per layout; unresolved selections may transfer tasks
-between layouts within the configurable `--min-tasks-per-maze` and
-`--max-tasks-per-maze` bounds. Search diagnostics are recorded in
-`metadata.json`.
+`--medium-max-path-length`. Stratified generation assigns the same bucket
+quota to every layout; with the defaults, every layout starts with three
+Medium and two Long tasks. Layouts must have enough raw candidates and must
+successfully produce that fixed assignment under the configured deduplication
+search. Tasks are never transferred between layouts. Search diagnostics are
+recorded in `metadata.json`.
 
 Generation saves each completed split immediately. If generation is
 interrupted, rerun with `--resume` to load existing split files and generate

@@ -23,6 +23,7 @@ from maze_rl.maze.stratification import (
     DEFAULT_BUCKET_BUDGETS,
     DEFAULT_DIFFICULTY_BOUNDARIES,
     DifficultyBoundaries,
+    bucket_quotas,
     format_failure_diagnostics,
     generate_layouts,
     generate_stratified_tasks_for_layouts,
@@ -140,8 +141,14 @@ def _stratified_progress_callback(label: str):
                 f"{status}"
             )
         else:
-            attempt = event.get("allocation_attempt")
-            attempts = event.get("allocation_attempts")
+            attempt = event.get(
+                "selection_attempt",
+                event.get("allocation_attempt"),
+            )
+            attempts = event.get(
+                "selection_attempts",
+                event.get("allocation_attempts"),
+            )
             attempt_status = (
                 f"attempt {attempt}/{attempts} | "
                 if attempt is not None and attempts is not None
@@ -516,14 +523,20 @@ def parse_args() -> argparse.Namespace:
         "--min-tasks-per-maze",
         type=int,
         default=3,
-        help="Minimum tasks a layout may contribute after repair.",
+        help=(
+            "Compatibility lower bound for stratified generation; fixed "
+            "assignments use tasks-per-maze tasks per layout."
+        ),
     )
 
     parser.add_argument(
         "--max-tasks-per-maze",
         type=int,
         default=7,
-        help="Maximum tasks a layout may contribute after repair.",
+        help=(
+            "Compatibility upper bound for stratified generation; fixed "
+            "assignments use tasks-per-maze tasks per layout."
+        ),
     )
 
     parser.add_argument(
@@ -603,7 +616,7 @@ def parse_args() -> argparse.Namespace:
         "--allocation-attempts",
         type=int,
         default=8,
-        help="Number of seeded global allocation attempts.",
+        help="Number of seeded fixed-assignment selection attempts.",
     )
 
     parser.add_argument(
@@ -617,7 +630,10 @@ def parse_args() -> argparse.Namespace:
         "--global-repair-budget",
         type=int,
         default=None,
-        help="Global repair attempts; defaults to five per layout.",
+        help=(
+            "Deprecated compatibility option; fixed assignments do not "
+            "transfer tasks between layouts."
+        ),
     )
 
     args = parser.parse_args()
@@ -735,6 +751,14 @@ def main() -> None:
         test_size=args.test_mazes,
         master_seed=args.seed,
     )
+    boundaries = DifficultyBoundaries(
+        short_max=args.short_max_path_length,
+        medium_max=args.medium_max_path_length,
+    )
+    per_layout_bucket_quotas = bucket_quotas(
+        args.tasks_per_maze,
+        args.bucket_budgets,
+    )
 
     split_paths = [
         ("train", train_path),
@@ -808,6 +832,11 @@ def main() -> None:
                     args.minimum_long_eligible_tasks
                 ),
                 long_path_min_length=args.medium_max_path_length + 1,
+                required_bucket_counts=per_layout_bucket_quotas,
+                dedupe_threshold=args.dedupe_threshold,
+                selection_random_seed=args.seed,
+                selection_search_budget=args.local_search_budget,
+                difficulty_boundaries=boundaries,
                 progress_callback=_simple_progress_callback(
                     "Generating training mazes"
                 ),
@@ -850,10 +879,7 @@ def main() -> None:
             dedupe_threshold=args.dedupe_threshold,
             bucket_budgets=args.bucket_budgets,
             random_seed=args.seed,
-            difficulty_boundaries=DifficultyBoundaries(
-                short_max=args.short_max_path_length,
-                medium_max=args.medium_max_path_length,
-            ),
+            difficulty_boundaries=boundaries,
             allocation_attempts=args.allocation_attempts,
             min_tasks_per_maze=args.min_tasks_per_maze,
             max_tasks_per_maze=args.max_tasks_per_maze,
@@ -882,11 +908,6 @@ def main() -> None:
         completed_splits.add("train")
         checkpoint()
 
-    boundaries = DifficultyBoundaries(
-        short_max=args.short_max_path_length,
-        medium_max=args.medium_max_path_length,
-    )
-
     if validation_path.exists():
         print("Loading existing validation split.")
         (
@@ -908,6 +929,11 @@ def main() -> None:
                 args.minimum_long_eligible_tasks
             ),
             long_path_min_length=args.medium_max_path_length + 1,
+            required_bucket_counts=per_layout_bucket_quotas,
+            dedupe_threshold=args.dedupe_threshold,
+            selection_random_seed=args.seed + 1,
+            selection_search_budget=args.local_search_budget,
+            difficulty_boundaries=boundaries,
             progress_callback=_simple_progress_callback(
                 "Generating filtered validation mazes"
             ),
@@ -1081,6 +1107,11 @@ def main() -> None:
                 args.minimum_long_eligible_tasks
             ),
             long_path_min_length=args.medium_max_path_length + 1,
+            required_bucket_counts=per_layout_bucket_quotas,
+            dedupe_threshold=args.dedupe_threshold,
+            selection_random_seed=args.seed + 2,
+            selection_search_budget=args.local_search_budget,
+            difficulty_boundaries=boundaries,
             progress_callback=_simple_progress_callback(
                 "Generating filtered test mazes"
             ),

@@ -480,13 +480,20 @@ def generate_layouts(
     minimum_eligible_tasks: int = 1,
     minimum_long_eligible_tasks: int = 0,
     long_path_min_length: int | None = None,
+    required_bucket_counts: Mapping[str, int] | None = None,
+    dedupe_threshold: float = 0.7,
+    selection_random_seed: int = 0,
+    selection_search_budget: int = 2_000,
+    difficulty_boundaries: DifficultyBoundaries | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> np.ndarray:
     """Generate layouts with capacity for later stratified selection.
 
     The optional long-task requirement is checked before task selection, so
     layouts are not rejected later merely because their geometry cannot
-    support the requested long-task quota.
+    support the requested long-task quota. When fixed bucket counts are
+    supplied, the layout must also pass the configured non-duplicate long-task
+    selection search before it is accepted.
     """
     if minimum_eligible_tasks < 0:
         raise ValueError("minimum_eligible_tasks must be non-negative.")
@@ -499,6 +506,27 @@ def generate_layouts(
             "long_path_min_length is required when long-task capacity "
             "is requested."
         )
+    if not 0 < dedupe_threshold <= 1:
+        raise ValueError("dedupe_threshold must be in (0, 1].")
+    if selection_search_budget <= 0:
+        raise ValueError("selection_search_budget must be positive.")
+
+    fixed_bucket_counts: dict[str, int] | None = None
+    if required_bucket_counts is not None:
+        fixed_bucket_counts = {
+            bucket: int(required_bucket_counts[bucket])
+            for bucket in BUCKETS
+        }
+        if any(value < 0 for value in fixed_bucket_counts.values()):
+            raise ValueError("required bucket counts must be non-negative.")
+        if not sum(fixed_bucket_counts.values()):
+            raise ValueError("required bucket counts must not be empty.")
+        if minimum_eligible_tasks > sum(fixed_bucket_counts.values()):
+            raise ValueError(
+                "minimum_eligible_tasks cannot exceed the fixed bucket "
+                "task count."
+            )
+        boundaries = difficulty_boundaries or DEFAULT_DIFFICULTY_BOUNDARIES
 
     layouts = np.empty(
         (len(seeds), height, width),
@@ -517,23 +545,55 @@ def generate_layouts(
                 rng=rng,
                 min_path_length=min_path_length,
             )
-            thresholds = [min_path_length]
-            if minimum_long_eligible_tasks:
-                thresholds.append(int(long_path_min_length))
-            capacities = count_valid_tasks_by_min_path_length(
-                maze,
-                tuple(thresholds),
-            )
+            if fixed_bucket_counts is None:
+                thresholds = [min_path_length]
+                if minimum_long_eligible_tasks:
+                    thresholds.append(int(long_path_min_length))
+                capacities = count_valid_tasks_by_min_path_length(
+                    maze,
+                    tuple(thresholds),
+                )
 
-            if capacities[min_path_length] < minimum_eligible_tasks:
-                continue
+                if capacities[min_path_length] < minimum_eligible_tasks:
+                    continue
 
-            if (
-                minimum_long_eligible_tasks
-                and capacities[int(long_path_min_length)]
-                < minimum_long_eligible_tasks
-            ):
-                continue
+                if (
+                    minimum_long_eligible_tasks
+                    and capacities[int(long_path_min_length)]
+                    < minimum_long_eligible_tasks
+                ):
+                    continue
+            else:
+                index = build_candidate_index(
+                    maze,
+                    min_path_length=min_path_length,
+                )
+                apply_difficulty_buckets([index], boundaries)
+                capacities = _candidate_bucket_counts(index)
+                if any(
+                    capacities[bucket] < fixed_bucket_counts[bucket]
+                    for bucket in BUCKETS
+                ):
+                    continue
+
+                selection_rng = np.random.default_rng(
+                    np.random.SeedSequence(
+                        [selection_random_seed, layout_index, int(seed)]
+                    )
+                )
+                long_selection = _select_tasks_for_maze(
+                    index,
+                    {
+                        "short": 0,
+                        "medium": 0,
+                        "long": fixed_bucket_counts["long"],
+                    },
+                    threshold=dedupe_threshold,
+                    rng=selection_rng,
+                    search_budget=selection_search_budget,
+                )
+                if not long_selection.completed:
+                    continue
 
             layouts[layout_index] = maze
             if progress_callback is not None:
@@ -1071,8 +1131,8 @@ def _select_all_layouts(
     random_seed: int,
     local_search_budget: int,
     bucket_quotas: Mapping[str, int],
-    allocation_attempt: int,
-    allocation_attempts: int,
+    selection_attempt: int,
+    selection_attempts: int,
     progress_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> tuple[list[SearchResult], dict[str, object]]:
     results: list[SearchResult | None] = [None] * len(assignments)
@@ -1090,8 +1150,8 @@ def _select_all_layouts(
                 "layout_count": len(assignments),
                 "bucket_counts": _empty_assignment(),
                 "bucket_quotas": dict(bucket_quotas),
-                "allocation_attempt": allocation_attempt,
-                "allocation_attempts": allocation_attempts,
+                "selection_attempt": selection_attempt,
+                "selection_attempts": selection_attempts,
             }
         )
     for layout_index in order:
@@ -1125,8 +1185,8 @@ def _select_all_layouts(
                     "layout_count": len(assignments),
                     "bucket_counts": bucket_counts,
                     "bucket_quotas": dict(bucket_quotas),
-                    "allocation_attempt": allocation_attempt,
-                    "allocation_attempts": allocation_attempts,
+                    "selection_attempt": selection_attempt,
+                    "selection_attempts": selection_attempts,
                 }
             )
 
@@ -1330,7 +1390,12 @@ def generate_stratified_tasks_for_layouts(
     difficulty_boundaries: DifficultyBoundaries | None = None,
     progress_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, object]]:
-    """Select reproducible, difficulty-balanced tasks for each layout."""
+    """Select reproducible fixed-quota tasks for each layout.
+
+    Every layout receives the same bucket assignment derived from the
+    per-layout budget. Failed assignments are retried with a new selection
+    seed; they are never transferred to another layout.
+    """
     if tasks_per_maze <= 0:
         raise ValueError("tasks_per_maze must be positive.")
     if not 0 < min_tasks_per_maze <= tasks_per_maze <= max_tasks_per_maze:
@@ -1346,7 +1411,11 @@ def generate_stratified_tasks_for_layouts(
         bucket_budgets or DEFAULT_BUCKET_BUDGETS,
     )
     excluded_tasks_by_layout = excluded_tasks_by_layout or {}
-    quotas = bucket_quotas(len(layouts) * tasks_per_maze, budgets)
+    per_layout_quotas = bucket_quotas(tasks_per_maze, budgets)
+    quotas = {
+        bucket: per_layout_quotas[bucket] * len(layouts)
+        for bucket in BUCKETS
+    }
     if progress_callback is not None:
         progress_callback(
             {
@@ -1368,10 +1437,10 @@ def generate_stratified_tasks_for_layouts(
         apply_difficulty_buckets([index], boundaries)
         return index
 
-    # Keep only compact bucket capacities for the global allocation pass.
-    # Detailed candidate indexes contain Python dictionaries for every BFS
-    # source and must be released after each layout; retaining all of them
-    # makes large stratified datasets consume several gigabytes.
+    # Keep only compact bucket capacities for the fixed-assignment selection
+    # pass. Detailed candidate indexes contain Python dictionaries for every
+    # BFS source and must be released after each layout; retaining all of
+    # them makes large stratified datasets consume several gigabytes.
     candidate_counts_by_layout = []
     for layout_index in range(len(layouts)):
         index = build_layout_index(layout_index)
@@ -1390,11 +1459,14 @@ def generate_stratified_tasks_for_layouts(
     insufficient = [
         layout_index
         for layout_index, counts in enumerate(candidate_counts_by_layout)
-        if sum(counts.values()) < min_tasks_per_maze
+        if any(
+            counts[bucket] < per_layout_quotas[bucket]
+            for bucket in BUCKETS
+        )
     ]
     if insufficient:
         raise RuntimeError(
-            "Layouts without enough eligible tasks: "
+            "Layouts without enough candidates for fixed bucket quotas: "
             + ", ".join(str(index) for index in insufficient[:10])
         )
 
@@ -1405,21 +1477,16 @@ def generate_stratified_tasks_for_layouts(
         )
         for bucket in BUCKETS
     }
-    repair_budget = (
-        5 * len(layouts)
-        if global_repair_budget is None
-        else global_repair_budget
-    )
     started_at = time.perf_counter()
     last_error: Exception | None = None
     last_failure_diagnostics: dict[str, object] | None = None
-    repair_attempts_used = 0
-    repair_totals = {
+    repair_metadata = {
         "repair_attempts": 0,
         "recipient_checks": 0,
         "successful_reallocations": 0,
         "candidate_attempts": 0,
         "backtracking_events": 0,
+        "repair_budget": 0,
     }
 
     def report_attempt(
@@ -1434,8 +1501,8 @@ def generate_stratified_tasks_for_layouts(
             return
         event: dict[str, object] = {
             "phase": phase,
-            "allocation_attempt": attempt,
-            "allocation_attempts": allocation_attempts,
+            "selection_attempt": attempt,
+            "selection_attempts": allocation_attempts,
             "bucket_counts": dict(bucket_counts),
             "bucket_quotas": dict(quotas),
         }
@@ -1447,59 +1514,23 @@ def generate_stratified_tasks_for_layouts(
             event["diagnostics"] = dict(diagnostics)
         progress_callback(event)
 
-    for allocation_attempt in range(allocation_attempts):
-        attempt_number = allocation_attempt + 1
-        report_attempt(
-            attempt_number,
-            "allocation",
-            _empty_assignment(),
-        )
-        allocation_rng = np.random.default_rng(
-            np.random.SeedSequence([random_seed, allocation_attempt])
-        )
-        try:
-            assignments = allocate_bucket_slots(
-                tasks_per_maze=tasks_per_maze,
-                quotas=quotas,
-                rng=allocation_rng,
-                min_tasks_per_maze=min_tasks_per_maze,
-                max_tasks_per_maze=max_tasks_per_maze,
-                candidate_counts_by_layout=candidate_counts_by_layout,
-                progress_callback=(
-                    lambda event: progress_callback(
-                        {
-                            **event,
-                            "allocation_attempt": attempt_number,
-                            "allocation_attempts": allocation_attempts,
-                        }
-                    )
-                    if progress_callback is not None
-                    else None
-                ),
-            )
-        except QuotaAllocationError as error:
-            last_error = error
-            last_failure_diagnostics = None
-            report_attempt(
-                attempt_number,
-                "retrying",
-                _empty_assignment(),
-                reason=str(error),
-                persist=True,
-            )
-            continue
-
+    for selection_attempt in range(allocation_attempts):
+        attempt_number = selection_attempt + 1
+        assignments = [
+            dict(per_layout_quotas)
+            for _ in layouts
+        ]
         results, search_metadata = _select_all_layouts(
             build_layout_index,
             candidate_counts_by_layout,
             assignments,
             threshold=dedupe_threshold,
             seeds=seeds,
-            random_seed=random_seed + allocation_attempt,
+            random_seed=random_seed + selection_attempt,
             local_search_budget=local_search_budget,
             bucket_quotas=quotas,
-            allocation_attempt=allocation_attempt + 1,
-            allocation_attempts=allocation_attempts,
+            selection_attempt=attempt_number,
+            selection_attempts=allocation_attempts,
             progress_callback=progress_callback,
         )
         selected_by_layout = [result.selected for result in results]
@@ -1507,8 +1538,6 @@ def generate_stratified_tasks_for_layouts(
         for layout_index, (assignment, result) in enumerate(
             zip(assignments, results)
         ):
-            if result.completed:
-                continue
             selected_assignment = _assignment_for_tasks(result.selected)
             for bucket in BUCKETS:
                 unresolved.extend(
@@ -1521,61 +1550,23 @@ def generate_stratified_tasks_for_layouts(
                         )
                     )
                 )
-            assignments[layout_index] = selected_assignment
 
-        if unresolved and repair_attempts_used < repair_budget:
-            unresolved_before_repair = list(unresolved)
-            remaining_repair_budget = repair_budget - repair_attempts_used
-            unresolved, repair_metadata = _repair_unresolved_allocations(
-                build_layout_index,
-                candidate_counts_by_layout,
-                assignments,
-                selected_by_layout,
-                unresolved,
-                threshold=dedupe_threshold,
-                seeds=seeds,
-                random_seed=random_seed + allocation_attempt,
-                min_tasks_per_maze=min_tasks_per_maze,
-                max_tasks_per_maze=max_tasks_per_maze,
-                local_search_budget=local_search_budget,
-                repair_budget=remaining_repair_budget,
-                bucket_quotas=quotas,
-                allocation_attempt=allocation_attempt + 1,
-                allocation_attempts=allocation_attempts,
-                progress_callback=progress_callback,
-            )
-            repair_attempts_used += repair_metadata["repair_attempts"]
-            for key in repair_totals:
-                repair_totals[key] += repair_metadata[key]
-        else:
-            unresolved_before_repair = list(unresolved)
-            repair_metadata = {
-                "repair_attempts": 0,
-                "recipient_checks": 0,
-                "successful_reallocations": 0,
-                "repair_budget": repair_budget,
-            }
-
-        contributions = [
-            len(selected)
-            for selected in selected_by_layout
-        ]
+        contributions = [len(selected) for selected in selected_by_layout]
         failure_diagnostics = _failure_diagnostics(
             search_metadata,
-            unresolved_before_repair=unresolved_before_repair,
+            unresolved_before_repair=unresolved,
             unresolved_after_repair=unresolved,
             contributions=contributions,
-            min_tasks_per_maze=min_tasks_per_maze,
-            max_tasks_per_maze=max_tasks_per_maze,
+            min_tasks_per_maze=tasks_per_maze,
+            max_tasks_per_maze=tasks_per_maze,
             repair_metadata=repair_metadata,
         )
         if unresolved or any(
-            contribution < min_tasks_per_maze
-            or contribution > max_tasks_per_maze
+            contribution != tasks_per_maze
             for contribution in contributions
         ):
             last_error = RuntimeError(
-                "Unresolved stratified task allocations."
+                "A layout could not satisfy its fixed bucket assignment."
             )
             last_failure_diagnostics = failure_diagnostics
             report_attempt(
@@ -1586,7 +1577,7 @@ def generate_stratified_tasks_for_layouts(
                     for selected in selected_by_layout
                     for task in selected
                 ),
-                reason="unresolved allocation or contribution bounds",
+                reason="fixed per-layout assignment was infeasible",
                 persist=True,
                 diagnostics=failure_diagnostics,
             )
@@ -1602,14 +1593,15 @@ def generate_stratified_tasks_for_layouts(
         }
         if bucket_counts != quotas:
             last_error = RuntimeError(
-                f"Bucket quotas changed during repair: {bucket_counts}"
+                f"Fixed bucket assignments produced unexpected totals: "
+                f"{bucket_counts}"
             )
             last_failure_diagnostics = failure_diagnostics
             report_attempt(
                 attempt_number,
                 "retrying",
                 bucket_counts,
-                reason="bucket quotas changed during repair",
+                reason="fixed bucket totals did not match",
                 persist=True,
                 diagnostics=failure_diagnostics,
             )
@@ -1642,25 +1634,23 @@ def generate_stratified_tasks_for_layouts(
             "min_tasks_per_maze": min_tasks_per_maze,
             "max_tasks_per_maze": max_tasks_per_maze,
             "contributions_by_layout": contributions,
-            "allocation_attempts": allocation_attempt + 1,
+            "bucket_quotas_per_layout": per_layout_quotas,
+            "selection_attempts": selection_attempt + 1,
             "local_search_budget": local_search_budget,
-            "global_repair_budget": repair_budget,
+            "global_repair_budget": None,
             "path_sample_count": PATH_SAMPLE_COUNT,
             "max_exact_paths": MAX_EXACT_PATHS,
             "max_exact_pair_count": MAX_EXACT_PAIR_COUNT,
             "search": search_metadata,
-            "repair": {
-                **repair_totals,
-                "repair_budget": repair_budget,
-            },
+            "repair": repair_metadata,
             "unresolved_before_repair_by_bucket": {
                 bucket: sum(
                     unresolved_bucket == bucket
-                    for _, unresolved_bucket in unresolved_before_repair
+                    for _, unresolved_bucket in unresolved
                 )
                 for bucket in BUCKETS
             },
-            "unresolved_allocations": unresolved,
+            "unresolved_allocations": [],
             "generation_runtime_seconds": time.perf_counter() - started_at,
         }
         return layout_indices, starts, goals, metadata
@@ -1673,8 +1663,8 @@ def generate_stratified_tasks_for_layouts(
             .replace("\n", "\n  ")
         )
     raise RuntimeError(
-        "Could not select stratified tasks after retries without "
-        "relaxing constraints. "
+        "Could not select fixed per-layout stratified tasks after "
+        "retries. "
         f"Requested quotas: {quotas}. Last error: {last_error}"
         f"{failure_details}"
     )
