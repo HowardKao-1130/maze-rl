@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--runs-dir",
         type=Path,
-        default=DEFAULT_TABULAR_OUTPUT_ROOT,
+        default=DEFAULT_TABULAR_OUTPUT_ROOT / "training",
     )
     parser.add_argument(
         "--video",

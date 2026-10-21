@@ -17,6 +17,7 @@ from maze_rl.training.plots import plot_validation_metrics
 from scripts.generate_dataset import (
     main as generate_dataset_main,
     parse_args as parse_dataset_args,
+    tuning_layout_count,
 )
 from scripts.evaluate import default_checkpoint_path
 from scripts.evaluate import (
@@ -143,7 +144,7 @@ def make_metrics(
 def test_default_checkpoint_path_uses_algorithm_specific_suffix():
     assert default_checkpoint_path(
         "q_learning"
-    ) == Path("runs/tabular/q_learning/checkpoint.pkl")
+    ) == Path("runs/tabular/training/q_learning/checkpoint.pkl")
     assert default_checkpoint_path(
         "dqn"
     ) == Path(
@@ -157,10 +158,11 @@ def test_default_checkpoint_path_finds_existing_residual_run(
 ):
     residual_path = (
         tmp_path
+        / "training"
         / "ppo_residual_l2"
         / "checkpoint.pt"
     )
-    residual_path.parent.mkdir()
+    residual_path.parent.mkdir(parents=True)
     residual_path.touch()
     monkeypatch.setattr(
         "scripts.evaluate.DEFAULT_EXPERIMENT_OUTPUT_ROOT",
@@ -176,16 +178,18 @@ def test_default_checkpoint_path_prefers_existing_baseline_run(
 ):
     baseline_path = (
         tmp_path
+        / "training"
         / "ppo"
         / "checkpoint.pt"
     )
     residual_path = (
         tmp_path
+        / "training"
         / "ppo_residual_l2"
         / "checkpoint.pt"
     )
-    baseline_path.parent.mkdir()
-    residual_path.parent.mkdir()
+    baseline_path.parent.mkdir(parents=True)
+    residual_path.parent.mkdir(parents=True)
     baseline_path.touch()
     residual_path.touch()
     monkeypatch.setattr(
@@ -223,14 +227,15 @@ def test_evaluate_rollout_animation_defaults(monkeypatch):
             "--algorithm",
             "q_learning",
             "--dataset",
-            "data/validation.npz",
+            "data/datasets/dataset_200x50x50_t5_seed42/validation.npz",
         ],
     )
 
     args = parse_evaluate_args()
 
     assert args.checkpoint == Path(
-        "runs/tabular/q_learning/checkpoint.pkl"
+        "runs/tabular/dataset_200x50x50_t5_seed42/training/"
+        "q_learning/checkpoint.pkl"
     )
     assert args.dataset_label == "val"
     assert not args.no_rollout_animations
@@ -239,7 +244,8 @@ def test_evaluate_rollout_animation_defaults(monkeypatch):
     assert default_rollout_animation_output_dir(
         args.checkpoint
     ) == Path(
-        "runs/tabular/q_learning/rollout_animations"
+        "runs/tabular/dataset_200x50x50_t5_seed42/training/"
+        "q_learning/rollout_animations"
     )
 
 
@@ -253,7 +259,7 @@ def test_evaluate_rollout_animation_cli_overrides(monkeypatch, tmp_path):
             "--algorithm",
             "dqn",
             "--dataset",
-            "data/same_layout_new_goals.npz",
+            "data/datasets/dataset_200x50x50_t5_seed42/same_layout_new_goals.npz",
             "--dataset-label",
             "heldout_goals",
             "--rollout-animation-output-dir",
@@ -279,6 +285,8 @@ def test_evaluate_accepts_legacy_sampling_flags(monkeypatch):
             "evaluate.py",
             "--algorithm",
             "a2c",
+            "--dataset",
+            "data/datasets/dataset_200x50x50_t5_seed42/test.npz",
             "--episodes",
             "7",
             "--fixed-index",
@@ -300,6 +308,8 @@ def test_evaluate_accepts_legacy_all_tasks_flag(monkeypatch):
             "evaluate.py",
             "--algorithm",
             "a2c",
+            "--dataset",
+            "data/datasets/dataset_200x50x50_t5_seed42/test.npz",
             "--all-tasks",
         ],
     )
@@ -389,16 +399,16 @@ def test_best_trial_checkpoint_path_selects_algorithm_best(tmp_path):
     )
     tuning_results_path.write_text(
         "trial,algorithm,objective,checkpoint_path\n"
-        "1,a2c,0.3,runs/dnn/tuning/trials/trial_001/a2c/best_checkpoint.pt\n"
-        "2,dqn,0.8,runs/dnn/tuning/trials/trial_002/dqn/best_checkpoint.pt\n"
-        "3,a2c,0.5,runs/dnn/tuning/trials/trial_003/a2c/best_checkpoint.pt\n"
+        "1,a2c,0.3,runs/dnn/dataset_alpha/tuning/trials/trial_001/a2c/best_checkpoint.pt\n"
+        "2,dqn,0.8,runs/dnn/dataset_alpha/tuning/trials/trial_002/dqn/best_checkpoint.pt\n"
+        "3,a2c,0.5,runs/dnn/dataset_alpha/tuning/trials/trial_003/a2c/best_checkpoint.pt\n"
     )
 
     assert best_trial_checkpoint_path(
         "a2c",
         tuning_results_path,
     ) == Path(
-        "runs/dnn/tuning/trials/trial_003/a2c/best_checkpoint.pt"
+        "runs/dnn/dataset_alpha/tuning/trials/trial_003/a2c/best_checkpoint.pt"
     )
 
 
@@ -408,7 +418,7 @@ def test_best_trial_checkpoint_path_rejects_missing_algorithm(tmp_path):
     )
     tuning_results_path.write_text(
         "trial,algorithm,objective,checkpoint_path\n"
-        "1,dqn,0.8,runs/dnn/tuning/trials/trial_001/dqn/best_checkpoint.pt\n"
+        "1,dqn,0.8,runs/dnn/dataset_alpha/tuning/trials/trial_001/dqn/best_checkpoint.pt\n"
     )
 
     with pytest.raises(
@@ -430,8 +440,8 @@ def test_evaluate_best_trial_uses_tuning_results_csv(
     )
     tuning_results_path.write_text(
         "trial,algorithm,objective,checkpoint_path\n"
-        "1,a2c,0.2,runs/dnn/tuning/trials/trial_001/a2c/best_checkpoint.pt\n"
-        "2,a2c,0.7,runs/dnn/tuning/trials/trial_002/a2c/best_checkpoint.pt\n"
+        "1,a2c,0.2,runs/dnn/dataset_alpha/tuning/trials/trial_001/a2c/best_checkpoint.pt\n"
+        "2,a2c,0.7,runs/dnn/dataset_alpha/tuning/trials/trial_002/a2c/best_checkpoint.pt\n"
     )
 
     monkeypatch.setattr(
@@ -440,6 +450,8 @@ def test_evaluate_best_trial_uses_tuning_results_csv(
             "evaluate.py",
             "--algorithm",
             "a2c",
+            "--dataset",
+            "data/datasets/dataset_200x50x50_t5_seed42/test.npz",
             "--best-trial",
             "--tuning-results",
             str(tuning_results_path),
@@ -451,7 +463,7 @@ def test_evaluate_best_trial_uses_tuning_results_csv(
     assert args.best_trial
     assert args.tuning_results == tuning_results_path
     assert args.checkpoint == Path(
-        "runs/dnn/tuning/trials/trial_002/a2c/best_checkpoint.pt"
+        "runs/dnn/dataset_alpha/tuning/trials/trial_002/a2c/best_checkpoint.pt"
     )
 
 
@@ -464,6 +476,8 @@ def test_evaluate_best_trial_rejects_explicit_checkpoint(
             "evaluate.py",
             "--algorithm",
             "a2c",
+            "--dataset",
+            "data/datasets/dataset_200x50x50_t5_seed42/test.npz",
             "--best-trial",
             "--checkpoint",
             "runs/dnn/training/a2c/checkpoint.pt",
@@ -475,26 +489,31 @@ def test_evaluate_best_trial_rejects_explicit_checkpoint(
 
 
 def test_default_tuning_results_path_uses_tuning_run_csv():
-    assert default_tuning_results_path() == Path(
-        "runs/dnn/tuning/tuning_results.csv"
+    assert default_tuning_results_path(
+        Path(
+            "data/datasets/dataset_200x50x50_t5_seed42/test.npz"
+        )
+    ) == Path(
+        "runs/dnn/dataset_200x50x50_t5_seed42/tuning/"
+        "tuning_results.csv"
     )
 
 
 def test_infer_dataset_label_recognizes_validation_splits():
     assert infer_dataset_label(
-        Path("data/validation.npz")
+        Path("data/datasets/dataset_200x50x50_t5_seed42/validation.npz")
     ) == "val"
     assert infer_dataset_label(
-        Path("data/same_layout_new_goals.npz")
+        Path("data/datasets/dataset_200x50x50_t5_seed42/same_layout_new_goals.npz")
     ) == "val-same"
     assert infer_dataset_label(
-        Path("data/test.npz")
+        Path("data/datasets/dataset_200x50x50_t5_seed42/test.npz")
     ) == "test"
     assert infer_dataset_label(
-        Path("data/validation_natural.npz")
+        Path("data/datasets/dataset_200x50x50_t5_seed42/validation_natural.npz")
     ) == "val-natural"
     assert infer_dataset_label(
-        Path("data/test_natural.npz")
+        Path("data/datasets/dataset_200x50x50_t5_seed42/test_natural.npz")
     ) == "test-natural"
 
 
@@ -1274,6 +1293,12 @@ def test_generate_dataset_explicit_output_dir_wins(
     assert args.output_dir == output_dir
 
 
+def test_tuning_layout_counts_are_fixed_and_capped():
+    assert tuning_layout_count(5000, 100) == 100
+    assert tuning_layout_count(500, 40) == 40
+    assert tuning_layout_count(50, 100) == 50
+
+
 def test_neural_hyperparameters_filter_unset_values():
     args = SimpleNamespace(
         batch_size=32,
@@ -1312,6 +1337,8 @@ def test_parse_train_args_accepts_best_config_shorthand(
     dataset_dir = tmp_path / "training_bundle"
     dataset_dir.mkdir()
     (dataset_dir / "train.npz").write_bytes(b"")
+    (dataset_dir / "validation.npz").write_bytes(b"")
+    (dataset_dir / "same_layout_new_goals.npz").write_bytes(b"")
 
     monkeypatch.setattr(
         "sys.argv",
@@ -1337,23 +1364,23 @@ def test_parse_train_args_accepts_best_config_shorthand(
         )
 
     assert args.best_config == Path(
-        "runs/dnn/tuning/training_bundle/best_config_ppo.json"
+        "runs/dnn/training_bundle/tuning/best_config_ppo.json"
     )
 
 
 def test_resolve_best_config_path_uses_bare_tuning_name():
     assert resolve_best_config_path(
-        Path("tuning_200x50x50_t5_seed42"),
+        Path("dataset_200x50x50_t5_seed42"),
         "dqn",
     ) == Path(
-        "runs/dnn/tuning/tuning_200x50x50_t5_seed42/best_config_dqn.json"
+        "runs/dnn/dataset_200x50x50_t5_seed42/tuning/best_config_dqn.json"
     )
 
 
 def test_resolve_best_config_path_uses_tuning_directory(
     tmp_path,
 ):
-    tuning_dir = tmp_path / "tuning_200x50x50_t5_seed42"
+    tuning_dir = tmp_path / "dataset_200x50x50_t5_seed42"
     tuning_dir.mkdir()
 
     assert resolve_best_config_path(
@@ -1402,7 +1429,7 @@ def test_parse_train_args_uses_tabular_output_root_by_default(
 
     args = parse_train_args()
 
-    assert args.output_dir == Path("runs/tabular")
+    assert args.output_dir == Path("runs/tabular/training")
 
 
 def test_parse_train_args_leaves_dataset_directory_output_for_resolution(
@@ -1436,7 +1463,7 @@ def test_parse_train_args_leaves_dataset_name_output_for_resolution(
         tmp_path
         / "data"
         / "datasets"
-        / "generalization_followup_seed7"
+        / "dataset_5000x500x500_t5_seed42"
     )
     dataset_dir.mkdir(
         parents=True,
@@ -1455,14 +1482,14 @@ def test_parse_train_args_leaves_dataset_name_output_for_resolution(
 
     args = parse_train_args()
 
-    assert args.dataset == Path("generalization_followup_seed7")
+    assert args.dataset == Path("dataset_5000x500x500_t5_seed42")
     assert args.output_dir is None
 
 
 def test_resolve_dataset_bundle_args_infers_splits_and_output(
     tmp_path,
 ):
-    dataset_dir = tmp_path / "generalization_followup_seed7"
+    dataset_dir = tmp_path / "dataset_5000x500x500_t5_seed42"
     dataset_dir.mkdir()
     train_path = dataset_dir / "train.npz"
     validation_path = dataset_dir / "validation.npz"
@@ -1493,24 +1520,25 @@ def test_resolve_dataset_bundle_args_infers_splits_and_output(
     assert args.output_dir == (
         tmp_path
         / "runs"
-        / "generalization_followup_seed7"
+        / "dataset_5000x500x500_t5_seed42"
+        / "training"
     )
 
 
 def test_train_dataset_bundle_dir_for_reference_expands_dataset_name():
     assert dataset_bundle_dir_for_reference(
-        Path("generalization_followup_seed7")
+        Path("dataset_5000x500x500_t5_seed42")
     ) == (
         Path("data")
         / "datasets"
-        / "generalization_followup_seed7"
+        / "dataset_5000x500x500_t5_seed42"
     )
 
 
 def test_train_dataset_bundle_dir_for_reference_preserves_paths(
     tmp_path,
 ):
-    explicit_relative = Path("data/train.npz")
+    explicit_relative = Path("data/datasets/dataset_200x50x50_t5_seed42/train.npz")
     explicit_absolute = tmp_path / "train.npz"
 
     assert (
@@ -1532,7 +1560,7 @@ def test_resolve_dataset_bundle_args_accepts_dataset_name(
         tmp_path
         / "data"
         / "datasets"
-        / "generalization_followup_seed7"
+        / "dataset_5000x500x500_t5_seed42"
     )
     dataset_dir.mkdir(
         parents=True,
@@ -1547,7 +1575,7 @@ def test_resolve_dataset_bundle_args_accepts_dataset_name(
 
     args = SimpleNamespace(
         algorithm="ppo",
-        dataset=Path("generalization_followup_seed7"),
+        dataset=Path("dataset_5000x500x500_t5_seed42"),
         validation_dataset=None,
         same_layout_dataset=None,
         output_dir=None,
@@ -1567,7 +1595,8 @@ def test_resolve_dataset_bundle_args_accepts_dataset_name(
     assert args.output_dir == (
         tmp_path
         / "runs"
-        / "generalization_followup_seed7"
+        / "dataset_5000x500x500_t5_seed42"
+        / "training"
     )
 
 
@@ -1601,6 +1630,48 @@ def test_resolve_dataset_bundle_args_preserves_explicit_paths(
     assert args.validation_dataset == explicit_validation
     assert args.same_layout_dataset == explicit_same_layout
     assert args.output_dir == explicit_output
+
+
+def test_resolve_dataset_bundle_args_uses_tabular_dataset_root(
+    monkeypatch,
+    tmp_path,
+):
+    dataset_dir = tmp_path / "dataset_bundle"
+    dataset_dir.mkdir()
+    for split in (
+        "train.npz",
+        "validation.npz",
+        "same_layout_new_goals.npz",
+    ):
+        (dataset_dir / split).write_bytes(b"")
+
+    tabular_root = tmp_path / "tabular-runs"
+    dnn_root = tmp_path / "dnn-runs"
+    monkeypatch.setattr(
+        "scripts.train.DEFAULT_TABULAR_OUTPUT_ROOT",
+        tabular_root,
+    )
+    monkeypatch.setattr(
+        "scripts.train.DEFAULT_EXPERIMENT_OUTPUT_ROOT",
+        dnn_root,
+    )
+    args = SimpleNamespace(
+        algorithm="q_learning",
+        dataset=dataset_dir,
+        validation_dataset=None,
+        same_layout_dataset=None,
+        output_dir=None,
+        experiment_name=None,
+        experiment_root=None,
+    )
+
+    resolve_dataset_bundle_args(args)
+
+    assert args.output_dir == (
+        tabular_root
+        / "dataset_bundle"
+        / "training"
+    )
 
 
 def test_resolve_dataset_bundle_args_requires_train_split(
@@ -1648,14 +1719,15 @@ def test_train_experiment_output_dir_uses_dataset_metadata(
     )
 
     assert default_experiment_output_dir(
-        experiment_name="generalization_followup",
+        experiment_name="dataset",
         dataset_path=dataset_path,
         algorithm="ppo",
         experiment_root=tmp_path / "runs",
     ) == (
         tmp_path
         / "runs"
-        / "generalization_followup_2000x200x200_t5_seed42"
+        / "dataset_2000x200x200_t5_seed42"
+        / "training"
     )
 
 
@@ -1786,9 +1858,9 @@ def test_q_video_path_uses_task_directory_layout():
     assert q_video_path(
         algorithm="sarsa",
         task_index=7,
-        runs_dir=Path("runs/tabular"),
+        runs_dir=Path("runs/tabular/training"),
     ) == Path(
-        "runs/tabular/sarsa/q_value_plots/task_00007/task_00007_q_values.mp4"
+        "runs/tabular/training/sarsa/q_value_plots/task_00007/task_00007_q_values.mp4"
     )
 
 
@@ -2644,14 +2716,14 @@ def test_apply_retroactive_resume_metadata_reuses_stored_config(
 ):
     args = SimpleNamespace(
         algorithm="ppo",
-        dataset=Path("data/train.npz"),
+        dataset=Path("data/datasets/dataset_200x50x50_t5_seed42/train.npz"),
         fixed_index=None,
         max_steps=200,
         seed=42,
         rollouts_per_task=100,
         task_batch_size=None,
         rollout_group_size=None,
-        validation_dataset=Path("data/validation.npz"),
+        validation_dataset=Path("data/datasets/dataset_200x50x50_t5_seed42/validation.npz"),
         same_layout_dataset=None,
         validation_episodes=200,
         validation_all_tasks=True,

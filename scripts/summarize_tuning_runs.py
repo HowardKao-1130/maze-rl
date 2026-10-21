@@ -20,9 +20,10 @@ if str(REPO_ROOT) not in sys.path:
     )
 
 from scripts.experiment_naming import (
-    DEFAULT_DATA_OUTPUT_ROOT,
     DEFAULT_DNN_TUNING_OUTPUT_ROOT,
+    dataset_run_output_dir,
 )
+from scripts.dataset_paths import dataset_bundle_dir_for_reference
 from scripts.summary_metrics import (
     WEIGHTED_PATH_EFFICIENCY,
     WEIGHTED_PATH_SUCCESS,
@@ -2967,27 +2968,21 @@ def plot_validation_metric_montage(
     return plot_count
 
 
-
-def dataset_dir_for_reference(
-    dataset: Path,
-) -> Path:
-    if dataset.is_absolute() or len(dataset.parts) > 1:
-        return dataset
-
-    return DEFAULT_DATA_OUTPUT_ROOT / dataset
-
-
 def resolve_summary_paths(
     args: argparse.Namespace,
 ) -> None:
     if args.runs_dir is None:
-        args.runs_dir = DEFAULT_DNN_TUNING_OUTPUT_ROOT
-
-        if args.dataset is not None:
-            args.runs_dir = (
-                args.runs_dir
-                / dataset_dir_for_reference(args.dataset).name
+        if args.dataset is None:
+            raise ValueError(
+                "Pass --dataset or --runs-dir; tuning runs are "
+                "stored under a dataset directory."
             )
+
+        args.runs_dir = dataset_run_output_dir(
+            DEFAULT_DNN_TUNING_OUTPUT_ROOT,
+            dataset_bundle_dir_for_reference(args.dataset).name,
+            "tuning",
+        )
 
     if args.output_dir is None:
         args.output_dir = args.runs_dir / "summary_plots"
@@ -3007,8 +3002,7 @@ def parse_args(
 ) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Summarize DNN tuning runs with validation heatmaps, "
-            "all-agent training progress plots, per-agent validation "
+            "Summarize DNN tuning runs with per-agent validation "
             "plot grids, and parallel-coordinate hyperparameter plots."
         )
     )
@@ -3019,7 +3013,7 @@ def parse_args(
         help=(
             "Dataset bundle name under data/datasets or a dataset "
             "directory. Defaults --runs-dir to "
-            "runs/dnn/tuning/<dataset>."
+            "runs/dnn/<dataset>/tuning."
         ),
     )
     parser.add_argument(
@@ -3027,9 +3021,9 @@ def parse_args(
         type=Path,
         default=None,
         help=(
-            "Tuning run directory containing trials. Defaults to "
-            "runs/dnn/tuning, or runs/dnn/tuning/<dataset> when "
-            "--dataset is provided."
+            "Tuning run directory containing trials. Pass --dataset to "
+            "use runs/dnn/<dataset>/tuning, or provide --runs-dir "
+            "explicitly."
         ),
     )
     parser.add_argument(
@@ -3068,62 +3062,6 @@ def summarize_tuning_runs(
             f"{args.runs_dir / 'trials'}."
         )
 
-    cells = collect_heatmap_cells(
-        artifacts,
-        metric=args.metric,
-    )
-    heatmap_path = (
-        args.output_dir
-        / f"{args.metric}_heatmap.png"
-    )
-    print_summary_section(
-        "Summary: tuning heatmap",
-    )
-    plot_tuning_summary_heatmap(
-        cells,
-        metric=args.metric,
-        output_path=heatmap_path,
-    )
-    print(
-        format_saved_file_message(
-            "Saved tuning heatmap to ",
-            heatmap_path,
-        ),
-        flush=True,
-    )
-
-    training_progress_path = (
-        args.output_dir
-        / f"{args.metric}_training_progress_by_agent.png"
-    )
-    print_summary_section(
-        "Summary: all-agent training progress",
-    )
-    training_progress_count = (
-        plot_all_agent_training_progress(
-            artifacts,
-            metric=args.metric,
-            output_path=training_progress_path,
-        )
-    )
-
-    if training_progress_count:
-        print(
-            format_saved_file_message(
-                "Saved all-agent training progress plot to ",
-                training_progress_path,
-                f" ({training_progress_count} trial(s))",
-            ),
-            flush=True,
-        )
-    else:
-        print(
-            "Skipped all-agent training progress plot; no "
-            "metrics.csv files with matching training metrics "
-            "were found.",
-            flush=True,
-        )
-
     best_trial_summary_path = (
         args.output_dir
         / f"{args.metric}_best_trial_training_history_summary.png"
@@ -3152,102 +3090,6 @@ def summarize_tuning_runs(
         print(
             "Skipped best-trial training summary plot; no "
             "plottable best trials were found.",
-            flush=True,
-        )
-
-    additional_metrics = [
-        "success_rate",
-        WEIGHTED_PATH_SUCCESS,
-        WEIGHTED_PATH_EFFICIENCY,
-    ]
-    for additional_metric in additional_metrics:
-        if additional_metric == args.metric:
-            continue
-
-        additional_cells = collect_heatmap_cells(
-            artifacts,
-            metric=additional_metric,
-        )
-        if not additional_cells:
-            print(
-                f"Skipped {additional_metric} summary; no matching "
-                "validation metrics were found.",
-                flush=True,
-            )
-            continue
-
-        additional_heatmap_path = (
-            args.output_dir
-            / f"{additional_metric}_heatmap.png"
-        )
-        plot_tuning_summary_heatmap(
-            additional_cells,
-            metric=additional_metric,
-            output_path=additional_heatmap_path,
-        )
-        print(
-            format_saved_file_message(
-                f"Saved {additional_metric} tuning heatmap to ",
-                additional_heatmap_path,
-            ),
-            flush=True,
-        )
-
-        additional_progress_path = (
-            args.output_dir
-            / f"{additional_metric}_training_progress_by_agent.png"
-        )
-        if plot_all_agent_training_progress(
-            artifacts,
-            metric=additional_metric,
-            output_path=additional_progress_path,
-        ):
-            print(
-                format_saved_file_message(
-                    f"Saved {additional_metric} training progress to ",
-                    additional_progress_path,
-                ),
-                flush=True,
-            )
-
-        additional_best_path = (
-            args.output_dir
-            / f"{additional_metric}_best_trial_training_history_summary.png"
-        )
-        if plot_best_trial_training_summary(
-            artifacts,
-            metric=additional_metric,
-            output_path=additional_best_path,
-        ):
-            print(
-                format_saved_file_message(
-                    f"Saved {additional_metric} best-trial summary to ",
-                    additional_best_path,
-                ),
-                flush=True,
-            )
-
-    path_length_output_path = (
-        args.output_dir / "optimal_path_length_summary.png"
-    )
-    path_length_count = plot_path_length_summary(
-        artifacts,
-        metric=args.metric,
-        output_path=path_length_output_path,
-    )
-    if path_length_count:
-        print(
-            format_saved_file_message(
-                "Saved optimal path length diagnostics to ",
-                path_length_output_path,
-                f" ({path_length_count} agent(s))",
-            ),
-            flush=True,
-        )
-    else:
-        print(
-            "Skipped optimal path length diagnostics; no raw episode "
-            "metrics were found.",
             flush=True,
         )
 

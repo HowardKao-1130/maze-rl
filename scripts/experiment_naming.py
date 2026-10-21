@@ -8,9 +8,9 @@ from typing import Any
 
 DEFAULT_DATA_OUTPUT_ROOT = Path("data") / "datasets"
 DEFAULT_DNN_OUTPUT_ROOT = Path("runs") / "dnn"
-DEFAULT_DNN_TRAINING_OUTPUT_ROOT = DEFAULT_DNN_OUTPUT_ROOT / "training"
-DEFAULT_DNN_TUNING_OUTPUT_ROOT = DEFAULT_DNN_OUTPUT_ROOT / "tuning"
-DEFAULT_EXPERIMENT_OUTPUT_ROOT = DEFAULT_DNN_TRAINING_OUTPUT_ROOT
+DEFAULT_DNN_TRAINING_OUTPUT_ROOT = DEFAULT_DNN_OUTPUT_ROOT
+DEFAULT_DNN_TUNING_OUTPUT_ROOT = DEFAULT_DNN_OUTPUT_ROOT
+DEFAULT_EXPERIMENT_OUTPUT_ROOT = DEFAULT_DNN_OUTPUT_ROOT
 DEFAULT_TABULAR_OUTPUT_ROOT = Path("runs") / "tabular"
 DEFAULT_DATASET_EXPERIMENT_NAME = "dataset"
 DEFAULT_STRATIFIED_BUCKET_BUDGETS = {
@@ -19,6 +19,20 @@ DEFAULT_STRATIFIED_BUCKET_BUDGETS = {
     "long": 0.40,
 }
 DEFAULT_DEDUPE_SCOPE = "within_layout_bucket"
+
+
+def dataset_run_output_dir(
+    root: Path,
+    dataset_name: str,
+    phase: str,
+) -> Path:
+    """Return the canonical training or tuning directory for a dataset."""
+    if phase not in {"training", "tuning"}:
+        raise ValueError(
+            "Dataset run phase must be 'training' or 'tuning'."
+        )
+
+    return root / dataset_name / phase
 
 
 def slugify_experiment_name(
@@ -132,8 +146,8 @@ def experiment_dataset_name(
 ) -> str:
     """Return the canonical name for a generated dataset.
 
-    ``experiment_name`` remains accepted for compatibility, but generated
-    dataset directories are intentionally independent of experiment labels.
+    ``experiment_name`` is ignored because generated dataset directories are
+    defined by their canonical dataset parameters.
     """
     del experiment_name
     return canonical_dataset_name(

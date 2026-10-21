@@ -13,3 +13,5 @@ Provides-Extra: video
 Requires-Dist: imageio[ffmpeg]; extra == "video"
 Provides-Extra: dev
 Requires-Dist: pytest; extra == "dev"
+Provides-Extra: tuning
+Requires-Dist: optuna; extra == "tuning"

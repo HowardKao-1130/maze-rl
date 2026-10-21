@@ -16,7 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset",
         type=str,
-        default="data/train.npz",
+        required=True,
     )
 
     parser.add_argument(

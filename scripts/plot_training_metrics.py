@@ -19,7 +19,11 @@ from maze_rl.training.plots import (
 from scripts.experiment_naming import DEFAULT_TABULAR_OUTPUT_ROOT
 
 
-DEFAULT_METRICS_DIR = DEFAULT_TABULAR_OUTPUT_ROOT / "mc"
+DEFAULT_METRICS_DIR = (
+    DEFAULT_TABULAR_OUTPUT_ROOT
+    / "training"
+    / "mc"
+)
 
 
 def parse_args() -> argparse.Namespace:

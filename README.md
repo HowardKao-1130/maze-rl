@@ -45,10 +45,10 @@ Resume generates only missing splits and preserves completed ones.
 ### Train an agent
 
 Train a neural agent against a dataset bundle. The bundle name automatically
-resolves its training and validation splits:
+resolves the full training and validation splits from the same directory:
 
 ```bash
-python scripts/train.py \
+python scripts/train_dnn.py \
   --algorithm ppo \
   --dataset <dataset-name> \
   --rollouts-per-task 1000 \
@@ -58,14 +58,15 @@ python scripts/train.py \
 To train from the best configuration produced by tuning:
 
 ```bash
-python scripts/train.py \
+python scripts/train_dnn.py \
   --algorithm ppo \
   --best-config \
   --dataset <dataset-name> \
   --rollouts-per-task 1000
 ```
 
-Supported algorithms include `mc`, `sarsa`, `q_learning`, `dyna_q`, `dqn`,
+`train.py` contains the shared implementation for both tabular and neural
+agents. Supported algorithms include `mc`, `sarsa`, `q_learning`, `dyna_q`, `dqn`,
 `reinforce`, `a2c`, `ppo`, and `grpo`. If existing training artifacts are
 found, the command prompts to resume, reuse a completed run, or override it.
 
@@ -192,22 +193,31 @@ selection and early stopping. The generator also writes `train_tune.npz` and
 `validation_tune.npz`; ordinary training does not load or plot either tuning
 split.
 
-- `data/train.npz`: seen tasks for training and memorization evaluation.
-- `data/train_tune.npz`: `train-tune`, a reproducible subset of training
-  layouts used to reduce the cost of hyperparameter trials. It contains 20%
-  of training layouts, with a 500-layout minimum capped by the full training
-  size.
-- `data/validation.npz`: `val`, filtered layouts with stratified tasks.
-- `data/validation_tune.npz`: `val-tune`, a validation subset generated like
-  `val` with 40% of validation layouts and a 100-layout minimum capped by the
-  full validation size, used automatically only by tuning.
-- `data/same_layout_new_goals.npz`: `val-same`, validation-sized randomly
+- `data/datasets/<dataset>/train.npz`: seen tasks for training and memorization
+  evaluation.
+- `data/datasets/<dataset>/train_tune.npz`: `train-tune`, a reproducible subset of training
+  layouts used to reduce the cost of hyperparameter trials. It contains up to
+  100 layouts, capped by the full training size.
+- `data/datasets/<dataset>/validation.npz`: `val`, filtered layouts with
+  stratified tasks.
+- `data/datasets/<dataset>/validation_tune.npz`: `val-tune`, a validation subset generated like
+  `val` with up to 40 layouts, capped by the full validation size, used
+  automatically only by tuning.
+- `data/datasets/<dataset>/same_layout_new_goals.npz`: `val-same`, validation-sized randomly
   selected tasks on training layouts.
-- `data/validation_natural.npz`: `val-natural`, independently generated
+- `data/datasets/<dataset>/validation_natural.npz`: `val-natural`, independently generated
   natural layouts and randomly selected tasks.
-- `data/test.npz`: `test`, filtered layouts with stratified tasks.
-- `data/test_natural.npz`: `test-natural`, independently generated natural
+- `data/datasets/<dataset>/test.npz`: `test`, filtered layouts with stratified tasks.
+- `data/datasets/<dataset>/test_natural.npz`: `test-natural`, independently generated natural
   layouts and randomly selected tasks.
+
+Some migrated generalization bundles record a
+`tuning_source_dataset` in `metadata.json`. For those bundles,
+`train_tune.npz` and `validation_tune.npz` are exact copies of the historical
+tuning source's `train.npz` and `validation.npz`; the ordinary `train.npz` and
+`validation.npz` files remain the target dataset used for final training.
+Their `same_layout_new_goals.npz` remains target-local because `val-same` is a
+monitoring-only split and does not select hyperparameters or checkpoints.
 
 ## Training Metrics
 
@@ -229,7 +239,7 @@ python scripts/train.py --algorithm q_learning --rollouts-per-task 20
 Plot aggregate training curves:
 
 ```bash
-python scripts/plot_training_metrics.py --metrics runs/tabular/q_learning/metrics.csv --output runs/tabular/q_learning/training_metrics.png
+python scripts/plot_training_metrics.py --metrics runs/tabular/training/q_learning/metrics.csv --output runs/tabular/training/q_learning/training_metrics.png
 ```
 
 Plot DNN training histories for a dataset into one image. When validation
@@ -298,7 +308,7 @@ enabled, logs are written to `<run directory>/tensorboard`. Open the latest
 event file for one algorithm with:
 
 ```bash
-python scripts/open_tensorboard.py --logdir runs/dnn/training/dqn/tensorboard
+python scripts/open_tensorboard.py --logdir runs/dnn/<dataset>/training/dqn/tensorboard
 ```
 
 When `--logdir` is omitted, the launcher uses the baseline algorithm log
@@ -411,9 +421,10 @@ Generate datasets first:
 python scripts/generate_dataset.py --train-mazes 200 --validation-mazes 50 --test-mazes 50 --tasks-per-maze 5
 ```
 
-Use a separate output directory for larger training datasets so tuning
-and experiment datasets remain intact. Dataset directories are named from
-the split sizes, task count, and seed:
+Training and tuning splits are stored together in one dataset bundle, so a
+single generated directory is the source of truth for both workflows. Dataset
+directories are named from the split sizes, task count, seed, and (when
+enabled) stratification settings:
 
 ```bash
 python scripts/generate_dataset.py --train-mazes 5000 --validation-mazes 500 --test-mazes 500 --tasks-per-maze 5
@@ -424,10 +435,26 @@ Without `--output-dir`, generated splits are stored under
 Stratified datasets append
 `_stratified_s<short>_m<medium>_l<long>_dedupe<threshold>`.
 
+For example, the bundle
+`dataset_5000x500x500_t5_seed42_stratified_s00_m60_l40_dedupe050` contains:
+
+```text
+data/datasets/<dataset>/
+├── train.npz                 # ordinary training layouts
+├── train_tune.npz            # tuning subset of training layouts
+├── validation.npz            # ordinary filtered validation layouts
+├── validation_tune.npz       # tuning subset of validation layouts
+├── same_layout_new_goals.npz
+├── validation_natural.npz
+├── test.npz
+├── test_natural.npz
+└── metadata.json
+```
+
 Then tune against the pre-generated dataset bundle:
 
 ```bash
-python scripts/tune_dnn.py --algorithm ppo --dataset dataset_5000x500x500_t5_seed42
+python scripts/tune_dnn.py --algorithm ppo --dataset dataset_5000x500x500_t5_seed42_stratified_s00_m60_l40_dedupe050
 ```
 
 The tuner requires an explicit dataset or split paths. With a dataset
@@ -437,7 +464,7 @@ name, it reads `data/datasets/<dataset>/train_tune.npz`,
 combinations with Optuna's TPE sampler and a 200 rollouts-per-task maximum
 budget per combination, stores per-combination trial directories under the
 matching
-`runs/dnn/tuning/<dataset>/trials`, evaluates every
+`runs/dnn/<dataset>/tuning/trials`, evaluates every
 validation task, appends `tuning_results.csv`, and writes the current best
 combination to `best_config.json`. Pass `--tensorboard` to write
 per-combination TensorBoard event logs during tuning. It also writes
@@ -448,8 +475,9 @@ arguments and effective search space for controlled resumes. Pass
 `--hyperparameter-combinations` to change the number of sampled combinations,
 or pass
 `--search-space path/to/search_space.json` to override the default search space.
-Optuna's TPE sampler is the default. Install the optional dependency with
-`pip install 'maze-rl[tuning]'` or `pip install optuna`. Use
+Optuna's TPE sampler is the default. From the repository root, install the
+local package extra with `python -m pip install -e '.[tuning]'`, or install
+Optuna directly with `python -m pip install optuna`. Use
 `--sampler random` when a seeded random sweep is preferred; `--optuna` remains
 an explicit alias for the default Optuna sampler.
 If a sweep is interrupted, rerun the same command; when existing tuning
@@ -468,12 +496,10 @@ instead of guessing the old arguments.
 
 Keep `--rollouts-per-task` as the training budget for comparable combinations.
 Increasing it usually improves final performance but also changes compute cost,
-so it is best treated as a generous fixed maximum budget for the sweep. When
-`train_tune.npz` is present, the tuner uses `train-tune` for child-run
-training; it falls back to `train.npz` for older bundles. When
-`validation_tune.npz` is present, it uses `val-tune` as the primary validation
-dataset for child-run evaluation, early stopping, and combination selection;
-it falls back to `validation.npz` for older bundles. It also
+so it is best treated as a generous fixed maximum budget for the sweep. The
+tuner requires `train_tune.npz` and `validation_tune.npz` in the same
+bundle and uses them as `train-tune` and `val-tune` for child-run training,
+evaluation, early stopping, and combination selection. It also
 evaluates `val-same` and `val-natural`, saves each combination's
 `best_checkpoint.pt`, and leaves the ordinary `checkpoint.pt` as the training
 state.
@@ -483,20 +509,21 @@ combination instead of copying values by hand. `--dataset` may name a bundle
 under `data/datasets` or point at a dataset directory; training then uses its
 `train.npz`, `validation.npz`, `same_layout_new_goals.npz`, and
 `validation_natural.npz` files and writes
-under the matching `runs/dnn/training/<dataset-directory>/<algorithm>` directory:
+under the matching `runs/dnn/<dataset-directory>/training/<algorithm>` directory:
 
 ```bash
-python scripts/train.py --algorithm ppo --best-config --dataset dataset_5000x500x500_t5_seed42 --rollouts-per-task 1000
+python scripts/train_dnn.py --algorithm ppo --best-config --dataset dataset_5000x500x500_t5_seed42_stratified_s00_m60_l40_dedupe050 --rollouts-per-task 1000
 ```
 
 `--best-config` reads
-`runs/dnn/tuning/<dataset>/best_config_<algorithm>.json` when `--dataset` names
+`runs/dnn/<dataset>/tuning/best_config_<algorithm>.json` when `--dataset` names
 a bundle.
-Tabular training writes to `runs/tabular/<algorithm>`, and DNN training writes
-to `runs/dnn/training/<algorithm>` unless `--output-dir`, `--experiment-name`, or
-a dataset directory is provided. With
+With a dataset bundle, tabular training writes to
+`runs/tabular/<dataset>/training/<algorithm>` and DNN training writes to
+`runs/dnn/<dataset>/training/<algorithm>`. Without a dataset, the default
+backend-level location is `runs/<backend>/training/<algorithm>`. With
 `--experiment-name`, training reads the dataset metadata and writes under
-`runs/dnn/training/<name>_<train>x<validation>x<test>_t<tasks>_seed<seed>/<algorithm>`.
+`runs/dnn/<name>_<train>x<validation>x<test>_t<tasks>_seed<seed>/training/<algorithm>`.
 Explicit training flags still override loaded values.
 
 Training writes `validation_metrics.png` beside `validation_metrics.csv`; the
@@ -508,15 +535,10 @@ percentages at validation checks.
 Summarize completed DNN sweeps across agents with:
 
 ```bash
-python scripts/summarize_tuning_runs.py --dataset dataset_5000x500x500_t5_seed42
+python scripts/summarize_tuning_runs.py --dataset dataset_5000x500x500_t5_seed42_stratified_s00_m60_l40_dedupe050
 ```
 
 The command writes
-`runs/dnn/tuning/<dataset>/summary_plots/mean_path_efficiency_heatmap.png` for
-best `val` and secondary validation performance across trials, plus
-`mean_path_efficiency_training_progress_by_agent.png`, which shows full
-`metrics.csv` training curves for every completed DNN trial grouped by agent
-and highlights the trial(s) with the best validation score. It also writes
 `mean_path_efficiency_best_trial_training_history_summary.png`, a single
 subplot summary of the best validation trial for each agent, and one
 `<algorithm>_validation_metrics_trials.png` grid per neural agent containing
@@ -535,13 +557,9 @@ each trial's numeric hyperparameters and validation score on shared parallel
 axes, with better scores drawn in brighter colors and the best trial(s)
 emphasized.
 
-Tuning summaries also write success-rate and length-weighted path metric
-heatmaps and training-history plots when those columns are available. The
-`optimal_path_length_summary.png` plot uses each agent's best trial and shows
-the raw optimal-path-length distribution, mean success rate by length, and
-mean path efficiency by length. New validation CSVs include
-`weighted_path_success` and `weighted_path_efficiency`; older CSVs remain
-readable but cannot produce those weighted validation plots until regenerated.
+New validation CSVs include `weighted_path_success` and
+`weighted_path_efficiency`; older CSVs remain readable, but those metrics are
+available only when present in the source validation CSV.
 
 Early stopping defaults to `--early-stopping-patience 35` with
 `--early-stopping-min-delta 0.0`, and the same stopping rule applies to every
@@ -568,46 +586,50 @@ mean to the aggregate plot.
 
 Evaluation also writes the training plot automatically when it can find
 `metrics.csv` next to the checkpoint. The checkpoint path defaults to
-`runs/tabular/<algorithm>/checkpoint.pkl` for tabular agents and
-`runs/dnn/training/<algorithm>/checkpoint.pt` for neural agents. If the
+`runs/tabular/training/<algorithm>/checkpoint.pkl` for tabular agents and
+`runs/dnn/<dataset>/training/<algorithm>/checkpoint.pt` for neural agents. If the
 baseline neural checkpoint does not exist but a residual checkpoint does,
 default evaluation uses
-`runs/dnn/training/<algorithm>_residual/checkpoint.pt`:
+`runs/dnn/<dataset>/training/<algorithm>_residual/checkpoint.pt`:
 
 ```bash
-python scripts/evaluate.py --algorithm q_learning --dataset data/train.npz
+python scripts/evaluate.py --algorithm q_learning \
+  --dataset data/datasets/<dataset>/train.npz
 ```
 
 By default, evaluation runs every task in the dataset exactly once with a fixed
 seed for deterministic tie-breaking. For `validation.npz`, evaluation also
 looks for a sibling `same_layout_new_goals.npz` split and renders rollout videos
 for the `val` and `val-same` views when MP4 support is installed. Use `--best-trial` to
-evaluate the best checkpoint recorded in `runs/dnn/tuning/tuning_results.csv`, or
+evaluate the best checkpoint recorded in the selected dataset bundle's
+`runs/dnn/<dataset>/tuning/tuning_results.csv`, or
 `--no-rollout-animations` to skip rollout videos.
-Legacy sampling flags remain accepted: use `--episodes N` to sample random
-tasks, `--fixed-index I` to repeat one task, or `--all-tasks` to request the
-default all-task pass explicitly.
+For alternate evaluation plans, use `--episodes N` to sample random tasks,
+`--fixed-index I` to repeat one task, or `--all-tasks` to request the default
+all-task pass explicitly.
 
 Training skips training-metric plots by default to avoid large memory
 spikes on long runs. Pass `--plot` to write
-`runs/tabular/q_learning/training_metrics.png`,
-`runs/tabular/q_learning/task_training_metrics.png`, and
-`runs/tabular/q_learning/task_training_metrics.html`. Use `--plot-output`,
+`runs/tabular/training/q_learning/training_metrics.png`,
+`runs/tabular/training/q_learning/task_training_metrics.png`, and
+`runs/tabular/training/q_learning/task_training_metrics.html`. Use `--plot-output`,
 `--task-plot-output`, and `--task-html-output` to choose different paths.
 
 For tabular checkpoints trained with the current script, evaluation also writes
 Q-value maze plots from evenly spaced training snapshots:
 
 ```bash
-python scripts/evaluate.py --algorithm q_learning --checkpoint runs/tabular/q_learning/checkpoint.pkl --dataset data/train.npz
+python scripts/evaluate.py --algorithm q_learning \
+  --checkpoint runs/tabular/training/q_learning/checkpoint.pkl \
+  --dataset data/datasets/<dataset>/train.npz
 ```
 
 By default, training stores 101 Q-table snapshots in the checkpoint, starting at
 epoch 1 and ending at the final epoch. Use `--q-snapshot-count 11` for a smaller
 set. Evaluation saves Q-value plots under
-`runs/tabular/q_learning/q_value_plots/task_XXXXX/frames/snapshot_XXX.png` for the tasks
+`runs/tabular/training/q_learning/q_value_plots/task_XXXXX/frames/snapshot_XXX.png` for the tasks
 visited during evaluation, and writes
-`runs/tabular/q_learning/q_value_plots/task_XXXXX/task_XXXXX_q_values.mp4` beside the
+`runs/tabular/training/q_learning/q_value_plots/task_XXXXX/task_XXXXX_q_values.mp4` beside the
 `frames` directory when MP4 support is installed. The plot title still shows the
 actual epoch. Use `--no-q-videos` to skip MP4s, or `--no-q-plots` to skip Q
 plots entirely.

@@ -21,9 +21,10 @@ if str(REPO_ROOT) not in sys.path:
     )
 
 from scripts.experiment_naming import (
-    DEFAULT_DATA_OUTPUT_ROOT,
     DEFAULT_EXPERIMENT_OUTPUT_ROOT,
+    dataset_run_output_dir,
 )
+from scripts.dataset_paths import dataset_bundle_dir_for_reference
 from scripts.summary_metrics import (
     WEIGHTED_PATH_EFFICIENCY,
     WEIGHTED_PATH_SUCCESS,
@@ -182,7 +183,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Dataset bundle name under data/datasets or a dataset "
             "directory. Defaults --runs-dir to "
-            "runs/dnn/training/<dataset>."
+            "runs/dnn/<dataset>/training."
         ),
     )
     parser.add_argument(
@@ -191,8 +192,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Directory to scan for training run metrics.csv files. "
-            "Defaults to runs/dnn/training, or "
-            "runs/dnn/training/<dataset> when --dataset is provided."
+            "Pass --dataset to use runs/dnn/<dataset>/training, or "
+            "provide --runs-dir explicitly."
         ),
     )
     parser.add_argument(
@@ -224,26 +225,21 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def dataset_dir_for_reference(
-    dataset: Path,
-) -> Path:
-    if dataset.is_absolute() or len(dataset.parts) > 1:
-        return dataset
-
-    return DEFAULT_DATA_OUTPUT_ROOT / dataset
-
-
 def resolve_summary_paths(
     args: argparse.Namespace,
 ) -> None:
     if args.runs_dir is None:
-        args.runs_dir = DEFAULT_EXPERIMENT_OUTPUT_ROOT
-
-        if args.dataset is not None:
-            args.runs_dir = (
-                args.runs_dir
-                / dataset_dir_for_reference(args.dataset).name
+        if args.dataset is None:
+            raise ValueError(
+                "Pass --dataset or --runs-dir; training runs are "
+                "stored under a dataset directory."
             )
+
+        args.runs_dir = dataset_run_output_dir(
+            DEFAULT_EXPERIMENT_OUTPUT_ROOT,
+            dataset_bundle_dir_for_reference(args.dataset).name,
+            "training",
+        )
 
     if args.output_dir is None:
         args.output_dir = args.runs_dir / "summary_plots"
@@ -408,47 +404,12 @@ def training_summary_completed(
         return False
 
 
-def run_activity_paths(
-    run_dir: Path,
-) -> list[Path]:
-    paths = [
-        run_dir / "metrics.csv",
-        run_dir / "validation_metrics.csv",
-        run_dir / "training_state.pt",
-        run_dir / "checkpoint.pt",
-        run_dir / "best_checkpoint.pt",
-        run_dir / "checkpoint.pkl",
-        run_dir / "best_checkpoint.pkl",
-    ]
-
-    return [
-        path
-        for path in paths
-        if path.exists()
-    ]
-
-
-def run_has_stale_completion_summary(
-    summary_path: Path,
-) -> bool:
-    summary_mtime_ns = summary_path.stat().st_mtime_ns
-
-    return any(
-        path.stat().st_mtime_ns > summary_mtime_ns
-        for path in run_activity_paths(
-            summary_path.parent
-        )
-    )
-
-
 def training_summary_completion_status(
     path: Path,
 ) -> bool | None:
+    """Read completion from the summary, independent of artifact mtimes."""
     if not path.exists():
         return None
-
-    if run_has_stale_completion_summary(path):
-        return False
 
     try:
         training_summary = read_training_summary(

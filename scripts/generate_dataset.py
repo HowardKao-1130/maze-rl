@@ -37,26 +37,16 @@ from scripts.experiment_naming import (
 
 NATURAL_SPLIT_SEED_OFFSET = 1_000_000_000
 VAL_TUNE_SPLIT_SEED_OFFSET = 2_000_000_000
-TRAIN_TUNE_FRACTION = 0.2
-TRAIN_TUNE_MIN_MAZES = 500
-VALIDATION_TUNE_FRACTION = 0.4
-VALIDATION_TUNE_MIN_MAZES = 100
+TRAIN_TUNE_LAYOUTS = 100
+VALIDATION_TUNE_LAYOUTS = 40
 
 
 def tuning_layout_count(
     total_layouts: int,
-    fraction: float,
-    minimum_layouts: int,
+    target_layouts: int,
 ) -> int:
-    """Return a capped tuning size with a useful minimum floor."""
-    return min(
-        total_layouts,
-        max(
-            1,
-            minimum_layouts,
-            int(np.ceil(total_layouts * fraction)),
-        ),
-    )
+    """Return the fixed tuning size, capped by the source split size."""
+    return min(total_layouts, target_layouts)
 
 
 def task_pairs_by_layout(
@@ -435,17 +425,12 @@ def _validate_resume_metadata(
         "train_mazes": args.train_mazes,
         "train_tune_mazes": tuning_layout_count(
             args.train_mazes,
-            TRAIN_TUNE_FRACTION,
-            TRAIN_TUNE_MIN_MAZES,
+            TRAIN_TUNE_LAYOUTS,
         ),
         "validation_mazes": args.validation_mazes,
-        "validation_tune_mazes": max(
-            1,
-            tuning_layout_count(
-                args.validation_mazes,
-                VALIDATION_TUNE_FRACTION,
-                VALIDATION_TUNE_MIN_MAZES,
-            ),
+        "validation_tune_mazes": tuning_layout_count(
+            args.validation_mazes,
+            VALIDATION_TUNE_LAYOUTS,
         ),
         "test_mazes": args.test_mazes,
         "tasks_per_maze": args.tasks_per_maze,
@@ -832,18 +817,13 @@ def main() -> None:
         test_size=args.test_mazes,
         master_seed=args.seed,
     )
-    val_tune_maze_count = max(
-        1,
-        tuning_layout_count(
-            args.validation_mazes,
-            VALIDATION_TUNE_FRACTION,
-            VALIDATION_TUNE_MIN_MAZES,
-        ),
+    val_tune_maze_count = tuning_layout_count(
+        args.validation_mazes,
+        VALIDATION_TUNE_LAYOUTS,
     )
     train_tune_maze_count = tuning_layout_count(
         args.train_mazes,
-        TRAIN_TUNE_FRACTION,
-        TRAIN_TUNE_MIN_MAZES,
+        TRAIN_TUNE_LAYOUTS,
     )
     validation_tune_seeds = (
         validation_seeds[:val_tune_maze_count]

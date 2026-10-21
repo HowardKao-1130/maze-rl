@@ -13,7 +13,10 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.experiment_naming import DEFAULT_TABULAR_OUTPUT_ROOT
 
 checkpoint_path = (
-    DEFAULT_TABULAR_OUTPUT_ROOT / "mc" / "checkpoint.pkl"
+    DEFAULT_TABULAR_OUTPUT_ROOT
+    / "training"
+    / "mc"
+    / "checkpoint.pkl"
 )
 
 with checkpoint_path.open("rb") as f:

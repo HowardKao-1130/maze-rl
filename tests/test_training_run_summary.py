@@ -110,7 +110,7 @@ def test_resolve_summary_paths_uses_dataset_name(
     resolve_summary_paths(args)
 
     assert args.runs_dir == (
-        Path("runs") / "dnn" / "training" / "dataset_alpha"
+        Path("runs") / "dnn" / "dataset_alpha" / "training"
     )
     assert args.output_dir == args.runs_dir / "summary_plots"
 
@@ -400,7 +400,7 @@ def test_collect_training_run_series_uses_explicit_status(
     }
 
 
-def test_collect_training_run_series_marks_stale_summary_incomplete(
+def test_collect_training_run_series_trusts_completed_summary_when_state_is_newer(
     tmp_path,
 ):
     runs_dir = tmp_path / "runs"
@@ -431,7 +431,7 @@ def test_collect_training_run_series_marks_stale_summary_incomplete(
     )
 
     assert len(series) == 1
-    assert series[0].is_incomplete is True
+    assert series[0].is_incomplete is False
 
 
 def test_collect_training_run_series_marks_missing_summary_incomplete(

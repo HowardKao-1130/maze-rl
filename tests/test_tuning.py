@@ -71,7 +71,9 @@ def write_dataset_bundle(
     dataset_dir.mkdir(parents=True)
     for split in [
         "train.npz",
+        "train_tune.npz",
         "validation.npz",
+        "validation_tune.npz",
         "same_layout_new_goals.npz",
         "validation_natural.npz",
         "test.npz",
@@ -273,13 +275,14 @@ def test_tuning_experiment_output_dir_uses_train_metadata(
     )
 
     assert default_experiment_tuning_output_dir(
-        experiment_name="generalization_followup",
+        experiment_name="dataset",
         train_dataset=train_dataset,
         experiment_root=tmp_path / "runs",
     ) == (
         tmp_path
         / "runs"
-        / "generalization_followup_5000x500x500_t5_seed42"
+        / "dataset_5000x500x500_t5_seed42"
+        / "tuning"
     )
 
 
@@ -289,7 +292,7 @@ def test_dataset_bundle_resolution_infers_splits_and_output(
 ):
     dataset_dir = write_dataset_bundle(
         tmp_path / "data" / "datasets",
-        "tuning_200x50x50_t5_seed42",
+        "dataset_200x50x50_t5_seed42",
     )
     monkeypatch.chdir(tmp_path)
     args = SimpleNamespace(
@@ -308,13 +311,13 @@ def test_dataset_bundle_resolution_infers_splits_and_output(
     resolved_dataset_dir = (
         Path("data")
         / "datasets"
-        / "tuning_200x50x50_t5_seed42"
+        / "dataset_200x50x50_t5_seed42"
     )
     assert args.train_dataset == (
-        resolved_dataset_dir / "train.npz"
+        resolved_dataset_dir / "train_tune.npz"
     )
     assert args.validation_dataset == (
-        resolved_dataset_dir / "validation.npz"
+        resolved_dataset_dir / "validation_tune.npz"
     )
     assert args.same_layout_dataset == (
         resolved_dataset_dir / "same_layout_new_goals.npz"
@@ -331,7 +334,8 @@ def test_dataset_bundle_resolution_infers_splits_and_output(
     assert args.output_dir == (
         tmp_path
         / "runs"
-        / "tuning_200x50x50_t5_seed42"
+        / "dataset_200x50x50_t5_seed42"
+        / "tuning"
     )
 
 
@@ -341,7 +345,7 @@ def test_dataset_bundle_resolution_prefers_validation_tune_for_tuning(
 ):
     dataset_dir = write_dataset_bundle(
         tmp_path / "data" / "datasets",
-        "tuning_200x50x50_t5_seed42",
+        "dataset_200x50x50_t5_seed42",
     )
     (dataset_dir / "validation_tune.npz").write_bytes(b"")
     monkeypatch.chdir(tmp_path)
@@ -361,7 +365,7 @@ def test_dataset_bundle_resolution_prefers_validation_tune_for_tuning(
     assert args.validation_dataset == (
         Path("data")
         / "datasets"
-        / "tuning_200x50x50_t5_seed42"
+        / "dataset_200x50x50_t5_seed42"
         / "validation_tune.npz"
     )
 
@@ -372,7 +376,7 @@ def test_dataset_bundle_resolution_prefers_train_tune_for_tuning(
 ):
     dataset_dir = write_dataset_bundle(
         tmp_path / "data" / "datasets",
-        "tuning_200x50x50_t5_seed42",
+        "dataset_200x50x50_t5_seed42",
     )
     train_tune_dataset = dataset_dir / "train_tune.npz"
     train_tune_dataset.write_bytes(b"")
@@ -395,11 +399,11 @@ def test_dataset_bundle_resolution_prefers_train_tune_for_tuning(
 
 def test_dataset_bundle_dir_for_reference_expands_dataset_name():
     assert dataset_bundle_dir_for_reference(
-        Path("tuning_200x50x50_t5_seed42")
+        Path("dataset_200x50x50_t5_seed42")
     ) == (
         Path("data")
         / "datasets"
-        / "tuning_200x50x50_t5_seed42"
+        / "dataset_200x50x50_t5_seed42"
     )
 
 
@@ -407,12 +411,13 @@ def test_dataset_bundle_tuning_output_dir_uses_dataset_name(
     tmp_path,
 ):
     assert dataset_bundle_tuning_output_dir(
-        dataset_dir=tmp_path / "tuning_200x50x50_t5_seed42",
+        dataset_dir=tmp_path / "dataset_200x50x50_t5_seed42",
         experiment_root=tmp_path / "runs",
     ) == (
         tmp_path
         / "runs"
-        / "tuning_200x50x50_t5_seed42"
+        / "dataset_200x50x50_t5_seed42"
+        / "tuning"
     )
 
 
@@ -527,7 +532,7 @@ def test_summarize_parse_args_derives_paths_from_dataset(
     args = parse_summary_args()
 
     assert args.runs_dir == (
-        Path("runs") / "dnn" / "tuning" / "dataset_alpha"
+        Path("runs") / "dnn" / "dataset_alpha" / "tuning"
     )
     assert args.output_dir == args.runs_dir / "summary_plots"
     assert args.metric == "mean_path_efficiency"
@@ -557,18 +562,24 @@ def test_resume_config_allows_tensorboard_cli_override():
     config = {
         "arguments": {
             "algorithm": "ppo",
+            "sampler": "random",
             "hyperparameter_combinations": 100,
             "rollouts_per_task": 200,
             "max_steps": 200,
             "seed": 42,
-            "train_dataset": "data/train.npz",
-            "validation_dataset": "data/validation.npz",
+            "dataset": "data/datasets/dataset_200x50x50_t5_seed42",
+            "train_dataset": "data/datasets/dataset_200x50x50_t5_seed42/train_tune.npz",
+            "validation_dataset": "data/datasets/dataset_200x50x50_t5_seed42/validation_tune.npz",
             "same_layout_dataset": (
-                "data/same_layout_new_goals.npz"
+                "data/datasets/dataset_200x50x50_t5_seed42/same_layout_new_goals.npz"
             ),
-            "test_dataset": "data/test.npz",
+            "natural_validation_dataset": None,
+            "test_dataset": "data/datasets/dataset_200x50x50_t5_seed42/test.npz",
+            "natural_test_dataset": None,
             "evaluate_best_on_test": False,
             "search_space": None,
+            "validation_all_tasks": True,
+            "q_snapshot_count": 11,
             "early_stopping_patience": 35,
             "early_stopping_min_delta": 0.0,
             "tensorboard": True,
@@ -598,18 +609,24 @@ def test_resume_config_uses_stored_tensorboard_without_cli_override():
     config = {
         "arguments": {
             "algorithm": "ppo",
+            "sampler": "random",
             "hyperparameter_combinations": 100,
             "rollouts_per_task": 200,
             "max_steps": 200,
             "seed": 42,
-            "train_dataset": "data/train.npz",
-            "validation_dataset": "data/validation.npz",
+            "dataset": "data/datasets/dataset_200x50x50_t5_seed42",
+            "train_dataset": "data/datasets/dataset_200x50x50_t5_seed42/train_tune.npz",
+            "validation_dataset": "data/datasets/dataset_200x50x50_t5_seed42/validation_tune.npz",
             "same_layout_dataset": (
-                "data/same_layout_new_goals.npz"
+                "data/datasets/dataset_200x50x50_t5_seed42/same_layout_new_goals.npz"
             ),
-            "test_dataset": "data/test.npz",
+            "natural_validation_dataset": None,
+            "test_dataset": "data/datasets/dataset_200x50x50_t5_seed42/test.npz",
+            "natural_test_dataset": None,
             "evaluate_best_on_test": False,
             "search_space": None,
+            "validation_all_tasks": True,
+            "q_snapshot_count": 11,
             "early_stopping_patience": 35,
             "early_stopping_min_delta": 0.0,
             "tensorboard": True,
@@ -721,22 +738,29 @@ def test_resume_uses_stored_tuning_arguments(
     monkeypatch,
     capsys,
     ):
+    dataset_dir = write_dataset_bundle(tmp_path)
     write_tuning_config(
         tmp_path / "tuning_configs" / "ppo.json",
         SimpleNamespace(
             algorithm="ppo",
+            sampler="random",
             hyperparameter_combinations=1,
             rollouts_per_task=3,
             max_steps=7,
             seed=123,
+            dataset=dataset_dir,
             train_dataset=tmp_path / "old_train.npz",
             validation_dataset=tmp_path
             / "old_validation.npz",
             same_layout_dataset=tmp_path
             / "old_same_layout.npz",
+            natural_validation_dataset=None,
             test_dataset=tmp_path / "old_test.npz",
+            natural_test_dataset=None,
             evaluate_best_on_test=False,
             search_space=None,
+            validation_all_tasks=True,
+            q_snapshot_count=11,
             early_stopping_patience=4,
             early_stopping_min_delta=0.01,
             tensorboard=False,
@@ -794,22 +818,29 @@ def test_resume_allows_hyperparameter_combination_override(
     monkeypatch,
     capsys,
 ):
+    dataset_dir = write_dataset_bundle(tmp_path)
     write_tuning_config(
         tmp_path / "tuning_configs" / "ppo.json",
         SimpleNamespace(
             algorithm="ppo",
+            sampler="random",
             hyperparameter_combinations=1,
             rollouts_per_task=3,
             max_steps=7,
             seed=123,
+            dataset=dataset_dir,
             train_dataset=tmp_path / "old_train.npz",
             validation_dataset=tmp_path
             / "old_validation.npz",
             same_layout_dataset=tmp_path
             / "old_same_layout.npz",
+            natural_validation_dataset=None,
             test_dataset=tmp_path / "old_test.npz",
+            natural_test_dataset=None,
             evaluate_best_on_test=False,
             search_space=None,
+            validation_all_tasks=True,
+            q_snapshot_count=11,
             early_stopping_patience=4,
             early_stopping_min_delta=0.01,
             tensorboard=False,
@@ -869,18 +900,24 @@ def test_other_algorithm_history_does_not_block_new_sweep(
         tmp_path / "tuning_configs" / "reinforce.json",
         SimpleNamespace(
             algorithm="reinforce",
+            sampler="random",
             hyperparameter_combinations=1,
             rollouts_per_task=3,
             max_steps=7,
             seed=123,
+            dataset=tmp_path / "dataset",
             train_dataset=tmp_path / "old_train.npz",
             validation_dataset=tmp_path
             / "old_validation.npz",
             same_layout_dataset=tmp_path
             / "old_same_layout.npz",
+            natural_validation_dataset=None,
             test_dataset=tmp_path / "old_test.npz",
+            natural_test_dataset=None,
             evaluate_best_on_test=False,
             search_space=None,
+            validation_all_tasks=True,
+            q_snapshot_count=11,
             early_stopping_patience=4,
             early_stopping_min_delta=0.01,
             tensorboard=False,
@@ -947,18 +984,24 @@ def test_other_algorithm_legacy_config_does_not_block_new_sweep(
         tmp_path / "tuning_config.json",
         SimpleNamespace(
             algorithm="reinforce",
+            sampler="random",
             hyperparameter_combinations=1,
             rollouts_per_task=3,
             max_steps=7,
             seed=123,
+            dataset=tmp_path / "dataset",
             train_dataset=tmp_path / "old_train.npz",
             validation_dataset=tmp_path
             / "old_validation.npz",
             same_layout_dataset=tmp_path
             / "old_same_layout.npz",
+            natural_validation_dataset=None,
             test_dataset=tmp_path / "old_test.npz",
+            natural_test_dataset=None,
             evaluate_best_on_test=False,
             search_space=None,
+            validation_all_tasks=True,
+            q_snapshot_count=11,
             early_stopping_patience=4,
             early_stopping_min_delta=0.01,
             tensorboard=False,
@@ -1196,6 +1239,7 @@ def test_resume_keeps_completed_result_on_sample_mismatch(
     monkeypatch,
     capsys,
 ):
+    dataset_dir = write_dataset_bundle(tmp_path)
     checkpoint_path = tmp_path / "checkpoint.pt"
     evaluation_path = tmp_path / "evaluation.csv"
     training_summary_path = (
@@ -1223,18 +1267,24 @@ def test_resume_keeps_completed_result_on_sample_mismatch(
         tmp_path / "tuning_configs" / "ppo.json",
         SimpleNamespace(
             algorithm="ppo",
+            sampler="random",
             hyperparameter_combinations=1,
             rollouts_per_task=3,
             max_steps=7,
             seed=42,
+            dataset=dataset_dir,
             train_dataset=tmp_path / "train.npz",
             validation_dataset=tmp_path
             / "validation.npz",
             same_layout_dataset=tmp_path
             / "same_layout_new_goals.npz",
+            natural_validation_dataset=None,
             test_dataset=tmp_path / "test.npz",
+            natural_test_dataset=None,
             evaluate_best_on_test=False,
             search_space=None,
+            validation_all_tasks=True,
+            q_snapshot_count=11,
             early_stopping_patience=4,
             early_stopping_min_delta=0.01,
             tensorboard=False,
@@ -2104,11 +2154,6 @@ def test_summarize_tuning_writes_heatmap_trial_grids_and_parallel_coordinates(
     )
     summary_output = capsys.readouterr().out
 
-    assert "=== Summary: tuning heatmap ===" in summary_output
-    assert (
-        "=== Summary: all-agent training progress ==="
-        in summary_output
-    )
     assert (
         "=== Summary: best-trial training history by agent ==="
         in summary_output
@@ -2123,32 +2168,25 @@ def test_summarize_tuning_writes_heatmap_trial_grids_and_parallel_coordinates(
 
     assert (
         summary_output_dir
-        / "mean_path_efficiency_heatmap.png"
-    ).exists()
-    assert (
-        summary_output_dir
-        / "mean_path_efficiency_training_progress_by_agent.png"
-    ).exists()
-    assert (
-        summary_output_dir
         / "mean_path_efficiency_best_trial_training_history_summary.png"
     ).exists()
-    assert (
-        summary_output_dir
-        / "success_rate_heatmap.png"
-    ).exists()
-    assert (
-        summary_output_dir
-        / "success_rate_training_progress_by_agent.png"
-    ).exists()
-    assert (
-        summary_output_dir
-        / "success_rate_best_trial_training_history_summary.png"
-    ).exists()
-    assert (
-        summary_output_dir
-        / "optimal_path_length_summary.png"
-    ).exists()
+    assert not any(
+        path.name.endswith("_heatmap.png")
+        for path in summary_output_dir.iterdir()
+    )
+    assert not any(
+        path.name.endswith("_training_progress_by_agent.png")
+        for path in summary_output_dir.iterdir()
+    )
+    assert not any(
+        path.name.endswith("_best_trial_training_history_summary.png")
+        and not path.name.startswith("mean_path_efficiency_")
+        for path in summary_output_dir.iterdir()
+    )
+    assert not any(
+        path.name == "optimal_" + "path_length_summary.png"
+        for path in summary_output_dir.iterdir()
+    )
     assert (
         summary_output_dir
         / "dqn_validation_metrics_trials.png"
@@ -2182,58 +2220,6 @@ def test_summarize_tuning_writes_heatmap_trial_grids_and_parallel_coordinates(
     artifacts = discover_validation_metric_artifacts(
         output_dir
     )
-    cells = collect_heatmap_cells(
-        artifacts,
-        metric="mean_path_efficiency",
-    )
-
-    assert {
-        (
-            cell["algorithm"],
-            cell["trial"],
-            cell["split"],
-            cell["value"],
-        )
-        for cell in cells
-    } == {
-        (
-            "dqn",
-            1,
-            "validation",
-            0.25,
-        ),
-        (
-            "dqn",
-            1,
-            "same_layout",
-            0.2,
-        ),
-        (
-            "dqn",
-            2,
-            "validation",
-            0.5,
-        ),
-        (
-            "dqn",
-            2,
-            "same_layout",
-            0.4,
-        ),
-        (
-            "ppo",
-            1,
-            "validation",
-            0.75,
-        ),
-        (
-            "ppo",
-            1,
-            "same_layout",
-            0.7,
-        ),
-    }
-
     dqn_trial = next(
         artifact
         for artifact in artifacts
@@ -2452,7 +2438,7 @@ def test_all_agent_training_progress_summarizes_full_training_curves(
         output_path=(
             tmp_path
             / "summary"
-            / "mean_path_efficiency_training_progress_by_agent.png"
+            / "training_progress.png"
         ),
     ) == 4
 
@@ -2461,7 +2447,7 @@ def test_all_agent_training_progress_summarizes_full_training_curves(
             "path": (
                 tmp_path
                 / "summary"
-                / "mean_path_efficiency_training_progress_by_agent.png"
+                / "training_progress.png"
             ),
             "axis_count": 2,
             "line_counts": [

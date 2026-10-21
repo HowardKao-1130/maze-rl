@@ -37,7 +37,12 @@ from scripts.train import (
 from scripts.experiment_naming import (
     DEFAULT_DATA_OUTPUT_ROOT,
     DEFAULT_DNN_TUNING_OUTPUT_ROOT,
+    dataset_run_output_dir,
     experiment_dataset_name_for_path,
+)
+from scripts.dataset_paths import (
+    DatasetBundlePaths,
+    dataset_bundle_dir_for_reference,
 )
 
 DEFAULT_SEARCH_SPACES: dict[
@@ -299,7 +304,6 @@ RESULT_FIELDNAMES = [
     "hyperparameters",
 ]
 
-LEGACY_TUNING_CONFIG_FILENAME = "tuning_config.json"
 TUNING_CONFIG_DIRNAME = "tuning_configs"
 TUNING_ARGUMENT_FIELDS = [
     "algorithm",
@@ -324,16 +328,6 @@ TUNING_ARGUMENT_FIELDS = [
     "tensorboard",
     "keep_plots",
 ]
-TUNING_OPTIONAL_ARGUMENT_DEFAULTS = {
-    "dataset": None,
-    "natural_validation_dataset": None,
-    "natural_test_dataset": None,
-    "q_snapshot_count": 11,
-    # Older tuning configs did not always persist the sampler. Preserve their
-    # historical random-search behavior when resuming such a config.
-    "sampler": "random",
-    "validation_all_tasks": True,
-}
 TUNING_PATH_ARGUMENT_FIELDS = {
     "dataset",
     "train_dataset",
@@ -443,7 +437,7 @@ def parse_args(
         help=(
             "Optional tuning output directory override. When "
             "--dataset is a dataset directory, the default is "
-            "runs/dnn/tuning/<dataset-directory>."
+            "runs/dnn/<dataset-directory>/tuning."
         ),
     )
     parser.add_argument(
@@ -889,9 +883,10 @@ def create_optuna_study(
     except ImportError as exc:
         raise RuntimeError(
             "Optuna tuning requires the optional optuna "
-            "dependency. Install it with "
-            "`pip install 'maze-rl[tuning]'` or "
-            "`pip install optuna`, then rerun with "
+            "dependency. From the repository root, install the local "
+            "package extra with `python -m pip install -e '.[tuning]'`, "
+            "or install it directly with `python -m pip install optuna`, "
+            "then rerun with "
             "--sampler optuna."
         ) from exc
 
@@ -967,17 +962,9 @@ def build_tuning_config(
                 getattr(
                     args,
                     name,
-                    TUNING_OPTIONAL_ARGUMENT_DEFAULTS.get(
-                        name
-                    ),
                 ),
             )
             for name in TUNING_ARGUMENT_FIELDS
-            if hasattr(
-                args,
-                name,
-            )
-            or name in TUNING_OPTIONAL_ARGUMENT_DEFAULTS
         },
         "search_space": search_space,
         "search_space_parameter_order": list(
@@ -1023,6 +1010,22 @@ def read_tuning_config(
             f"{path} does not contain a search space."
         )
 
+    arguments = config["arguments"]
+    missing_arguments = [
+        name
+        for name in TUNING_ARGUMENT_FIELDS
+        if name not in arguments
+    ]
+    if missing_arguments:
+        raise ValueError(
+            f"{path} is missing current tuning argument(s): "
+            + ", ".join(missing_arguments)
+        )
+    if "search_space_parameter_order" not in config:
+        raise ValueError(
+            f"{path} does not contain search-space parameter order."
+        )
+
     return config
 
 
@@ -1035,12 +1038,6 @@ def tuning_config_path_for(
         / TUNING_CONFIG_DIRNAME
         / f"{algorithm}.json"
     )
-
-
-def legacy_tuning_config_path(
-    output_dir: Path,
-) -> Path:
-    return output_dir / LEGACY_TUNING_CONFIG_FILENAME
 
 
 def tuning_config_algorithm(
@@ -1065,24 +1062,6 @@ def find_tuning_config_path(
 
     if config_path.exists():
         return config_path
-
-    legacy_config_path = legacy_tuning_config_path(
-        output_dir
-    )
-
-    if not legacy_config_path.exists():
-        return None
-
-    legacy_config = read_tuning_config(
-        legacy_config_path
-    )
-
-    if (
-        tuning_config_algorithm(legacy_config)
-        == algorithm
-    ):
-        return legacy_config_path
-
     return None
 
 
@@ -1115,22 +1094,7 @@ def apply_tuning_config(
 
         argument_name = name
 
-        if (
-            name == "hyperparameter_combinations"
-            and name not in arguments
-            and "trials" in arguments
-        ):
-            argument_name = "trials"
-
         if argument_name not in arguments:
-            if name in TUNING_OPTIONAL_ARGUMENT_DEFAULTS:
-                setattr(
-                    args,
-                    name,
-                    TUNING_OPTIONAL_ARGUMENT_DEFAULTS[name],
-                )
-                continue
-
             raise ValueError(
                 "Stored tuning config is missing argument "
                 f"{name!r}."
@@ -1613,12 +1577,13 @@ def default_experiment_tuning_output_dir(
     train_dataset: Path,
     experiment_root: Path = DEFAULT_DNN_TUNING_OUTPUT_ROOT,
 ) -> Path:
-    return (
-        experiment_root
-        / experiment_dataset_name_for_path(
+    return dataset_run_output_dir(
+        experiment_root,
+        experiment_dataset_name_for_path(
             experiment_name,
             train_dataset,
-        )
+        ),
+        "tuning",
     )
 
 
@@ -1627,19 +1592,11 @@ def dataset_bundle_tuning_output_dir(
     dataset_dir: Path,
     experiment_root: Path = DEFAULT_DNN_TUNING_OUTPUT_ROOT,
 ) -> Path:
-    return (
-        experiment_root
-        / dataset_dir.name
+    return dataset_run_output_dir(
+        experiment_root,
+        dataset_dir.name,
+        "tuning",
     )
-
-
-def dataset_bundle_dir_for_reference(
-    dataset: Path,
-) -> Path:
-    if dataset.is_absolute() or len(dataset.parts) > 1:
-        return dataset
-
-    return DEFAULT_DATA_OUTPUT_ROOT / dataset
 
 
 def resolve_dataset_bundle_args(
@@ -1655,42 +1612,27 @@ def resolve_dataset_bundle_args(
     if not dataset_dir.is_dir():
         raise ValueError(
             "--dataset must name a dataset bundle under "
-            f"{DEFAULT_DATA_OUTPUT_ROOT} containing train.npz: "
+            f"{DEFAULT_DATA_OUTPUT_ROOT} containing train.npz, "
+            "train_tune.npz, validation.npz, and "
+            "validation_tune.npz: "
             f"{args.dataset}"
         )
 
-    train_dataset = dataset_dir / "train.npz"
-    train_tune_dataset = dataset_dir / "train_tune.npz"
-    validation_dataset = dataset_dir / "validation.npz"
-    validation_tune_dataset = dataset_dir / "validation_tune.npz"
-    same_layout_dataset = (
-        dataset_dir / "same_layout_new_goals.npz"
-    )
-    natural_validation_dataset = (
-        dataset_dir / "validation_natural.npz"
-    )
-    test_dataset = dataset_dir / "test.npz"
-    natural_test_dataset = dataset_dir / "test_natural.npz"
-
-    if not train_dataset.exists():
-        raise ValueError(
-            "Dataset directory must contain train.npz: "
-            f"{dataset_dir}"
-        )
+    bundle = DatasetBundlePaths(
+        dataset_dir
+    ).require_tuning_splits()
+    train_tune_dataset = bundle.train_tune
+    validation_tune_dataset = bundle.validation_tune
+    same_layout_dataset = bundle.same_layout
+    natural_validation_dataset = bundle.validation_natural
+    test_dataset = bundle.test
+    natural_test_dataset = bundle.test_natural
 
     if args.train_dataset is None:
-        args.train_dataset = (
-            train_tune_dataset
-            if train_tune_dataset.exists()
-            else train_dataset
-        )
+        args.train_dataset = train_tune_dataset
 
     if args.validation_dataset is None:
-        args.validation_dataset = (
-            validation_tune_dataset
-            if validation_tune_dataset.exists()
-            else validation_dataset
-        )
+        args.validation_dataset = validation_tune_dataset
 
     if args.same_layout_dataset is None:
         args.same_layout_dataset = same_layout_dataset
@@ -2855,20 +2797,9 @@ def main() -> None:
                 args,
                 tuning_config,
             )
-            stored_parameter_order = tuning_config.get(
+            stored_parameter_order = tuning_config[
                 "search_space_parameter_order"
-            )
-
-            if (
-                stored_parameter_order is None
-                and tuning_config["arguments"].get(
-                    "search_space"
-                )
-                is not None
-            ):
-                stored_parameter_order = list(
-                    tuning_config["search_space"]
-                )
+            ]
 
             stored_search_space = ordered_search_space(
                 args.algorithm,

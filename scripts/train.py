@@ -61,11 +61,15 @@ from maze_rl.training.trainers import (
     train_sarsa_episode,
 )
 from scripts.experiment_naming import (
-    DEFAULT_DATA_OUTPUT_ROOT,
     DEFAULT_DNN_TUNING_OUTPUT_ROOT,
     DEFAULT_EXPERIMENT_OUTPUT_ROOT,
     DEFAULT_TABULAR_OUTPUT_ROOT,
+    dataset_run_output_dir,
     experiment_dataset_name_for_path,
+)
+from scripts.dataset_paths import (
+    DatasetBundlePaths,
+    dataset_bundle_dir_for_reference,
 )
 
 
@@ -208,8 +212,11 @@ def default_best_config_path(
     dataset_name: str,
 ) -> Path:
     return (
-        DEFAULT_DNN_TUNING_OUTPUT_ROOT
-        / dataset_name
+        dataset_run_output_dir(
+            DEFAULT_DNN_TUNING_OUTPUT_ROOT,
+            dataset_name,
+            "tuning",
+        )
         / f"best_config_{algorithm}.json"
     )
 
@@ -240,9 +247,9 @@ def default_output_dir(
     algorithm: str,
 ) -> Path:
     if algorithm in TABULAR_ALGORITHMS:
-        return DEFAULT_TABULAR_OUTPUT_ROOT
+        return DEFAULT_TABULAR_OUTPUT_ROOT / "training"
 
-    return DEFAULT_EXPERIMENT_OUTPUT_ROOT
+    return DEFAULT_EXPERIMENT_OUTPUT_ROOT / "training"
 
 
 def default_experiment_output_dir(
@@ -250,14 +257,22 @@ def default_experiment_output_dir(
     experiment_name: str,
     dataset_path: Path,
     algorithm: str,
-    experiment_root: Path = DEFAULT_EXPERIMENT_OUTPUT_ROOT,
+    experiment_root: Path | None = None,
 ) -> Path:
-    return (
-        experiment_root
-        / experiment_dataset_name_for_path(
+    if experiment_root is None:
+        experiment_root = (
+            DEFAULT_TABULAR_OUTPUT_ROOT
+            if algorithm in TABULAR_ALGORITHMS
+            else DEFAULT_EXPERIMENT_OUTPUT_ROOT
+        )
+
+    return dataset_run_output_dir(
+        experiment_root,
+        experiment_dataset_name_for_path(
             experiment_name,
             dataset_path,
-        )
+        ),
+        "training",
     )
 
 
@@ -325,25 +340,27 @@ def dataset_bundle_output_dir(
     *,
     dataset_dir: Path,
     algorithm: str,
-    experiment_root: Path = DEFAULT_EXPERIMENT_OUTPUT_ROOT,
+    experiment_root: Path | None = None,
 ) -> Path:
-    return (
-        experiment_root
-        / dataset_dir.name
+    if experiment_root is None:
+        experiment_root = (
+            DEFAULT_TABULAR_OUTPUT_ROOT
+            if algorithm in TABULAR_ALGORITHMS
+            else DEFAULT_EXPERIMENT_OUTPUT_ROOT
+        )
+
+    return dataset_run_output_dir(
+        experiment_root,
+        dataset_dir.name,
+        "training",
     )
-
-
-def dataset_bundle_dir_for_reference(
-    dataset: Path,
-) -> Path:
-    if dataset.is_absolute() or len(dataset.parts) > 1:
-        return dataset
-
-    return DEFAULT_DATA_OUTPUT_ROOT / dataset
 
 
 def resolve_dataset_bundle_args(args) -> None:
     args.dataset_bundle_name = None
+    if args.dataset is None:
+        return
+
     dataset_path = dataset_bundle_dir_for_reference(
         Path(args.dataset)
     )
@@ -354,30 +371,21 @@ def resolve_dataset_bundle_args(args) -> None:
 
     dataset_dir = dataset_path
     args.dataset_bundle_name = dataset_dir.name
-    train_dataset = dataset_dir / "train.npz"
-    validation_dataset = dataset_dir / "validation.npz"
-    same_layout_dataset = (
-        dataset_dir / "same_layout_new_goals.npz"
-    )
-    natural_validation_dataset = (
-        dataset_dir / "validation_natural.npz"
-    )
-
-    if not train_dataset.exists():
-        raise ValueError(
-            "Dataset directory must contain train.npz: "
-            f"{dataset_dir}"
-        )
+    bundle = DatasetBundlePaths(
+        dataset_dir
+    ).require_training_splits()
+    train_dataset = bundle.train
+    validation_dataset = bundle.validation
+    same_layout_dataset = bundle.same_layout
+    natural_validation_dataset = bundle.validation_natural
 
     args.dataset = train_dataset
 
     if args.validation_dataset is None:
-        if validation_dataset.exists():
-            args.validation_dataset = validation_dataset
+        args.validation_dataset = validation_dataset
 
     if args.same_layout_dataset is None:
-        if same_layout_dataset.exists():
-            args.same_layout_dataset = same_layout_dataset
+        args.same_layout_dataset = same_layout_dataset
 
     if getattr(args, "natural_validation_dataset", None) is None:
         if natural_validation_dataset.exists():
@@ -424,9 +432,6 @@ RESUME_METADATA_CLI_OPTIONS = {
     ),
     "same_layout_dataset": (
         "--same-layout-dataset",
-    ),
-    "stratified_validation_dataset": (
-        "--stratified-validation-dataset",
     ),
     "natural_validation_dataset": (
         "--natural-validation-dataset",
@@ -650,9 +655,9 @@ def parse_args():
     parser.add_argument(
         "--dataset",
         type=Path,
-        default=Path("data/train.npz"),
+        default=None,
         help=(
-            "Training dataset .npz file, dataset directory, or "
+            "Required training dataset .npz file, dataset directory, or "
             "dataset bundle name under data/datasets containing "
             "train.npz, validation.npz, and "
             "same_layout_new_goals.npz. Stratified bundles also "
@@ -698,8 +703,9 @@ def parse_args():
         default=None,
         help=(
             "Parent directory for training artifacts. Defaults to "
-            "runs/tabular for tabular algorithms and "
-            "runs/dnn/training for DNN algorithms."
+            "runs/tabular/training for tabular algorithms and "
+            "runs/dnn/training for DNN algorithms without a dataset; "
+            "dataset bundles use runs/<backend>/<dataset>/training."
         ),
     )
     parser.add_argument(
@@ -714,7 +720,7 @@ def parse_args():
     parser.add_argument(
         "--experiment-root",
         type=Path,
-        default=DEFAULT_EXPERIMENT_OUTPUT_ROOT,
+        default=None,
         help=(
             "Root directory for automatically named experiment "
             "training outputs."
@@ -836,7 +842,7 @@ def parse_args():
         help=(
             "Load the tuned best hyperparameter combination for "
             "--algorithm. Omitting the path reads "
-            "runs/dnn/tuning/<dataset>/best_config_<algorithm>.json. "
+            "runs/dnn/<dataset>/tuning/best_config_<algorithm>.json. "
             "A provided directory or bare tuning run name resolves to "
             "best_config_<algorithm>.json within that tuning output. "
             "Explicit CLI hyperparameters override loaded values."
@@ -873,15 +879,6 @@ def parse_args():
             "Optional same-layout new-task dataset to evaluate "
             "alongside validation during periodic neural-agent "
             "selection."
-        ),
-    )
-    parser.add_argument(
-        "--stratified-validation-dataset",
-        type=Path,
-        default=None,
-        help=(
-            "Legacy optional stratified validation dataset. New "
-            "bundles use --validation-dataset for val."
         ),
     )
     parser.add_argument(
@@ -1072,6 +1069,12 @@ def parse_args():
 
     argv = sys.argv[1:]
     args = parser.parse_args()
+    if args.experiment_root is None:
+        args.experiment_root = (
+            DEFAULT_TABULAR_OUTPUT_ROOT
+            if args.algorithm in TABULAR_ALGORITHMS
+            else DEFAULT_EXPERIMENT_OUTPUT_ROOT
+        )
     args.resume_metadata_cli_fields = (
         resume_metadata_fields_from_argv(
             argv,
@@ -1081,9 +1084,12 @@ def parse_args():
     if (
         args.output_dir is None
         and args.experiment_name is None
-        and not dataset_bundle_dir_for_reference(
-            args.dataset
-        ).is_dir()
+        and (
+            args.dataset is None
+            or not dataset_bundle_dir_for_reference(
+                args.dataset
+            ).is_dir()
+        )
     ):
         args.output_dir = default_output_dir(
             args.algorithm
@@ -1816,11 +1822,6 @@ def training_state_metadata(
             if args.same_layout_dataset is None
             else str(args.same_layout_dataset)
         ),
-        "stratified_validation_dataset": (
-            None
-            if getattr(args, "stratified_validation_dataset", None) is None
-            else str(args.stratified_validation_dataset)
-        ),
         "natural_validation_dataset": (
             None
             if getattr(args, "natural_validation_dataset", None) is None
@@ -1851,6 +1852,10 @@ def validate_training_state_metadata(
     metadata.setdefault(
         "residual_layers",
         DEFAULT_RESIDUAL_LAYERS,
+    )
+    metadata.setdefault(
+        "natural_validation_dataset",
+        None,
     )
     allowed_mismatches = allowed_mismatches or set()
 
@@ -2197,10 +2202,6 @@ def apply_retroactive_resume_metadata(
         metadata,
         "same_layout_dataset",
     )
-    args.stratified_validation_dataset = optional_metadata_path(
-        metadata,
-        "stratified_validation_dataset",
-    )
     args.natural_validation_dataset = optional_metadata_path(
         metadata,
         "natural_validation_dataset",
@@ -2259,10 +2260,6 @@ def apply_resume_training_state_defaults(
         "same_layout_dataset": optional_metadata_path(
             metadata,
             "same_layout_dataset",
-        ),
-        "stratified_validation_dataset": optional_metadata_path(
-            metadata,
-            "stratified_validation_dataset",
         ),
         "natural_validation_dataset": optional_metadata_path(
             metadata,
@@ -2864,7 +2861,6 @@ def format_validation_progress_message(
         "validation": "val",
         "same_layout": "same-val",
         "natural_validation": "val-natural",
-        "stratified_validation": "val-stratified",
         "train_greedy": "train-greedy",
     }.get(split, split)
     message = (
@@ -3406,6 +3402,11 @@ def optimization_epochs_for_round(
 def main():
     args = parse_args()
 
+    if args.dataset is None:
+        raise ValueError(
+            "--dataset must name a dataset bundle or training .npz file."
+        )
+
     validate_network_architecture(
         args.network_architecture,
         args.residual_layers,
@@ -3739,14 +3740,6 @@ def main():
                 "same_layout"
             ] = MazeEnv(
                 dataset_path=args.same_layout_dataset,
-                max_steps=args.max_steps,
-            )
-
-        if args.stratified_validation_dataset is not None:
-            validation_envs[
-                "stratified_validation"
-            ] = MazeEnv(
-                dataset_path=args.stratified_validation_dataset,
                 max_steps=args.max_steps,
             )
 
@@ -4352,7 +4345,6 @@ def main():
                     "validation",
                     "same_layout",
                     "natural_validation",
-                    "stratified_validation",
                 )
                 if split in validation_envs
             ] + [

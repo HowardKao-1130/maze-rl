@@ -24,7 +24,7 @@ def default_tensorboard_dir(
     runs_dir: Path | None = None,
 ) -> Path:
     root = (
-        DEFAULT_EXPERIMENT_OUTPUT_ROOT
+        DEFAULT_EXPERIMENT_OUTPUT_ROOT / "training"
         if runs_dir is None
         else runs_dir
     )

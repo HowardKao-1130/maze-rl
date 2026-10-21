@@ -54,7 +54,9 @@ from scripts.experiment_naming import (
     DEFAULT_DNN_TUNING_OUTPUT_ROOT,
     DEFAULT_EXPERIMENT_OUTPUT_ROOT,
     DEFAULT_TABULAR_OUTPUT_ROOT,
+    dataset_run_output_dir,
 )
+from scripts.dataset_paths import dataset_bundle_dir_for_reference
 
 
 TABULAR_ALGORITHMS = {
@@ -67,16 +69,52 @@ TABULAR_ALGORITHMS = {
 
 def default_checkpoint_path(
     algorithm: str,
+    dataset: Path | None = None,
 ) -> Path:
+    if dataset is not None:
+        dataset_dir = (
+            dataset.parent
+            if dataset.suffix == ".npz"
+            else dataset_bundle_dir_for_reference(dataset)
+        )
+        backend_root = (
+            DEFAULT_TABULAR_OUTPUT_ROOT
+            if algorithm in TABULAR_ALGORITHMS
+            else DEFAULT_EXPERIMENT_OUTPUT_ROOT
+        )
+        checkpoint_dir = dataset_run_output_dir(
+            backend_root,
+            dataset_dir.name,
+            "training",
+        )
+        if algorithm in TABULAR_ALGORITHMS:
+            return checkpoint_dir / algorithm / "checkpoint.pkl"
+
+        baseline_path = checkpoint_dir / algorithm / "checkpoint.pt"
+        if baseline_path.exists():
+            return baseline_path
+
+        residual_paths = sorted(
+            checkpoint_dir.glob(
+                f"{algorithm}_residual_l*/checkpoint.pt"
+            )
+        )
+        if residual_paths:
+            return residual_paths[0]
+
+        return baseline_path
+
     if algorithm in TABULAR_ALGORITHMS:
         return (
             DEFAULT_TABULAR_OUTPUT_ROOT
+        / "training"
             / algorithm
             / "checkpoint.pkl"
         )
 
     baseline_path = (
         DEFAULT_EXPERIMENT_OUTPUT_ROOT
+        / "training"
         / algorithm
         / "checkpoint.pt"
     )
@@ -85,7 +123,7 @@ def default_checkpoint_path(
 
     residual_paths = sorted(
         DEFAULT_EXPERIMENT_OUTPUT_ROOT.glob(
-            f"{algorithm}_residual_l*/checkpoint.pt"
+            f"training/{algorithm}_residual_l*/checkpoint.pt"
         )
     )
     if residual_paths:
@@ -100,9 +138,18 @@ def default_rollout_animation_output_dir(
     return checkpoint_path.parent / "rollout_animations"
 
 
-def default_tuning_results_path() -> Path:
+def default_tuning_results_path(
+    dataset: Path,
+) -> Path:
+    dataset_dir = (
+        dataset.parent
+        if dataset.suffix == ".npz"
+        else dataset_bundle_dir_for_reference(dataset)
+    )
     return (
         DEFAULT_DNN_TUNING_OUTPUT_ROOT
+        / dataset_dir.name
+        / "tuning"
         / "tuning_results.csv"
     )
 
@@ -255,7 +302,7 @@ def parse_args():
         default=None,
         help=(
             "Checkpoint path. Defaults to "
-            "runs/tabular/<algorithm>/checkpoint.pkl for tabular "
+            "runs/tabular/training/<algorithm>/checkpoint.pkl for tabular "
             "agents and "
             "runs/dnn/training/<algorithm>/"
             "checkpoint.pt for neural agents."
@@ -274,17 +321,22 @@ def parse_args():
     parser.add_argument(
         "--tuning-results",
         type=Path,
-        default=default_tuning_results_path(),
+        default=None,
         help=(
-            "CSV index used by --best-trial. Defaults to "
-            "runs/dnn/tuning/tuning_results.csv."
+            "CSV index used by --best-trial. Defaults to the "
+            "dataset bundle's tuning_results.csv."
         ),
     )
 
     parser.add_argument(
         "--dataset",
         type=Path,
-        default="data/test.npz",
+        default=None,
+        required=True,
+        help=(
+            "Dataset .npz split inside a generated dataset bundle "
+            "under data/datasets."
+        ),
     )
 
     parser.add_argument(
@@ -320,7 +372,7 @@ def parse_args():
         default=None,
         help=(
             "Evaluate one fixed task index. Defaults to the "
-            "legacy 200 episodes unless --episodes is provided."
+            "current 200-episode plan unless --episodes is provided."
         ),
     )
 
@@ -328,8 +380,8 @@ def parse_args():
         "--all-tasks",
         action="store_true",
         help=(
-            "Evaluate every task in the dataset once. This is the "
-            "default and remains accepted for compatibility."
+            "Evaluate every task in the dataset once; this is the "
+            "default evaluation plan."
         ),
     )
 
@@ -496,6 +548,11 @@ def parse_args():
             "--best-trial cannot be combined with --checkpoint."
         )
 
+    if args.tuning_results is None:
+        args.tuning_results = default_tuning_results_path(
+            args.dataset
+        )
+
     if args.checkpoint is None:
         if args.best_trial:
             try:
@@ -510,7 +567,8 @@ def parse_args():
                 parser.error(str(error))
         else:
             args.checkpoint = default_checkpoint_path(
-                args.algorithm
+                args.algorithm,
+                args.dataset,
             )
 
     if args.dataset_label is None:
