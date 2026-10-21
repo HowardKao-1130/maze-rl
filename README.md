@@ -136,8 +136,11 @@ internal-update column.
 Training writes `metrics.csv`, `training_state.pt`, a `checkpoint.pkl` for
 tabular algorithms or `checkpoint.pt` for neural algorithms, and this plot
 automatically at the end of each run. If an output directory already contains
-training artifacts, starting a fresh run warns and requires interactive
-confirmation before deleting or overwriting them. Pass `--resume` to restore
+training artifacts, the command identifies the run as incomplete or complete
+and prompts interactively. For an incomplete run, choose `resume` to restore
+it or `override` to start fresh; for a complete run, choose `reuse` to leave
+it unchanged or `override` to start fresh. Non-interactive runs must pass
+`--resume` or use a new output directory. Pass `--resume` to restore
 `training_state.pt`, including model, optimizer, sampler, RNG, counter,
 pending-metric, and validation state. When restoring full training state,
 omitted run-identity arguments such as the
@@ -320,8 +323,10 @@ or pass
 Random search is the default sampler. To opt in to Optuna's TPE sampler, install
 the optional dependency with `pip install 'maze-rl[tuning]'` or
 `pip install optuna`, then pass `--sampler optuna` or `--optuna`.
-If a sweep is interrupted, rerun the same command with `--resume` to skip
-completed hyperparameter combinations recorded in `tuning_results.csv`, recover
+If a sweep is interrupted, rerun the same command; when existing tuning
+artifacts are detected, the command prompts whether to `resume` or `override`.
+Completed sweeps prompt whether to `reuse` or `override`. Pass `--resume` to
+skip completed hyperparameter combinations recorded in `tuning_results.csv`, recover
 finished combination directories that were interrupted before their result row
 was appended, and rerun only incomplete combinations with the same sampled seed
 and hyperparameters. Incomplete child training runs restore their saved

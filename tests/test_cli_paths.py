@@ -77,9 +77,11 @@ from scripts.train import (
     task_selection_passes_for_budget,
     tensorboard_default_enabled,
     training_summary_status,
+    training_summary_is_complete,
     training_state_metadata,
     validate_training_state_metadata,
     validate_neural_hyperparameters,
+    prompt_existing_training_action,
 )
 
 
@@ -868,6 +870,74 @@ def test_fresh_training_confirmation_can_remove_existing_outputs(
 
     assert not metrics_path.exists()
     assert not checkpoint_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        ("completed", True),
+        ("early_stopped", True),
+        ("running", False),
+        ("interrupted", False),
+    ],
+)
+def test_training_summary_is_complete(
+    tmp_path,
+    status,
+    expected,
+):
+    summary_path = tmp_path / "training_summary.json"
+    summary_path.write_text(
+        json.dumps({"status": status})
+    )
+
+    assert training_summary_is_complete(
+        summary_path
+    ) is expected
+
+
+def test_incomplete_training_prompts_for_resume(
+    tmp_path,
+):
+    summary_path = tmp_path / "training_summary.json"
+    state_path = tmp_path / "training_state.pt"
+    metrics_path = tmp_path / "metrics.csv"
+    summary_path.write_text(
+        json.dumps({"status": "interrupted"})
+    )
+    state_path.write_bytes(b"state")
+    metrics_path.write_text("partial")
+
+    action = prompt_existing_training_action(
+        [summary_path, state_path, metrics_path],
+        training_summary_path=summary_path,
+        training_state_path=state_path,
+        interactive=True,
+        input_fn=lambda _prompt: "resume",
+    )
+
+    assert action == "resume"
+
+
+def test_complete_training_prompts_for_reuse_or_override(
+    tmp_path,
+):
+    summary_path = tmp_path / "training_summary.json"
+    state_path = tmp_path / "training_state.pt"
+    summary_path.write_text(
+        json.dumps({"status": "completed"})
+    )
+    state_path.write_bytes(b"state")
+
+    action = prompt_existing_training_action(
+        [summary_path, state_path],
+        training_summary_path=summary_path,
+        training_state_path=state_path,
+        interactive=True,
+        input_fn=lambda _prompt: "reuse",
+    )
+
+    assert action == "reuse"
 
 
 def test_resume_training_state_defaults_to_stored_metadata(

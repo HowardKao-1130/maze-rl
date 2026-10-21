@@ -1935,6 +1935,140 @@ def existing_training_output_paths(
     ]
 
 
+def training_summary_is_complete(
+    path: Path,
+) -> bool:
+    if not path.exists():
+        return False
+
+    try:
+        with path.open() as file:
+            summary = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    if not isinstance(summary, dict):
+        return False
+
+    status = summary.get("status")
+    if status in {
+        "completed",
+        "early_stopped",
+    }:
+        return True
+
+    if status in {
+        "running",
+        "interrupted",
+    }:
+        return False
+
+    if status is not None:
+        return False
+
+    if summary.get("stopped_early") is True:
+        return True
+
+    completed = summary.get(
+        "task_selection_passes_completed",
+        summary.get("dataset_epochs_completed"),
+    )
+    requested = summary.get(
+        "task_selection_passes_requested",
+        summary.get("dataset_epochs_requested"),
+    )
+    if completed is None or requested is None:
+        return False
+
+    try:
+        return int(completed) >= int(requested)
+    except (TypeError, ValueError):
+        return False
+
+
+def prompt_existing_training_action(
+    existing_paths,
+    *,
+    training_summary_path: Path,
+    training_state_path: Path,
+    interactive: bool | None = None,
+    input_fn=input,
+    output_stream=None,
+) -> str:
+    existing_paths = list(existing_paths)
+    if not existing_paths:
+        return "new"
+
+    if output_stream is None:
+        output_stream = sys.stderr
+
+    if interactive is None:
+        interactive = sys.stdin.isatty()
+
+    if not interactive:
+        raise RuntimeError(
+            "Existing training outputs were found. Rerun with "
+            "--resume or use an interactive terminal to choose "
+            "reuse, resume, or override."
+        )
+
+    complete = training_summary_is_complete(
+        training_summary_path
+    )
+
+    print(
+        "Existing complete training outputs were found:"
+        if complete
+        else "Existing incomplete training outputs were found:",
+        file=output_stream,
+    )
+    for path in existing_paths:
+        print(f"  - {path}", file=output_stream)
+
+    if complete:
+        response = input_fn(
+            "Choose reuse or override [reuse/override]: "
+        )
+        normalized = response.strip().lower()
+        if normalized in {"reuse", "r", "keep", "k"}:
+            return "reuse"
+        if normalized in {"override", "o"}:
+            return "override"
+        raise RuntimeError(
+            "Training run cancelled; existing outputs were left "
+            "unchanged."
+        )
+
+    if not training_state_path.exists():
+        print(
+            "No training_state.pt is available, so this run cannot "
+            "be resumed.",
+            file=output_stream,
+        )
+        response = input_fn(
+            "Type OVERRIDE to start fresh: "
+        )
+        if response != "OVERRIDE":
+            raise RuntimeError(
+                "Training run cancelled; existing outputs were left "
+                "unchanged."
+            )
+        return "override"
+
+    response = input_fn(
+        "Choose resume or override [resume/override]: "
+    )
+    normalized = response.strip().lower()
+    if normalized in {"resume", "r"}:
+        return "resume"
+    if normalized in {"override", "o"}:
+        return "override"
+    raise RuntimeError(
+        "Training run cancelled; existing outputs were left "
+        "unchanged."
+    )
+
+
 def confirm_overwrite_existing_training_output(
     existing_paths,
     *,
@@ -3313,6 +3447,60 @@ def main():
             experiment_root=args.experiment_root,
         )
 
+    preflight_run_dir = (
+        args.output_dir
+        / output_algorithm_name(
+            args.algorithm,
+            args.network_architecture,
+            args.residual_layers,
+        )
+    )
+    preflight_training_state_path = (
+        preflight_run_dir / "training_state.pt"
+    )
+    preflight_training_summary_path = (
+        preflight_run_dir / "training_summary.json"
+    )
+    preflight_checkpoint_suffix = (
+        ".pkl"
+        if args.algorithm in TABULAR_ALGORITHMS
+        else ".pt"
+    )
+    preflight_output_paths = [
+        preflight_run_dir / "metrics.csv",
+        preflight_run_dir / "validation_metrics.csv",
+        preflight_training_state_path,
+        preflight_run_dir
+        / f"checkpoint{preflight_checkpoint_suffix}",
+        preflight_run_dir / "best_checkpoint.pt",
+        preflight_training_summary_path,
+    ]
+    preflight_existing_paths = (
+        existing_training_output_paths(
+            preflight_output_paths
+        )
+    )
+
+    if preflight_existing_paths and not args.resume:
+        existing_action = prompt_existing_training_action(
+            preflight_existing_paths,
+            training_summary_path=(
+                preflight_training_summary_path
+            ),
+            training_state_path=preflight_training_state_path,
+        )
+        if existing_action == "resume":
+            args.resume = True
+        elif existing_action == "reuse":
+            print(
+                "Reusing the existing completed training run."
+            )
+            return
+        else:
+            remove_existing_training_output(
+                preflight_existing_paths
+            )
+
     if (
         args.retroactive_early_stop
         and not args.resume
@@ -3462,14 +3650,7 @@ def main():
             agent.train_frequency,
         )
 
-    run_dir = (
-        args.output_dir
-        / output_algorithm_name(
-            args.algorithm,
-            args.network_architecture,
-            args.residual_layers,
-        )
-    )
+    run_dir = preflight_run_dir
 
     tensorboard_writer = create_tensorboard_writer(
         args,

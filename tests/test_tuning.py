@@ -30,12 +30,16 @@ from scripts.tune_dnn import (
     parse_args,
     read_completed_results,
     result_matches_trial,
+    prompt_existing_tuning_action,
     resolve_dataset_bundle_args,
     run_command,
     sample_hyperparameters,
     sample_hyperparameters_with_optuna,
     summarize_evaluation,
     write_best_config_index,
+    tuning_artifacts_are_complete,
+    tuning_artifact_paths,
+    remove_existing_tuning_artifacts,
     write_result_row,
     write_tuning_config,
 )
@@ -616,6 +620,39 @@ def test_parse_args_accepts_resume(monkeypatch):
     args = parse_args()
 
     assert args.resume is True
+
+
+def test_incomplete_tuning_prompts_for_resume(tmp_path):
+    results_path = tmp_path / "tuning_results.csv"
+    trial_path = tmp_path / "trials" / "trial_001" / "ppo"
+    trial_path.mkdir(parents=True)
+    results_path.write_text("partial")
+
+    action = prompt_existing_tuning_action(
+        [results_path, trial_path],
+        complete=False,
+        interactive=True,
+        input_fn=lambda _prompt: "resume",
+    )
+
+    assert action == "resume"
+
+
+def test_complete_tuning_prompts_for_reuse(tmp_path):
+    results_path = tmp_path / "tuning_results.csv"
+    config_path = tmp_path / "tuning_configs" / "ppo.json"
+    results_path.write_text("complete")
+    config_path.parent.mkdir()
+    config_path.write_text("{}")
+
+    action = prompt_existing_tuning_action(
+        [results_path, config_path],
+        complete=True,
+        interactive=True,
+        input_fn=lambda _prompt: "reuse",
+    )
+
+    assert action == "reuse"
 
 
 def test_parse_args_rejects_removed_resume_training_state_flag(

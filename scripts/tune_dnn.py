@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 from typing import Any
@@ -1201,6 +1202,253 @@ def has_tuning_history(
         output_dir,
         algorithm,
     )
+
+
+def tuning_artifact_paths(
+    *,
+    output_dir: Path,
+    algorithm: str,
+    results_path: Path,
+    tuning_config_path: Path | None,
+) -> list[Path]:
+    paths = [
+        results_path,
+        best_config_path_for_algorithm(
+            output_dir,
+            algorithm,
+        ),
+    ]
+
+    if tuning_config_path is not None:
+        paths.append(tuning_config_path)
+
+    trials_dir = output_dir / "trials"
+    if trials_dir.exists():
+        paths.extend(
+            trial_dir / algorithm
+            for trial_dir in trials_dir.iterdir()
+            if trial_dir.is_dir()
+            and (trial_dir / algorithm).exists()
+        )
+
+    return [path for path in paths if path.exists()]
+
+
+def tuning_artifacts_are_complete(
+    *,
+    output_dir: Path,
+    algorithm: str,
+    results_path: Path,
+    tuning_config_path: Path | None,
+    requested_combinations: int,
+) -> bool:
+    if requested_combinations <= 0:
+        return False
+
+    completed_results = read_completed_results(
+        results_path,
+        algorithm,
+    )
+    if not all(
+        trial in completed_results
+        for trial in range(1, requested_combinations + 1)
+    ):
+        return False
+
+    return best_config_path_for_algorithm(
+        output_dir,
+        algorithm,
+    ).exists()
+
+
+def tuning_requested_combinations(
+    *,
+    args: argparse.Namespace,
+    tuning_config_path: Path | None,
+) -> int:
+    if tuning_config_path is None:
+        return args.hyperparameter_combinations
+
+    try:
+        config = read_tuning_config(tuning_config_path)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return args.hyperparameter_combinations
+
+    arguments = config.get("arguments", {})
+    value = arguments.get(
+        "hyperparameter_combinations",
+        arguments.get("trials"),
+    )
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return args.hyperparameter_combinations
+
+
+def prompt_existing_tuning_action(
+    existing_paths,
+    *,
+    complete: bool,
+    resumable: bool = True,
+    interactive: bool | None = None,
+    input_fn=input,
+    output_stream=None,
+) -> str:
+    existing_paths = list(existing_paths)
+    if not existing_paths:
+        return "new"
+
+    if output_stream is None:
+        output_stream = sys.stderr
+
+    if interactive is None:
+        interactive = sys.stdin.isatty()
+
+    if not interactive:
+        raise RuntimeError(
+            "Existing tuning artifacts were found. Rerun with "
+            "--resume or use an interactive terminal to choose "
+            "reuse or override."
+        )
+
+    print(
+        "Existing complete tuning artifacts were found:"
+        if complete
+        else "Existing incomplete tuning artifacts were found:",
+        file=output_stream,
+    )
+    for path in existing_paths:
+        print(f"  - {path}", file=output_stream)
+
+    if complete:
+        response = input_fn(
+            "Choose reuse or override [reuse/override]: "
+        )
+        normalized = response.strip().lower()
+        if normalized in {"reuse", "r", "keep", "k"}:
+            return "reuse"
+        if normalized in {"override", "o"}:
+            return "override"
+    else:
+        if not resumable:
+            print(
+                "No stored tuning config is available, so this run "
+                "cannot be resumed.",
+                file=output_stream,
+            )
+            response = input_fn(
+                "Type OVERRIDE to start fresh: "
+            )
+            if response == "OVERRIDE":
+                return "override"
+            raise RuntimeError(
+                "Tuning run cancelled; existing artifacts were left "
+                "unchanged."
+            )
+
+        response = input_fn(
+            "Choose resume or override [resume/override]: "
+        )
+        normalized = response.strip().lower()
+        if normalized in {"resume", "r"}:
+            return "resume"
+        if normalized in {"override", "o"}:
+            return "override"
+
+    raise RuntimeError(
+        "Tuning run cancelled; existing artifacts were left "
+        "unchanged."
+    )
+
+
+def remove_existing_tuning_artifacts(
+    *,
+    output_dir: Path,
+    algorithm: str,
+    results_path: Path,
+    tuning_config_path: Path | None,
+) -> None:
+    if results_path.exists():
+        with results_path.open(newline="") as file:
+            rows = list(csv.DictReader(file))
+
+        remaining_rows = [
+            row
+            for row in rows
+            if row.get("algorithm") != algorithm
+        ]
+        if remaining_rows:
+            with results_path.open(
+                "w",
+                newline="",
+            ) as file:
+                writer = csv.DictWriter(
+                    file,
+                    fieldnames=RESULT_FIELDNAMES,
+                )
+                writer.writeheader()
+                writer.writerows(
+                    {
+                        field: row.get(field, "")
+                        for field in RESULT_FIELDNAMES
+                    }
+                    for row in remaining_rows
+                )
+        else:
+            results_path.unlink()
+
+    trials_dir = output_dir / "trials"
+    if trials_dir.exists():
+        for trial_dir in trials_dir.iterdir():
+            algorithm_dir = trial_dir / algorithm
+            if algorithm_dir.is_dir():
+                shutil.rmtree(algorithm_dir)
+            elif algorithm_dir.exists():
+                algorithm_dir.unlink()
+            if trial_dir.is_dir() and not any(trial_dir.iterdir()):
+                trial_dir.rmdir()
+
+    if tuning_config_path is not None and tuning_config_path.exists():
+        tuning_config_path.unlink()
+
+    algorithm_best_config_path = best_config_path_for_algorithm(
+        output_dir,
+        algorithm,
+    )
+    if algorithm_best_config_path.exists():
+        algorithm_best_config_path.unlink()
+
+    best_config_path = output_dir / "best_config.json"
+    if not best_config_path.exists():
+        return
+
+    try:
+        with best_config_path.open() as file:
+            best_config = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return
+
+    if not isinstance(best_config, dict):
+        return
+
+    if best_config.get("algorithm") == algorithm:
+        best_config_path.unlink()
+        return
+
+    if algorithm not in best_config:
+        return
+
+    del best_config[algorithm]
+    if best_config:
+        with best_config_path.open("w") as file:
+            json.dump(
+                best_config,
+                file,
+                indent=2,
+                sort_keys=True,
+            )
+    else:
+        best_config_path.unlink()
 
 
 def cli_name(
@@ -2537,6 +2785,48 @@ def main() -> None:
         )
     )
     stored_search_space = None
+
+    if not args.resume:
+        existing_paths = tuning_artifact_paths(
+            output_dir=args.output_dir,
+            algorithm=args.algorithm,
+            results_path=results_path,
+            tuning_config_path=tuning_config_path,
+        )
+        if existing_paths:
+            requested_combinations = (
+                tuning_requested_combinations(
+                    args=args,
+                    tuning_config_path=tuning_config_path,
+                )
+            )
+            complete = tuning_artifacts_are_complete(
+                output_dir=args.output_dir,
+                algorithm=args.algorithm,
+                results_path=results_path,
+                tuning_config_path=tuning_config_path,
+                requested_combinations=requested_combinations,
+            )
+            existing_action = prompt_existing_tuning_action(
+                existing_paths,
+                complete=complete,
+                resumable=tuning_config_path is not None,
+            )
+            if existing_action == "resume":
+                args.resume = True
+            elif existing_action == "reuse":
+                print(
+                    "Reusing the existing completed tuning run."
+                )
+                return
+            else:
+                remove_existing_tuning_artifacts(
+                    output_dir=args.output_dir,
+                    algorithm=args.algorithm,
+                    results_path=results_path,
+                    tuning_config_path=tuning_config_path,
+                )
+                tuning_config_path = None
 
     if args.resume:
         if tuning_config_path is not None:
