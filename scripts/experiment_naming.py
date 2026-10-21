@@ -52,26 +52,21 @@ def dataset_size_suffix(
     )
 
 
-def experiment_dataset_name(
-    experiment_name: str | None,
+def _dataset_name_with_prefix(
+    prefix: str,
     *,
     train_mazes: int,
     validation_mazes: int,
     test_mazes: int,
     tasks_per_maze: int,
     seed: int,
-    stratify: bool = False,
-    dedupe_threshold: float = 0.7,
-    bucket_budgets: dict[str, float] | None = None,
-    dedupe_scope: str = DEFAULT_DEDUPE_SCOPE,
+    stratify: bool,
+    dedupe_threshold: float,
+    bucket_budgets: dict[str, float] | None,
+    dedupe_scope: str,
 ) -> str:
-    name = (
-        DEFAULT_DATASET_EXPERIMENT_NAME
-        if experiment_name is None
-        else experiment_name
-    )
     dataset_name = (
-        f"{slugify_experiment_name(name)}_"
+        f"{prefix}_"
         + dataset_size_suffix(
             train_mazes=train_mazes,
             validation_mazes=validation_mazes,
@@ -92,6 +87,98 @@ def experiment_dataset_name(
     return (
         f"{dataset_name}_stratified_{budget_suffix}"
         f"_dedupe{threshold_suffix}"
+    )
+
+
+def canonical_dataset_name(
+    *,
+    train_mazes: int,
+    validation_mazes: int,
+    test_mazes: int,
+    tasks_per_maze: int,
+    seed: int,
+    stratify: bool = False,
+    dedupe_threshold: float = 0.7,
+    bucket_budgets: dict[str, float] | None = None,
+    dedupe_scope: str = DEFAULT_DEDUPE_SCOPE,
+) -> str:
+    """Return the stable directory name for a generated dataset."""
+    return _dataset_name_with_prefix(
+        "dataset",
+        train_mazes=train_mazes,
+        validation_mazes=validation_mazes,
+        test_mazes=test_mazes,
+        tasks_per_maze=tasks_per_maze,
+        seed=seed,
+        stratify=stratify,
+        dedupe_threshold=dedupe_threshold,
+        bucket_budgets=bucket_budgets,
+        dedupe_scope=dedupe_scope,
+    )
+
+
+def experiment_dataset_name(
+    experiment_name: str | None,
+    *,
+    train_mazes: int,
+    validation_mazes: int,
+    test_mazes: int,
+    tasks_per_maze: int,
+    seed: int,
+    stratify: bool = False,
+    dedupe_threshold: float = 0.7,
+    bucket_budgets: dict[str, float] | None = None,
+    dedupe_scope: str = DEFAULT_DEDUPE_SCOPE,
+) -> str:
+    """Return the canonical name for a generated dataset.
+
+    ``experiment_name`` remains accepted for compatibility, but generated
+    dataset directories are intentionally independent of experiment labels.
+    """
+    del experiment_name
+    return canonical_dataset_name(
+        train_mazes=train_mazes,
+        validation_mazes=validation_mazes,
+        test_mazes=test_mazes,
+        tasks_per_maze=tasks_per_maze,
+        seed=seed,
+        stratify=stratify,
+        dedupe_threshold=dedupe_threshold,
+        bucket_budgets=bucket_budgets,
+        dedupe_scope=dedupe_scope,
+    )
+
+
+def experiment_output_name(
+    experiment_name: str | None,
+    *,
+    train_mazes: int,
+    validation_mazes: int,
+    test_mazes: int,
+    tasks_per_maze: int,
+    seed: int,
+    stratify: bool = False,
+    dedupe_threshold: float = 0.7,
+    bucket_budgets: dict[str, float] | None = None,
+    dedupe_scope: str = DEFAULT_DEDUPE_SCOPE,
+) -> str:
+    """Return the experiment-labeled name used by training/tuning outputs."""
+    name = (
+        DEFAULT_DATASET_EXPERIMENT_NAME
+        if experiment_name is None
+        else experiment_name
+    )
+    return _dataset_name_with_prefix(
+        slugify_experiment_name(name),
+        train_mazes=train_mazes,
+        validation_mazes=validation_mazes,
+        test_mazes=test_mazes,
+        tasks_per_maze=tasks_per_maze,
+        seed=seed,
+        stratify=stratify,
+        dedupe_threshold=dedupe_threshold,
+        bucket_budgets=bucket_budgets,
+        dedupe_scope=dedupe_scope,
     )
 
 
@@ -137,7 +224,7 @@ def experiment_dataset_name_from_metadata(
             + ", ".join(missing_fields)
         )
 
-    return experiment_dataset_name(
+    return experiment_output_name(
         experiment_name,
         train_mazes=int(metadata["train_mazes"]),
         validation_mazes=int(metadata["validation_mazes"]),

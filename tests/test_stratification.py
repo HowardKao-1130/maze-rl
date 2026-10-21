@@ -1,6 +1,8 @@
+from pathlib import Path
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
-from types import SimpleNamespace
 
 from maze_rl.maze import stratification as stratification_module
 from maze_rl.maze.stratification import (
@@ -302,7 +304,7 @@ def test_threshold_fallback_does_not_relax_the_configured_threshold():
     assert threshold_schedule(0.75) == (0.75,)
 
 
-def test_stratified_dataset_name_includes_budgets_and_threshold():
+def test_stratified_dataset_name_uses_canonical_prefix_and_suffix():
     name = experiment_dataset_name(
         "experiment",
         train_mazes=10,
@@ -319,7 +321,8 @@ def test_stratified_dataset_name_includes_budgets_and_threshold():
         },
     )
 
-    assert name.endswith(
+    assert name == (
+        "dataset_10x2x2_t5_seed42"
         "_stratified_s20_m40_l40_dedupe075"
     )
 
@@ -346,7 +349,9 @@ def test_cli_defaults_configure_stratification(monkeypatch):
         "long": 0.4,
     }
     assert args.minimum_long_eligible_tasks == 2
-    assert args.output_dir.name.endswith(
+    assert args.output_dir == Path(
+        "data/datasets/"
+        "dataset_1000x200x200_t5_seed42"
         "_stratified_s00_m60_l40_dedupe070"
     )
 
