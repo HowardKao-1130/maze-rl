@@ -1,6 +1,128 @@
 # maze-rl
 practice project for RL
 
+## Command Reference
+
+The commands below use automatic dataset naming and store generated
+datasets under `data/datasets`. Replace `<dataset-name>` with the directory
+name printed by dataset generation, or pass an explicit dataset directory.
+
+### Generate a regular dataset
+
+```bash
+python scripts/generate_dataset.py \
+  --train-mazes 5000 \
+  --validation-mazes 500 \
+  --test-mazes 500 \
+  --tasks-per-maze 5
+```
+
+### Generate a stratified dataset
+
+Add `--stratify` to select tasks using shared difficulty buckets and path
+deduplication. The following command uses the default 0:60:40 short/medium/long
+task allocation and a `0.7` deduplication threshold; pass the budget and
+threshold flags explicitly when you want those settings recorded in the
+command:
+
+```bash
+python scripts/generate_dataset.py \
+  --train-mazes 5000 \
+  --validation-mazes 500 \
+  --test-mazes 500 \
+  --tasks-per-maze 5 \
+  --stratify \
+  --short-budget 0.0 \
+  --medium-budget 0.6 \
+  --long-budget 0.4 \
+  --dedupe-threshold 0.7
+```
+
+If the output already contains dataset artifacts, the generator prompts to
+`resume` or `override`; use `--resume` to select resume behavior directly.
+Resume generates only missing splits and preserves completed ones.
+
+### Train an agent
+
+Train a neural agent against a dataset bundle. The bundle name automatically
+resolves its training and validation splits:
+
+```bash
+python scripts/train.py \
+  --algorithm ppo \
+  --dataset <dataset-name> \
+  --rollouts-per-task 1000 \
+  --plot
+```
+
+To train from the best configuration produced by tuning:
+
+```bash
+python scripts/train.py \
+  --algorithm ppo \
+  --best-config \
+  --dataset <dataset-name> \
+  --rollouts-per-task 1000
+```
+
+Supported algorithms include `mc`, `sarsa`, `q_learning`, `dyna_q`, `dqn`,
+`reinforce`, `a2c`, `ppo`, and `grpo`. If existing training artifacts are
+found, the command prompts to resume, reuse a completed run, or override it.
+
+### Tune a neural agent
+
+Run a 20-combination sweep with Optuna's TPE sampler, which is the default:
+
+```bash
+python scripts/tune_dnn.py \
+  --algorithm ppo \
+  --dataset <dataset-name> \
+  --hyperparameter-combinations 20 \
+  --rollouts-per-task 200
+```
+
+Use a seeded random sampler when preferred:
+
+```bash
+python scripts/tune_dnn.py \
+  --algorithm ppo \
+  --dataset <dataset-name> \
+  --sampler random \
+  --hyperparameter-combinations 20 \
+  --rollouts-per-task 200
+```
+
+Tuning automatically uses `train_tune.npz` and `validation_tune.npz` when they
+are present. Existing incomplete sweeps prompt to `resume` or `override`;
+completed sweeps prompt to `reuse` or `override`. Use `--resume` to continue a
+known tuning run directly.
+
+### Summarize training runs
+
+Create training-history plots for all runs under a dataset's training output:
+
+```bash
+python scripts/summarize_training_runs.py \
+  --dataset <dataset-name> \
+  --metric mean_path_efficiency
+```
+
+Use `--runs-dir` and `--output-dir` to scan a custom run directory or write
+the plots elsewhere.
+
+### Summarize tuning runs
+
+Create validation heatmaps, trial grids, training-progress plots, and
+hyperparameter parallel-coordinate plots:
+
+```bash
+python scripts/summarize_tuning_runs.py \
+  --dataset <dataset-name> \
+  --metric mean_path_efficiency
+```
+
+Use `--runs-dir` and `--output-dir` for custom tuning and summary locations.
+
 ## Dataset Splits
 
 Generate datasets with multiple tasks per layout:
@@ -66,14 +188,19 @@ python scripts/summarize_dataset.py \
 When training against a stratified dataset bundle, periodic validation reports
 `train`, `train-greedy`, `val`, `val-same`, and `val-natural`. `val` is the
 primary filtered/stratified split used for ordinary training's best-checkpoint
-selection and early stopping. The generator also writes `validation_tune.npz`,
-but ordinary training does not load or plot it.
+selection and early stopping. The generator also writes `train_tune.npz` and
+`validation_tune.npz`; ordinary training does not load or plot either tuning
+split.
 
 - `data/train.npz`: seen tasks for training and memorization evaluation.
+- `data/train_tune.npz`: `train-tune`, a reproducible subset of training
+  layouts used to reduce the cost of hyperparameter trials. It contains 20%
+  of training layouts, with a 500-layout minimum capped by the full training
+  size.
 - `data/validation.npz`: `val`, filtered layouts with stratified tasks.
 - `data/validation_tune.npz`: `val-tune`, a validation subset generated like
-  `val` with one fifth as many layouts (rounded up, minimum one), used
-  automatically only by tuning.
+  `val` with 40% of validation layouts and a 100-layout minimum capped by the
+  full validation size, used automatically only by tuning.
 - `data/same_layout_new_goals.npz`: `val-same`, validation-sized randomly
   selected tasks on training layouts.
 - `data/validation_natural.npz`: `val-natural`, independently generated
@@ -110,7 +237,7 @@ metrics are available, the plot includes train, `val`, `val-same`,
 `val-natural`, and greedy train-evaluation curves:
 
 ```bash
-python scripts/summarize_training_runs.py --dataset generalization_followup_5000x500x500_t5_seed42
+python scripts/summarize_training_runs.py --dataset dataset_5000x500x500_t5_seed42
 ```
 
 Greedy train-evaluation points are read from `validation_metrics.csv` rows with
@@ -285,28 +412,29 @@ python scripts/generate_dataset.py --train-mazes 200 --validation-mazes 50 --tes
 ```
 
 Use a separate output directory for larger training datasets so tuning
-and experiment datasets remain intact. Pass an experiment name to derive the
-directory from the actual split sizes, task count, and seed:
+and experiment datasets remain intact. Dataset directories are named from
+the split sizes, task count, and seed:
 
 ```bash
-python scripts/generate_dataset.py --experiment-name generalization_followup --train-mazes 5000 --validation-mazes 500 --test-mazes 500 --tasks-per-maze 5
+python scripts/generate_dataset.py --train-mazes 5000 --validation-mazes 500 --test-mazes 500 --tasks-per-maze 5
 ```
 
 Without `--output-dir`, generated splits are stored under
-`data/datasets/<name>_<train>x<validation>x<test>_t<tasks>_seed<seed>`. If
-`--experiment-name` is omitted, the prefix defaults to `dataset`.
+`data/datasets/dataset_<train>x<validation>x<test>_t<tasks>_seed<seed>`.
+Stratified datasets append
+`_stratified_s<short>_m<medium>_l<long>_dedupe<threshold>`.
 
 Then tune against the pre-generated dataset bundle:
 
 ```bash
-python scripts/tune_dnn.py --algorithm ppo --dataset generalization_followup_5000x500x500_t5_seed42
+python scripts/tune_dnn.py --algorithm ppo --dataset dataset_5000x500x500_t5_seed42
 ```
 
 The tuner requires an explicit dataset or split paths. With a dataset
-name, it reads `data/datasets/<dataset>/train.npz`,
+name, it reads `data/datasets/<dataset>/train_tune.npz`,
 `validation.npz`, `validation_tune.npz`, `same_layout_new_goals.npz`, and
 `validation_natural.npz`, samples 20 hyperparameter
-combinations with a random-search sampler and a 200 rollouts-per-task maximum
+combinations with Optuna's TPE sampler and a 200 rollouts-per-task maximum
 budget per combination, stores per-combination trial directories under the
 matching
 `runs/dnn/tuning/<dataset>/trials`, evaluates every
@@ -320,9 +448,10 @@ arguments and effective search space for controlled resumes. Pass
 `--hyperparameter-combinations` to change the number of sampled combinations,
 or pass
 `--search-space path/to/search_space.json` to override the default search space.
-Random search is the default sampler. To opt in to Optuna's TPE sampler, install
-the optional dependency with `pip install 'maze-rl[tuning]'` or
-`pip install optuna`, then pass `--sampler optuna` or `--optuna`.
+Optuna's TPE sampler is the default. Install the optional dependency with
+`pip install 'maze-rl[tuning]'` or `pip install optuna`. Use
+`--sampler random` when a seeded random sweep is preferred; `--optuna` remains
+an explicit alias for the default Optuna sampler.
 If a sweep is interrupted, rerun the same command; when existing tuning
 artifacts are detected, the command prompts whether to `resume` or `override`.
 Completed sweeps prompt whether to `reuse` or `override`. Pass `--resume` to
@@ -340,9 +469,11 @@ instead of guessing the old arguments.
 Keep `--rollouts-per-task` as the training budget for comparable combinations.
 Increasing it usually improves final performance but also changes compute cost,
 so it is best treated as a generous fixed maximum budget for the sweep. When
-`validation_tune.npz` is present, the tuner uses `val-tune` as the primary
-validation dataset for child-run evaluation, early stopping, and combination
-selection; it falls back to `validation.npz` for older bundles. It also
+`train_tune.npz` is present, the tuner uses `train-tune` for child-run
+training; it falls back to `train.npz` for older bundles. When
+`validation_tune.npz` is present, it uses `val-tune` as the primary validation
+dataset for child-run evaluation, early stopping, and combination selection;
+it falls back to `validation.npz` for older bundles. It also
 evaluates `val-same` and `val-natural`, saves each combination's
 `best_checkpoint.pt`, and leaves the ordinary `checkpoint.pt` as the training
 state.
@@ -355,7 +486,7 @@ under `data/datasets` or point at a dataset directory; training then uses its
 under the matching `runs/dnn/training/<dataset-directory>/<algorithm>` directory:
 
 ```bash
-python scripts/train.py --algorithm ppo --best-config --dataset generalization_followup_5000x500x500_t5_seed42 --rollouts-per-task 1000
+python scripts/train.py --algorithm ppo --best-config --dataset dataset_5000x500x500_t5_seed42 --rollouts-per-task 1000
 ```
 
 `--best-config` reads
@@ -377,7 +508,7 @@ percentages at validation checks.
 Summarize completed DNN sweeps across agents with:
 
 ```bash
-python scripts/summarize_tuning_runs.py --dataset generalization_followup_5000x500x500_t5_seed42
+python scripts/summarize_tuning_runs.py --dataset dataset_5000x500x500_t5_seed42
 ```
 
 The command writes

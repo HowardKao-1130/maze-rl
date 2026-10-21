@@ -17,6 +17,7 @@ from maze_rl.maze.dataset import (
     generate_tasks_for_layouts,
     generate_split_seeds,
     save_dataset,
+    select_layout_subset,
 )
 from maze_rl.maze.stratification import (
     DEDUPE_SCOPE,
@@ -30,13 +31,32 @@ from maze_rl.maze.stratification import (
 )
 from scripts.experiment_naming import (
     DEFAULT_DATA_OUTPUT_ROOT,
-    experiment_dataset_name,
+    canonical_dataset_name,
 )
 
 
 NATURAL_SPLIT_SEED_OFFSET = 1_000_000_000
 VAL_TUNE_SPLIT_SEED_OFFSET = 2_000_000_000
+TRAIN_TUNE_FRACTION = 0.2
+TRAIN_TUNE_MIN_MAZES = 500
 VALIDATION_TUNE_FRACTION = 0.4
+VALIDATION_TUNE_MIN_MAZES = 100
+
+
+def tuning_layout_count(
+    total_layouts: int,
+    fraction: float,
+    minimum_layouts: int,
+) -> int:
+    """Return a capped tuning size with a useful minimum floor."""
+    return min(
+        total_layouts,
+        max(
+            1,
+            minimum_layouts,
+            int(np.ceil(total_layouts * fraction)),
+        ),
+    )
 
 
 def task_pairs_by_layout(
@@ -325,6 +345,7 @@ def _build_metadata(
     args: argparse.Namespace,
     *,
     same_layout_maze_count: int,
+    train_tune_maze_count: int,
     val_tune_maze_count: int,
     stratification_metadata: dict[str, object] | None,
     validation_metadata: dict[str, object] | None,
@@ -341,6 +362,7 @@ def _build_metadata(
         "min_path_length": args.min_path_length,
         "master_seed": args.seed,
         "train_mazes": args.train_mazes,
+        "train_tune_mazes": train_tune_maze_count,
         "validation_mazes": args.validation_mazes,
         "validation_tune_mazes": val_tune_maze_count,
         "test_mazes": args.test_mazes,
@@ -379,6 +401,7 @@ def _build_metadata(
             "tasks_per_maze": args.tasks_per_maze,
         },
         "dataset_roles": {
+            "train_tune.npz": "train-tune",
             "validation.npz": "val",
             "validation_tune.npz": "val-tune",
             "same_layout_new_goals.npz": "val-same",
@@ -410,10 +433,19 @@ def _validate_resume_metadata(
         "min_path_length": args.min_path_length,
         "master_seed": args.seed,
         "train_mazes": args.train_mazes,
+        "train_tune_mazes": tuning_layout_count(
+            args.train_mazes,
+            TRAIN_TUNE_FRACTION,
+            TRAIN_TUNE_MIN_MAZES,
+        ),
         "validation_mazes": args.validation_mazes,
         "validation_tune_mazes": max(
             1,
-            int(np.ceil(args.validation_mazes * VALIDATION_TUNE_FRACTION)),
+            tuning_layout_count(
+                args.validation_mazes,
+                VALIDATION_TUNE_FRACTION,
+                VALIDATION_TUNE_MIN_MAZES,
+            ),
         ),
         "test_mazes": args.test_mazes,
         "tasks_per_maze": args.tasks_per_maze,
@@ -527,8 +559,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_DATA_OUTPUT_ROOT,
         help=(
-            "Root directory for automatically named experiment "
-            "datasets."
+            "Root directory for automatically named datasets."
         ),
     )
 
@@ -536,10 +567,8 @@ def parse_args() -> argparse.Namespace:
         "--experiment-name",
         default=None,
         help=(
-            "Optional prefix for an automatically named output "
-            "directory, for example "
-            "generalization_followup_2000x200x200_t5_seed42. "
-            "Defaults to dataset."
+            "Deprecated compatibility option; dataset names always use "
+            "the canonical dataset_<sizes> naming convention."
         ),
     )
 
@@ -718,8 +747,7 @@ def parse_args() -> argparse.Namespace:
         parser.error("--minimum-long-eligible-tasks must be non-negative.")
 
     if args.output_dir is None:
-        args.output_dir = args.output_root / experiment_dataset_name(
-            args.experiment_name,
+        args.output_dir = args.output_root / canonical_dataset_name(
             train_mazes=args.train_mazes,
             validation_mazes=args.validation_mazes,
             test_mazes=args.test_mazes,
@@ -736,6 +764,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     train_path = args.output_dir / "train.npz"
+    train_tune_path = args.output_dir / "train_tune.npz"
     validation_path = args.output_dir / "validation.npz"
     validation_tune_path = args.output_dir / "validation_tune.npz"
     validation_natural_path = (
@@ -749,6 +778,7 @@ def main() -> None:
     metadata_path = args.output_dir / "metadata.json"
     output_paths = [
         train_path,
+        train_tune_path,
         validation_path,
         validation_tune_path,
         validation_natural_path,
@@ -778,6 +808,7 @@ def main() -> None:
 
     print(f"Writing datasets to {args.output_dir}")
     print(f"  train:        {train_path}")
+    print(f"  train-tune:   {train_tune_path}")
     if args.stratify:
         print(f"  val:          {validation_path}")
         print(f"  val-tune:     {validation_tune_path}")
@@ -803,7 +834,16 @@ def main() -> None:
     )
     val_tune_maze_count = max(
         1,
-        int(np.ceil(args.validation_mazes * VALIDATION_TUNE_FRACTION)),
+        tuning_layout_count(
+            args.validation_mazes,
+            VALIDATION_TUNE_FRACTION,
+            VALIDATION_TUNE_MIN_MAZES,
+        ),
+    )
+    train_tune_maze_count = tuning_layout_count(
+        args.train_mazes,
+        TRAIN_TUNE_FRACTION,
+        TRAIN_TUNE_MIN_MAZES,
     )
     validation_tune_seeds = (
         validation_seeds[:val_tune_maze_count]
@@ -820,6 +860,7 @@ def main() -> None:
 
     split_paths = [
         ("train", train_path),
+        ("train_tune", train_tune_path),
         ("validation", validation_path),
         ("validation_tune", validation_tune_path),
         ("same_layout_new_goals", same_layout_path),
@@ -866,6 +907,7 @@ def main() -> None:
             _build_metadata(
                 args,
                 same_layout_maze_count=same_layout_maze_count,
+                train_tune_maze_count=train_tune_maze_count,
                 val_tune_maze_count=val_tune_maze_count,
                 stratification_metadata=stratification_metadata,
                 validation_metadata=validation_metadata,
@@ -972,6 +1014,42 @@ def main() -> None:
             train_goals,
         )
         completed_splits.add("train")
+        checkpoint()
+
+    if train_tune_path.exists():
+        print("Loading existing train-tune split.")
+        (
+            train_tune_layouts,
+            _saved_train_tune_seeds,
+            train_tune_layout_indices,
+            train_tune_starts,
+            train_tune_goals,
+        ) = _load_dataset_arrays(train_tune_path)
+    else:
+        (
+            train_tune_layouts,
+            train_tune_seeds,
+            train_tune_layout_indices,
+            train_tune_starts,
+            train_tune_goals,
+        ) = select_layout_subset(
+            train_layouts,
+            train_seeds,
+            train_layout_indices,
+            train_starts,
+            train_goals,
+            layout_count=train_tune_maze_count,
+            seed=args.seed + 1,
+        )
+        save_dataset(
+            train_tune_path,
+            train_tune_layouts,
+            train_tune_seeds,
+            train_tune_layout_indices,
+            train_tune_starts,
+            train_tune_goals,
+        )
+        completed_splits.add("train_tune")
         checkpoint()
 
     if validation_path.exists():
@@ -1383,6 +1461,7 @@ def main() -> None:
     metadata = _build_metadata(
         args,
         same_layout_maze_count=same_layout_maze_count,
+        train_tune_maze_count=train_tune_maze_count,
         val_tune_maze_count=val_tune_maze_count,
         stratification_metadata=stratification_metadata,
         validation_metadata=validation_metadata,
@@ -1398,6 +1477,7 @@ def main() -> None:
     print(f"Output directory:   {args.output_dir}")
     print("Stored files:")
     print(f"  train:        {train_path}")
+    print(f"  train-tune:   {train_tune_path}")
     if args.stratify:
         print(f"  val:          {validation_path}")
         print(f"  val-tune:     {validation_tune_path}")
@@ -1412,6 +1492,9 @@ def main() -> None:
     print(f"  metadata:     {metadata_path}")
     print(
         f"Train layouts:      {train_layouts.shape}"
+    )
+    print(
+        f"Train-tune layouts: {train_tune_layouts.shape}"
     )
     print(
         f"Validation layouts: {validation_layouts.shape}"

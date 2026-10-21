@@ -329,6 +329,8 @@ TUNING_OPTIONAL_ARGUMENT_DEFAULTS = {
     "natural_validation_dataset": None,
     "natural_test_dataset": None,
     "q_snapshot_count": 11,
+    # Older tuning configs did not always persist the sampler. Preserve their
+    # historical random-search behavior when resuming such a config.
     "sampler": "random",
     "validation_all_tasks": True,
 }
@@ -365,8 +367,7 @@ def parse_args(
 
     parser = argparse.ArgumentParser(
         description=(
-            "Random-search hyperparameter tuning for DNN maze "
-            "RL agents."
+            "Hyperparameter tuning for DNN maze RL agents."
         )
     )
 
@@ -381,10 +382,10 @@ def parse_args(
             "random",
             "optuna",
         ],
-        default="random",
+        default="optuna",
         help=(
-            "Hyperparameter sampler to use. Defaults to random "
-            "search; choose optuna to use Optuna's TPE sampler."
+            "Hyperparameter sampler to use. Defaults to Optuna's "
+            "TPE sampler; choose random for a seeded random sweep."
         ),
     )
     parser.add_argument(
@@ -394,7 +395,7 @@ def parse_args(
         const="optuna",
         help=(
             "Use Optuna's TPE sampler for hyperparameter "
-            "selection. Disabled by default."
+            "selection. This is the default."
         ),
     )
     parser.add_argument(
@@ -469,7 +470,8 @@ def parse_args(
         default=None,
         help=(
             "Dataset bundle name under data/datasets, containing "
-            "train.npz, validation.npz, validation_tune.npz, "
+            "train.npz, train_tune.npz, validation.npz, "
+            "validation_tune.npz, "
             "same_layout_new_goals.npz, "
             "validation_natural.npz, and optionally test.npz and "
             "test_natural.npz. Also determines the tuning "
@@ -1658,6 +1660,7 @@ def resolve_dataset_bundle_args(
         )
 
     train_dataset = dataset_dir / "train.npz"
+    train_tune_dataset = dataset_dir / "train_tune.npz"
     validation_dataset = dataset_dir / "validation.npz"
     validation_tune_dataset = dataset_dir / "validation_tune.npz"
     same_layout_dataset = (
@@ -1676,7 +1679,11 @@ def resolve_dataset_bundle_args(
         )
 
     if args.train_dataset is None:
-        args.train_dataset = train_dataset
+        args.train_dataset = (
+            train_tune_dataset
+            if train_tune_dataset.exists()
+            else train_dataset
+        )
 
     if args.validation_dataset is None:
         args.validation_dataset = (

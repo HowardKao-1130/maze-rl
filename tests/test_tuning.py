@@ -223,7 +223,7 @@ def test_parse_args_has_no_default_read_or_save_dirs(monkeypatch):
     assert args.validation_all_tasks is True
     assert args.tensorboard is False
     assert args.tensorboard_from_cli is False
-    assert args.sampler == "random"
+    assert args.sampler == "optuna"
     assert args.resume is False
     assert args.dataset is None
     assert args.train_dataset is None
@@ -364,6 +364,33 @@ def test_dataset_bundle_resolution_prefers_validation_tune_for_tuning(
         / "tuning_200x50x50_t5_seed42"
         / "validation_tune.npz"
     )
+
+
+def test_dataset_bundle_resolution_prefers_train_tune_for_tuning(
+    tmp_path,
+    monkeypatch,
+):
+    dataset_dir = write_dataset_bundle(
+        tmp_path / "data" / "datasets",
+        "tuning_200x50x50_t5_seed42",
+    )
+    train_tune_dataset = dataset_dir / "train_tune.npz"
+    train_tune_dataset.write_bytes(b"")
+    monkeypatch.chdir(tmp_path)
+    args = SimpleNamespace(
+        dataset=dataset_dir.name,
+        train_dataset=None,
+        validation_dataset=None,
+        same_layout_dataset=None,
+        test_dataset=None,
+        output_dir=None,
+        experiment_name=None,
+        experiment_root=tmp_path / "runs",
+    )
+
+    resolve_dataset_bundle_args(args)
+
+    assert args.train_dataset == train_tune_dataset.relative_to(tmp_path)
 
 
 def test_dataset_bundle_dir_for_reference_expands_dataset_name():
@@ -888,6 +915,8 @@ def test_other_algorithm_history_does_not_block_new_sweep(
             "tune_dnn.py",
             "--algorithm",
             "dqn",
+            "--sampler",
+            "random",
             "--dry-run",
             "--output-dir",
             str(tmp_path),
@@ -956,6 +985,8 @@ def test_other_algorithm_legacy_config_does_not_block_new_sweep(
             "tune_dnn.py",
             "--algorithm",
             "dqn",
+            "--sampler",
+            "random",
             "--dry-run",
             "--output-dir",
             str(tmp_path),

@@ -154,6 +154,52 @@ def generate_tasks_for_layouts(
 
     return layout_indices, starts, goals
 
+
+def select_layout_subset(
+    layouts: np.ndarray,
+    seeds: np.ndarray,
+    layout_indices: np.ndarray,
+    starts: np.ndarray,
+    goals: np.ndarray,
+    layout_count: int,
+    seed: int,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
+    """Select and reindex a reproducible subset of dataset layouts."""
+    if layout_count <= 0 or layout_count > len(layouts):
+        raise ValueError(
+            "layout_count must be between one and the number of layouts."
+        )
+    if len(seeds) != len(layouts):
+        raise ValueError("seeds and layouts must have matching lengths.")
+
+    rng = np.random.default_rng(seed)
+    selected_layouts = np.sort(
+        rng.choice(
+            len(layouts),
+            size=layout_count,
+            replace=False,
+        )
+    )
+    task_mask = np.isin(layout_indices, selected_layouts)
+    selected_task_layout_indices = layout_indices[task_mask]
+
+    return (
+        layouts[selected_layouts],
+        seeds[selected_layouts],
+        np.searchsorted(
+            selected_layouts,
+            selected_task_layout_indices,
+        ).astype(layout_indices.dtype, copy=False),
+        starts[task_mask],
+        goals[task_mask],
+    )
+
 def generate_split_seeds(
     train_size: int,
     validation_size: int,

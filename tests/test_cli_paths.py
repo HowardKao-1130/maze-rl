@@ -1170,6 +1170,10 @@ def test_same_layout_dataset_matches_validation_size(monkeypatch, tmp_path):
     generate_dataset_main()
 
     with np.load(
+        tmp_path / "train.npz"
+    ) as train_data, np.load(
+        tmp_path / "train_tune.npz"
+    ) as train_tune_data, np.load(
         tmp_path / "validation.npz"
     ) as validation_data, np.load(
         tmp_path / "same_layout_new_goals.npz"
@@ -1186,10 +1190,14 @@ def test_same_layout_dataset_matches_validation_size(monkeypatch, tmp_path):
         ) == len(
             same_layout_data["starts"]
         )
-        assert len(validation_tune_data["layouts"]) == 2
+        assert len(train_tune_data["layouts"]) == 3
+        assert len(validation_tune_data["layouts"]) == 3
+        assert set(train_tune_data["seeds"]).issubset(
+            set(train_data["seeds"])
+        )
 
 
-def test_generate_dataset_experiment_name_derives_output_dir(
+def test_generate_dataset_experiment_name_does_not_change_output_dir(
     monkeypatch,
 ):
     monkeypatch.setattr(
@@ -1214,7 +1222,7 @@ def test_generate_dataset_experiment_name_derives_output_dir(
     args = parse_dataset_args()
 
     assert args.output_dir == Path(
-        "data/datasets/generalization_followup_7x3x2_t4_seed99"
+        "data/datasets/dataset_7x3x2_t4_seed99"
     )
 
 
