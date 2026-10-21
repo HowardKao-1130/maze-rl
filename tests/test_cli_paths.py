@@ -1081,7 +1081,7 @@ def test_same_layout_dataset_matches_validation_size(monkeypatch, tmp_path):
             "--train-mazes",
             "3",
             "--validation-mazes",
-            "2",
+            "3",
             "--test-mazes",
             "1",
             "--tasks-per-maze",
@@ -1116,7 +1116,7 @@ def test_same_layout_dataset_matches_validation_size(monkeypatch, tmp_path):
         ) == len(
             same_layout_data["starts"]
         )
-        assert len(validation_tune_data["layouts"]) == 1
+        assert len(validation_tune_data["layouts"]) == 2
 
 
 def test_generate_dataset_experiment_name_derives_output_dir(

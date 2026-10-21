@@ -36,6 +36,7 @@ from scripts.experiment_naming import (
 
 NATURAL_SPLIT_SEED_OFFSET = 1_000_000_000
 VAL_TUNE_SPLIT_SEED_OFFSET = 2_000_000_000
+VALIDATION_TUNE_FRACTION = 0.4
 
 
 def task_pairs_by_layout(
@@ -412,7 +413,7 @@ def _validate_resume_metadata(
         "validation_mazes": args.validation_mazes,
         "validation_tune_mazes": max(
             1,
-            int(np.ceil(args.validation_mazes / 5)),
+            int(np.ceil(args.validation_mazes * VALIDATION_TUNE_FRACTION)),
         ),
         "test_mazes": args.test_mazes,
         "tasks_per_maze": args.tasks_per_maze,
@@ -802,7 +803,7 @@ def main() -> None:
     )
     val_tune_maze_count = max(
         1,
-        int(np.ceil(args.validation_mazes / 5)),
+        int(np.ceil(args.validation_mazes * VALIDATION_TUNE_FRACTION)),
     )
     validation_tune_seeds = (
         validation_seeds[:val_tune_maze_count]
