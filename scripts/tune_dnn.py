@@ -633,7 +633,7 @@ def parse_args(
     args.tensorboard_from_cli = args.tensorboard is not None
 
     if args.hyperparameter_combinations is None:
-        args.hyperparameter_combinations = 100
+        args.hyperparameter_combinations = 20
 
     if args.tensorboard is None:
         args.tensorboard = False

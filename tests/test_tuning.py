@@ -212,7 +212,7 @@ def test_parse_args_has_no_default_read_or_save_dirs(monkeypatch):
 
     args = parse_args()
 
-    assert args.hyperparameter_combinations == 100
+    assert args.hyperparameter_combinations == 20
     assert args.rollouts_per_task == 200
     assert args.early_stopping_patience == 35
     assert args.q_snapshot_count == 11

@@ -302,7 +302,7 @@ python scripts/tune_dnn.py --algorithm ppo --dataset generalization_followup_500
 The tuner requires an explicit dataset or split paths. With a dataset
 name, it reads `data/datasets/<dataset>/train.npz`,
 `validation.npz`, `validation_tune.npz`, `same_layout_new_goals.npz`, and
-`validation_natural.npz`, samples 100 hyperparameter
+`validation_natural.npz`, samples 20 hyperparameter
 combinations with a random-search sampler and a 200 rollouts-per-task maximum
 budget per combination, stores per-combination trial directories under the
 matching
