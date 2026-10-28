@@ -285,6 +285,33 @@ class SequenceGRPOAgent(FakeGRPOAgent):
         return self.actions.pop(0), -0.5
 
 
+class BatchSequenceGRPOAgent(FakeGRPOAgent):
+    def __init__(
+        self,
+        actions,
+    ) -> None:
+        super().__init__()
+        self.actions = list(actions)
+        self.batch_sizes = []
+
+    def choose_action(self, observation):
+        raise AssertionError(
+            "the batched action path should be used"
+        )
+
+    def choose_actions(self, observations):
+        self.batch_sizes.append(len(observations))
+        actions = self.actions[:len(observations)]
+        del self.actions[:len(observations)]
+        return (
+            np.asarray(actions),
+            np.full(
+                len(observations),
+                -0.5,
+            ),
+        )
+
+
 def test_grpo_round_uses_group_relative_advantages():
     agent = FakeGRPOAgent()
 
@@ -345,6 +372,43 @@ def test_grpo_round_normalizes_advantages_within_each_task_group():
         -1.0,
         1.0,
     ]
+    assert [
+        metric.task_index
+        for metric in metrics
+    ] == [
+        0,
+        0,
+        1,
+        1,
+    ]
+
+
+def test_grpo_round_batches_actions_across_active_rollouts():
+    agent = BatchSequenceGRPOAgent(
+        actions=[
+            1,
+            3,
+            10,
+            14,
+        ]
+    )
+
+    metrics = train_grpo_round(
+        env=OneStepRewardEnv(),
+        agent=agent,
+        rollout_groups=[
+            [
+                (1, 1, 0),
+                (2, 1, 0),
+            ],
+            [
+                (3, 1, 1),
+                (4, 1, 1),
+            ],
+        ],
+    )
+
+    assert agent.batch_sizes == [4]
     assert [
         metric.task_index
         for metric in metrics

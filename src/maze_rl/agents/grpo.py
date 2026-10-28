@@ -105,6 +105,33 @@ class GRPOAgent:
             ),
         )
 
+    @torch.no_grad()
+    def choose_actions(
+        self,
+        observations,
+    ):
+        observations_tensor = torch.as_tensor(
+            np.stack(observations),
+            dtype=torch.float32,
+            device=self.device,
+        )
+
+        logits = self.policy(
+            observations_tensor
+        )
+        distribution = Categorical(
+            logits=logits
+        )
+        actions = distribution.sample()
+        log_probabilities = distribution.log_prob(
+            actions
+        )
+
+        return (
+            actions.detach().cpu().numpy(),
+            log_probabilities.detach().cpu().numpy(),
+        )
+
     def compute_episode_return(
         self,
         rewards,

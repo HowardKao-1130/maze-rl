@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 
 import numpy as np
@@ -923,68 +924,132 @@ def train_grpo_episode(
     )[0]
 
 
-def _collect_grpo_episode(
+def _copy_rollout_env(env):
+    return copy.copy(env)
+
+
+def _choose_grpo_actions(
+    agent: GRPOAgent,
+    observations,
+):
+    choose_actions = getattr(
+        agent,
+        "choose_actions",
+        None,
+    )
+
+    if choose_actions is None:
+        return [
+            agent.choose_action(observation)
+            for observation in observations
+        ]
+
+    actions, log_probabilities = choose_actions(
+        observations
+    )
+
+    return [
+        (
+            int(action),
+            float(log_probability),
+        )
+        for action, log_probability in zip(
+            actions,
+            log_probabilities,
+        )
+    ]
+
+
+def _collect_grpo_rollout_groups(
     env,
     agent: GRPOAgent,
-    episode: int,
-    epoch: int,
-    task_index: int | None = None,
+    rollout_groups,
 ):
-    observation, _ = _reset_env(env, task_index)
+    active_rollouts = []
+    grouped_rollouts = []
 
-    observations = []
-    actions = []
-    log_probabilities = []
-    rewards = []
-    episode_return = 0.0
+    for episode_specs in rollout_groups:
+        group = []
 
-    while True:
-        (
-            action,
-            log_probability,
-        ) = agent.choose_action(
-            observation
-        )
-
-        observations.append(
-            observation.copy()
-        )
-        actions.append(action)
-        log_probabilities.append(
-            log_probability
-        )
-
-        (
-            observation,
-            reward,
-            terminated,
-            truncated,
-            info,
-        ) = env.step(action)
-
-        rewards.append(reward)
-        episode_return += reward
-
-        if terminated or truncated:
-            break
-
-    return (
-        _metrics(
+        for (
             episode,
             epoch,
-            episode_return,
-            info,
-            None,
-            None,
-            None,
-        ),
-        observations,
-        actions,
-        log_probabilities,
-        agent.compute_episode_return(
-            rewards
-        ),
-    )
+            task_index,
+        ) in episode_specs:
+            rollout_env = _copy_rollout_env(env)
+            observation, _ = _reset_env(
+                rollout_env,
+                task_index,
+            )
+            rollout = {
+                "env": rollout_env,
+                "episode": episode,
+                "epoch": epoch,
+                "observation": observation,
+                "observations": [],
+                "actions": [],
+                "log_probabilities": [],
+                "rewards": [],
+            }
+            group.append(rollout)
+            active_rollouts.append(rollout)
+
+        grouped_rollouts.append(group)
+
+    while active_rollouts:
+        action_pairs = _choose_grpo_actions(
+            agent,
+            [
+                rollout["observation"]
+                for rollout in active_rollouts
+            ],
+        )
+        next_active_rollouts = []
+
+        for rollout, (
+            action,
+            log_probability,
+        ) in zip(active_rollouts, action_pairs):
+            rollout["observations"].append(
+                rollout["observation"].copy()
+            )
+            rollout["actions"].append(action)
+            rollout["log_probabilities"].append(
+                log_probability
+            )
+
+            (
+                observation,
+                reward,
+                terminated,
+                truncated,
+                info,
+            ) = rollout["env"].step(action)
+
+            rollout["rewards"].append(reward)
+
+            if terminated or truncated:
+                rollout["metrics"] = _metrics(
+                    rollout["episode"],
+                    rollout["epoch"],
+                    float(sum(rollout["rewards"])),
+                    info,
+                    None,
+                    None,
+                    None,
+                )
+                rollout["return"] = (
+                    agent.compute_episode_return(
+                        rollout["rewards"]
+                    )
+                )
+            else:
+                rollout["observation"] = observation
+                next_active_rollouts.append(rollout)
+
+        active_rollouts = next_active_rollouts
+
+    return grouped_rollouts
 
 
 def train_grpo_round(
@@ -1005,46 +1070,34 @@ def train_grpo_round(
     ):
         rollout_groups = [rollout_groups]
 
-    for episode_specs in rollout_groups:
-        group_observations = []
-        group_actions = []
-        group_log_probabilities = []
-        group_returns = []
+    grouped_rollouts = _collect_grpo_rollout_groups(
+        env,
+        agent,
+        rollout_groups,
+    )
 
-        for (
-            episode,
-            epoch,
-            task_index,
-        ) in episode_specs:
-            (
-                episode_metrics,
-                episode_observations,
-                episode_actions,
-                episode_log_probabilities,
-                episode_return,
-            ) = _collect_grpo_episode(
-                env,
-                agent,
-                episode,
-                epoch,
-                task_index,
-            )
+    for group in grouped_rollouts:
+        group_observations = [
+            rollout["observations"]
+            for rollout in group
+        ]
+        group_actions = [
+            rollout["actions"]
+            for rollout in group
+        ]
+        group_log_probabilities = [
+            rollout["log_probabilities"]
+            for rollout in group
+        ]
+        group_returns = [
+            rollout["return"]
+            for rollout in group
+        ]
 
-            metrics.append(episode_metrics)
-            group_observations.append(
-                episode_observations
-            )
-            group_actions.append(
-                episode_actions
-            )
-            group_log_probabilities.append(
-                episode_log_probabilities
-            )
-            group_returns.append(
-                episode_return
-            )
+        for rollout in group:
+            metrics.append(rollout["metrics"])
             all_returns.append(
-                episode_return
+                rollout["return"]
             )
 
         returns_array = np.asarray(

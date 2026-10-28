@@ -228,6 +228,12 @@ agents such as GRPO, one task selection produces `--rollout-group-size`
 rollouts, so the number of internal task-selection passes is
 `ceil(rollouts_per_task / rollout_group_size)`.
 
+GRPO collects active rollout groups with batched policy inference while
+keeping each environment trajectory independent. This reduces per-step model
+overhead without changing the group-relative update or checkpoint format. If a
+run is interrupted during a round, resume continues from the most recent
+completed round; the incomplete in-flight round is collected again.
+
 With 1000 layouts and 5 tasks per layout, `--rollouts-per-task 20` trains a
 single-rollout agent for 100,000 rollout attempts: 20 rollout attempts for each
 of the 5000 selected tasks.
