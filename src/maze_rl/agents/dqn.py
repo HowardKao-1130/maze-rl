@@ -8,6 +8,11 @@ import torch
 from torch import nn
 
 from maze_rl.agents.networks import (
+    DEFAULT_BASE_CHANNELS,
+    DEFAULT_CHANNEL_MULTIPLIER,
+    DEFAULT_CONV_DEPTH,
+    DEFAULT_FEATURE_DIM,
+    DEFAULT_KERNEL_SIZE,
     DEFAULT_RESIDUAL_LAYERS,
     QNetwork,
 )
@@ -81,6 +86,11 @@ class DQNAgent:
         seed: int = 42,
         network_architecture: str = "baseline",
         residual_layers: int = DEFAULT_RESIDUAL_LAYERS,
+        feature_dim: int = DEFAULT_FEATURE_DIM,
+        kernel_size: int = DEFAULT_KERNEL_SIZE,
+        base_channels: int = DEFAULT_BASE_CHANNELS,
+        channel_multiplier: int = DEFAULT_CHANNEL_MULTIPLIER,
+        conv_depth: int = DEFAULT_CONV_DEPTH,
     ) -> None:
         self.action_count = action_count
         self.device = device
@@ -118,6 +128,11 @@ class DQNAgent:
             action_count,
             network_architecture=network_architecture,
             residual_layers=residual_layers,
+            feature_dim=feature_dim,
+            kernel_size=kernel_size,
+            base_channels=base_channels,
+            channel_multiplier=channel_multiplier,
+            conv_depth=conv_depth,
         ).to(device)
 
         self.target_network = QNetwork(
@@ -126,6 +141,11 @@ class DQNAgent:
             action_count,
             network_architecture=network_architecture,
             residual_layers=residual_layers,
+            feature_dim=feature_dim,
+            kernel_size=kernel_size,
+            base_channels=base_channels,
+            channel_multiplier=channel_multiplier,
+            conv_depth=conv_depth,
         ).to(device)
 
         self.target_network.load_state_dict(

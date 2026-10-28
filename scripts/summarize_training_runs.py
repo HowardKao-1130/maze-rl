@@ -6,7 +6,6 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-import re
 import sys
 from typing import Any
 from urllib.parse import quote
@@ -270,17 +269,7 @@ def parse_float(value: str | None) -> float | None:
 
 
 def infer_algorithm(metrics_path: Path) -> str:
-    algorithm = metrics_path.parent.name
-    residual_match = re.fullmatch(
-        r"(.+)_residual_l\d+",
-        algorithm,
-    )
-    if residual_match:
-        base_algorithm = residual_match.group(1)
-        if base_algorithm in NEURAL_ALGORITHM_ORDER:
-            return base_algorithm
-
-    return algorithm
+    return metrics_path.parent.name
 
 
 def canonical_metric(metric: str) -> str:
@@ -349,6 +338,7 @@ def discover_metrics_paths(
         for path in sorted(
             runs_dir.rglob("metrics.csv")
         )
+        if path.is_file()
     ]
 
 
@@ -455,6 +445,9 @@ def load_training_run_series(
     runs_dir: Path,
     metric: str,
 ) -> TrainingRunSeries | None:
+    if not metrics_path.is_file():
+        return None
+
     if not is_neural_training_run(metrics_path):
         return None
 

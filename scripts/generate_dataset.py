@@ -24,10 +24,7 @@ from maze_rl.maze.stratification import (
     DEFAULT_BUCKET_BUDGETS,
     DEFAULT_DIFFICULTY_BOUNDARIES,
     DifficultyBoundaries,
-    bucket_quotas,
-    format_failure_diagnostics,
-    generate_layouts,
-    generate_stratified_tasks_for_layouts,
+    generate_stratified_dataset,
 )
 from scripts.experiment_naming import (
     DEFAULT_DATA_OUTPUT_ROOT,
@@ -143,92 +140,32 @@ def _stratified_progress_callback(label: str):
     def update(event: dict[str, object]) -> None:
         counts = event["bucket_counts"]
         quotas = event["bucket_quotas"]
-        status = " | ".join(
+        status = " ".join(
             f"{bucket[0].upper()} {counts[bucket]}/{quotas[bucket]}"
             for bucket in ("short", "medium", "long")
         )
         phase = event.get("phase")
-        if phase == "indexing":
-            line = (
-                f"{short_label} | index "
-                f"{event['layouts_completed']}/{event['layout_count']} | "
-                f"{status}"
-            )
-        else:
-            attempt = event.get(
-                "selection_attempt",
-                event.get("allocation_attempt"),
-            )
-            attempts = event.get(
-                "selection_attempts",
-                event.get("allocation_attempts"),
-            )
-            attempt_status = (
-                f"attempt {attempt}/{attempts} | "
-                if attempt is not None and attempts is not None
-                else ""
-            )
-            if phase == "allocation":
-                bucket = event.get("allocation_bucket")
-                bucket_completed = event.get("allocation_bucket_completed")
-                bucket_total = event.get("allocation_bucket_total")
-                slots_completed = event.get("allocation_slots_completed")
-                slots_total = event.get("allocation_slots_total")
-                if all(
-                    value is not None
-                    for value in (
-                        bucket,
-                        bucket_completed,
-                        bucket_total,
-                        slots_completed,
-                        slots_total,
-                    )
-                ):
-                    phase_status = (
-                        "allocating slots | "
-                        f"{str(bucket)[0].upper()} "
-                        f"{bucket_completed}/{bucket_total} | "
-                        f"total {slots_completed}/{slots_total} | "
-                    )
-                else:
-                    phase_status = "allocating slots | "
-            elif phase == "selection":
-                phase_status = (
-                    "selecting tasks | "
-                    f"layouts {event['layouts_completed']}/"
-                    f"{event['layout_count']} | "
-                )
-            elif phase == "repair":
-                phase_status = (
-                    "repairing allocations | "
-                    f"attempts {event['repair_attempts']}/"
-                    f"{event['repair_budget']} | "
-                )
-            else:
-                phase_status = f"{phase} | " if phase else ""
-            reason = event.get("reason")
-            reason_status = f" ({reason})" if reason else ""
-            diagnostics = event.get("diagnostics")
-            diagnostics_status = ""
-            if isinstance(diagnostics, dict):
-                diagnostics_status = (
-                    "\n  "
-                    + format_failure_diagnostics(diagnostics).replace(
-                        "\n",
-                        "\n  ",
-                    )
-                )
-            line = (
-                f"{short_label} | {attempt_status}{phase_status}"
-                f"{status}{reason_status}{diagnostics_status}"
-            )
+        phase_label = {
+            "generation": "generate",
+            "selection": "select",
+        }.get(str(phase), str(phase) if phase else "")
+        attempt = event.get("selection_attempt")
+        attempts = event.get("selection_attempts")
+        reason = event.get("reason")
+        retry_status = (
+            f" retry {attempt}/{attempts}"
+            if reason and attempt is not None and attempts is not None
+            else ""
+        )
+        line = (
+            f"{short_label} | {phase_label} "
+            f"{event['layouts_completed']}/{event['layout_count']} | "
+            f"{status}{retry_status}"
+        )
         _write_progress_line(
             line,
-            persist=bool(event.get("persist")),
-            # Keep each phase on its own terminal line. Updates within a
-            # phase still redraw in place, while a transition finalizes the
-            # previous phase's last status before starting the next one.
-            progress_key=f"{label}:{phase or 'unknown'}",
+            # Keep all phases for one dataset split on the same live line.
+            progress_key=label,
         )
 
     return update
@@ -357,13 +294,7 @@ def _build_metadata(
         "validation_tune_mazes": val_tune_maze_count,
         "test_mazes": args.test_mazes,
         "tasks_per_maze": args.tasks_per_maze,
-        "min_tasks_per_maze": args.min_tasks_per_maze,
-        "max_tasks_per_maze": args.max_tasks_per_maze,
         "local_search_budget": args.local_search_budget,
-        "global_repair_budget": args.global_repair_budget,
-        "minimum_long_eligible_tasks": (
-            args.minimum_long_eligible_tasks
-        ),
         "stratify": args.stratify,
         "dedupe_metric": (
             "expected_pairwise_directed_path_jaccard"
@@ -437,13 +368,7 @@ def _validate_resume_metadata(
         "stratify": args.stratify,
         "dedupe_threshold": args.dedupe_threshold,
         "bucket_budgets": args.bucket_budgets,
-        "min_tasks_per_maze": args.min_tasks_per_maze,
-        "max_tasks_per_maze": args.max_tasks_per_maze,
         "local_search_budget": args.local_search_budget,
-        "global_repair_budget": args.global_repair_budget,
-        "minimum_long_eligible_tasks": (
-            args.minimum_long_eligible_tasks
-        ),
     }
     if args.stratify:
         expected["difficulty_boundaries"] = {
@@ -576,26 +501,6 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--min-tasks-per-maze",
-        type=int,
-        default=3,
-        help=(
-            "Compatibility lower bound for stratified generation; fixed "
-            "assignments use tasks-per-maze tasks per layout."
-        ),
-    )
-
-    parser.add_argument(
-        "--max-tasks-per-maze",
-        type=int,
-        default=7,
-        help=(
-            "Compatibility upper bound for stratified generation; fixed "
-            "assignments use tasks-per-maze tasks per layout."
-        ),
-    )
-
-    parser.add_argument(
         "--stratify",
         action="store_true",
         help=(
@@ -645,16 +550,6 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--minimum-long-eligible-tasks",
-        type=int,
-        default=None,
-        help=(
-            "Minimum long-task candidates required in each filtered "
-            "layout. Defaults to ceil(tasks-per-maze * long-budget)."
-        ),
-    )
-
-    parser.add_argument(
         "--short-max-path-length",
         type=int,
         default=int(DEFAULT_DIFFICULTY_BOUNDARIES.short_max),
@@ -669,10 +564,10 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--allocation-attempts",
+        "--selection-attempts",
         type=int,
         default=8,
-        help="Number of seeded fixed-assignment selection attempts.",
+        help="Selection retries allowed for each candidate layout.",
     )
 
     parser.add_argument(
@@ -682,29 +577,12 @@ def parse_args() -> argparse.Namespace:
         help="Candidate-extension attempts allowed per layout.",
     )
 
-    parser.add_argument(
-        "--global-repair-budget",
-        type=int,
-        default=None,
-        help=(
-            "Deprecated compatibility option; fixed assignments do not "
-            "transfer tasks between layouts."
-        ),
-    )
-
     args = parser.parse_args()
 
     if not 0 < args.dedupe_threshold <= 1:
         parser.error("--dedupe-threshold must be in (0, 1].")
-    if args.stratify and not 0 < args.min_tasks_per_maze <= args.tasks_per_maze <= args.max_tasks_per_maze:
-        parser.error(
-            "Require --min-tasks-per-maze <= --tasks-per-maze <= "
-            "--max-tasks-per-maze."
-        )
-    if args.allocation_attempts <= 0 or args.local_search_budget <= 0:
-        parser.error("Allocation and search budgets must be positive.")
-    if args.global_repair_budget is not None and args.global_repair_budget <= 0:
-        parser.error("--global-repair-budget must be positive.")
+    if args.selection_attempts <= 0 or args.local_search_budget <= 0:
+        parser.error("Selection attempts and search budget must be positive.")
     if (
         args.short_max_path_length < 0
         or args.medium_max_path_length <= args.short_max_path_length
@@ -722,14 +600,6 @@ def parse_args() -> argparse.Namespace:
         parser.error("Bucket budgets must be non-negative.")
     if not np.isclose(sum(args.bucket_budgets.values()), 1.0):
         parser.error("Bucket budgets must sum to 1.0.")
-    if args.minimum_long_eligible_tasks is None:
-        args.minimum_long_eligible_tasks = int(
-            np.ceil(
-                args.tasks_per_maze * args.bucket_budgets["long"]
-            )
-        )
-    if args.minimum_long_eligible_tasks < 0:
-        parser.error("--minimum-long-eligible-tasks must be non-negative.")
 
     if args.output_dir is None:
         args.output_dir = args.output_root / canonical_dataset_name(
@@ -833,10 +703,6 @@ def main() -> None:
         short_max=args.short_max_path_length,
         medium_max=args.medium_max_path_length,
     )
-    per_layout_bucket_quotas = bucket_quotas(
-        args.tasks_per_maze,
-        args.bucket_budgets,
-    )
 
     split_paths = [
         ("train", train_path),
@@ -909,29 +775,29 @@ def main() -> None:
         ) = _load_dataset_arrays(train_path)
     else:
         if args.stratify:
-            train_layouts = generate_layouts(
+            (
+                train_layouts,
+                train_layout_indices,
+                train_starts,
+                train_goals,
+                stratification_metadata,
+            ) = generate_stratified_dataset(
                 seeds=train_seeds,
                 height=args.height,
                 width=args.width,
                 wall_probability=args.wall_probability,
+                tasks_per_maze=args.tasks_per_maze,
                 min_path_length=args.min_path_length,
-                minimum_eligible_tasks=args.min_tasks_per_maze,
-                minimum_long_eligible_tasks=(
-                    args.minimum_long_eligible_tasks
-                ),
-                long_path_min_length=args.medium_max_path_length + 1,
-                required_bucket_counts=per_layout_bucket_quotas,
                 dedupe_threshold=args.dedupe_threshold,
-                selection_random_seed=args.seed,
-                selection_search_budget=args.local_search_budget,
+                bucket_budgets=args.bucket_budgets,
+                random_seed=args.seed,
+                selection_attempts=args.selection_attempts,
+                local_search_budget=args.local_search_budget,
                 difficulty_boundaries=boundaries,
-                progress_callback=_simple_progress_callback(
-                    "Generating training mazes"
+                progress_callback=_stratified_progress_callback(
+                    "Generating stratified training dataset"
                 ),
             )
-            train_layout_indices = None
-            train_starts = None
-            train_goals = None
         else:
             (
                 train_layouts,
@@ -953,36 +819,13 @@ def main() -> None:
 
     if not args.stratify:
         stratification_metadata = None
-    elif not train_path.exists():
-        (
-            train_layout_indices,
-            train_starts,
-            train_goals,
-            stratification_metadata,
-        ) = generate_stratified_tasks_for_layouts(
-            train_layouts,
-            train_seeds,
-            tasks_per_maze=args.tasks_per_maze,
-            min_path_length=args.min_path_length,
-            dedupe_threshold=args.dedupe_threshold,
-            bucket_budgets=args.bucket_budgets,
-            random_seed=args.seed,
-            difficulty_boundaries=boundaries,
-            allocation_attempts=args.allocation_attempts,
-            min_tasks_per_maze=args.min_tasks_per_maze,
-            max_tasks_per_maze=args.max_tasks_per_maze,
-            local_search_budget=args.local_search_budget,
-            global_repair_budget=args.global_repair_budget,
-            progress_callback=_stratified_progress_callback(
-                "Selecting stratified training tasks"
-            ),
-        )
-        _finish_progress()
-    elif stratification_metadata is None:
+    elif train_path.exists() and stratification_metadata is None:
         raise SystemExit(
             "Cannot resume stratified generation: train metadata is "
             "missing from metadata.json."
         )
+    if args.stratify and not train_path.exists():
+        _finish_progress()
 
     if not train_path.exists():
         save_dataset(
@@ -1042,48 +885,27 @@ def main() -> None:
             validation_goals,
         ) = _load_dataset_arrays(validation_path)
     elif args.stratify:
-        validation_layouts = generate_layouts(
-            seeds=validation_seeds,
-            height=args.height,
-            width=args.width,
-            wall_probability=args.wall_probability,
-            min_path_length=args.min_path_length,
-            minimum_eligible_tasks=args.min_tasks_per_maze,
-            minimum_long_eligible_tasks=(
-                args.minimum_long_eligible_tasks
-            ),
-            long_path_min_length=args.medium_max_path_length + 1,
-            required_bucket_counts=per_layout_bucket_quotas,
-            dedupe_threshold=args.dedupe_threshold,
-            selection_random_seed=args.seed + 1,
-            selection_search_budget=args.local_search_budget,
-            difficulty_boundaries=boundaries,
-            progress_callback=_simple_progress_callback(
-                "Generating filtered validation mazes"
-            ),
-        )
-        _finish_progress()
         (
+            validation_layouts,
             validation_layout_indices,
             validation_starts,
             validation_goals,
             validation_metadata,
-        ) = generate_stratified_tasks_for_layouts(
-            validation_layouts,
-            validation_seeds,
+        ) = generate_stratified_dataset(
+            seeds=validation_seeds,
+            height=args.height,
+            width=args.width,
+            wall_probability=args.wall_probability,
             tasks_per_maze=args.tasks_per_maze,
             min_path_length=args.min_path_length,
             dedupe_threshold=args.dedupe_threshold,
             bucket_budgets=args.bucket_budgets,
             random_seed=args.seed + 1,
-            allocation_attempts=args.allocation_attempts,
-            min_tasks_per_maze=args.min_tasks_per_maze,
-            max_tasks_per_maze=args.max_tasks_per_maze,
+            selection_attempts=args.selection_attempts,
             local_search_budget=args.local_search_budget,
-            global_repair_budget=args.global_repair_budget,
             difficulty_boundaries=boundaries,
             progress_callback=_stratified_progress_callback(
-                "Selecting stratified validation tasks"
+                "Generating stratified validation dataset"
             ),
         )
         _finish_progress()
@@ -1136,48 +958,27 @@ def main() -> None:
             validation_tune_goals,
         ) = _load_dataset_arrays(validation_tune_path)
     elif args.stratify:
-        validation_tune_layouts = generate_layouts(
-            seeds=validation_tune_seeds,
-            height=args.height,
-            width=args.width,
-            wall_probability=args.wall_probability,
-            min_path_length=args.min_path_length,
-            minimum_eligible_tasks=args.min_tasks_per_maze,
-            minimum_long_eligible_tasks=(
-                args.minimum_long_eligible_tasks
-            ),
-            long_path_min_length=args.medium_max_path_length + 1,
-            required_bucket_counts=per_layout_bucket_quotas,
-            dedupe_threshold=args.dedupe_threshold,
-            selection_random_seed=args.seed + 3,
-            selection_search_budget=args.local_search_budget,
-            difficulty_boundaries=boundaries,
-            progress_callback=_simple_progress_callback(
-                "Generating filtered validation-tune mazes"
-            ),
-        )
-        _finish_progress()
         (
+            validation_tune_layouts,
             validation_tune_indices,
             validation_tune_starts,
             validation_tune_goals,
             validation_tune_metadata,
-        ) = generate_stratified_tasks_for_layouts(
-            validation_tune_layouts,
-            validation_tune_seeds,
+        ) = generate_stratified_dataset(
+            seeds=validation_tune_seeds,
+            height=args.height,
+            width=args.width,
+            wall_probability=args.wall_probability,
             tasks_per_maze=args.tasks_per_maze,
             min_path_length=args.min_path_length,
             dedupe_threshold=args.dedupe_threshold,
             bucket_budgets=args.bucket_budgets,
             random_seed=args.seed + 3,
-            allocation_attempts=args.allocation_attempts,
-            min_tasks_per_maze=args.min_tasks_per_maze,
-            max_tasks_per_maze=args.max_tasks_per_maze,
+            selection_attempts=args.selection_attempts,
             local_search_budget=args.local_search_budget,
-            global_repair_budget=args.global_repair_budget,
             difficulty_boundaries=boundaries,
             progress_callback=_stratified_progress_callback(
-                "Selecting stratified validation-tune tasks"
+                "Generating stratified validation-tune dataset"
             ),
         )
         _finish_progress()
@@ -1314,48 +1115,27 @@ def main() -> None:
             test_goals,
         ) = _load_dataset_arrays(test_path)
     elif args.stratify:
-        test_layouts = generate_layouts(
-            seeds=test_seeds,
-            height=args.height,
-            width=args.width,
-            wall_probability=args.wall_probability,
-            min_path_length=args.min_path_length,
-            minimum_eligible_tasks=args.min_tasks_per_maze,
-            minimum_long_eligible_tasks=(
-                args.minimum_long_eligible_tasks
-            ),
-            long_path_min_length=args.medium_max_path_length + 1,
-            required_bucket_counts=per_layout_bucket_quotas,
-            dedupe_threshold=args.dedupe_threshold,
-            selection_random_seed=args.seed + 2,
-            selection_search_budget=args.local_search_budget,
-            difficulty_boundaries=boundaries,
-            progress_callback=_simple_progress_callback(
-                "Generating filtered test mazes"
-            ),
-        )
-        _finish_progress()
         (
+            test_layouts,
             test_layout_indices,
             test_starts,
             test_goals,
             test_metadata,
-        ) = generate_stratified_tasks_for_layouts(
-            test_layouts,
-            test_seeds,
+        ) = generate_stratified_dataset(
+            seeds=test_seeds,
+            height=args.height,
+            width=args.width,
+            wall_probability=args.wall_probability,
             tasks_per_maze=args.tasks_per_maze,
             min_path_length=args.min_path_length,
             dedupe_threshold=args.dedupe_threshold,
             bucket_budgets=args.bucket_budgets,
             random_seed=args.seed + 2,
-            allocation_attempts=args.allocation_attempts,
-            min_tasks_per_maze=args.min_tasks_per_maze,
-            max_tasks_per_maze=args.max_tasks_per_maze,
+            selection_attempts=args.selection_attempts,
             local_search_budget=args.local_search_budget,
-            global_repair_budget=args.global_repair_budget,
             difficulty_boundaries=boundaries,
             progress_callback=_stratified_progress_callback(
-                "Selecting stratified test tasks"
+                "Generating stratified test dataset"
             ),
         )
         _finish_progress()

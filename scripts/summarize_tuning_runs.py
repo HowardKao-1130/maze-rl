@@ -220,6 +220,10 @@ SUMMARY_SERIES_STYLES = {
         "linestyle": "-",
     },
 }
+SUMMARY_ARCHITECTURE_FACE_COLORS = {
+    "baseline": "#eef6ff",
+    "residual": "#fff0f0",
+}
 SUMMARY_SCORE_LABELS = {
     "train_greedy": "tg",
     "validation": "v",
@@ -1128,6 +1132,46 @@ def artifact_training_summary_path(
     return (
         artifact["metrics_path"].parent
         / "training_summary.json"
+    )
+
+
+def artifact_network_architecture(
+    artifact: dict[str, Any],
+) -> str | None:
+    training_summary_path = artifact_training_summary_path(
+        artifact
+    )
+
+    if not training_summary_path.exists():
+        return None
+
+    try:
+        training_summary = read_training_summary(
+            training_summary_path
+        )
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(training_summary, dict):
+        return None
+
+    architecture = training_summary.get(
+        "network_architecture"
+    )
+    if architecture is None:
+        hyperparameters = training_summary.get(
+            "hyperparameters",
+            {},
+        )
+        if isinstance(hyperparameters, dict):
+            architecture = hyperparameters.get(
+                "network_architecture"
+            )
+
+    return (
+        architecture
+        if isinstance(architecture, str)
+        else None
     )
 
 
@@ -2586,6 +2630,17 @@ def plot_best_trial_training_summary(
         records,
     ):
         axis.axis("on")
+        architecture_facecolor = (
+            SUMMARY_ARCHITECTURE_FACE_COLORS.get(
+                artifact_network_architecture(
+                    artifact
+                )
+            )
+        )
+        if architecture_facecolor is not None:
+            axis.set_facecolor(
+                architecture_facecolor
+            )
 
         if training_series:
             style = SUMMARY_SERIES_STYLES["train"]
@@ -2882,8 +2937,22 @@ def plot_validation_metric_montage(
                     axis.get_legend_handles_labels()
                 )
 
+            architecture = artifact_network_architecture(
+                artifact
+            )
+            architecture_facecolor = (
+                SUMMARY_ARCHITECTURE_FACE_COLORS.get(
+                    architecture
+                )
+            )
+            if architecture_facecolor is not None:
+                axis.set_facecolor(
+                    architecture_facecolor
+                )
+
             if is_best_trial:
-                axis.set_facecolor("#fffaf0")
+                if architecture_facecolor is None:
+                    axis.set_facecolor("#fffaf0")
                 for spine in axis.spines.values():
                     spine.set_linewidth(2.0)
                     spine.set_edgecolor("#d27d00")

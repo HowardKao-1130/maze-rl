@@ -86,7 +86,6 @@ class DatasetBundlePaths:
             for path in (
                 self.train_tune,
                 self.validation_tune,
-                self.same_layout,
             )
             if not path.exists()
         ]

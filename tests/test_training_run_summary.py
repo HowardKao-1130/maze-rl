@@ -243,14 +243,14 @@ def test_collect_training_run_series_averages_by_epoch(
     )
 
 
-def test_collect_training_run_series_discovers_residual_run(
+def test_collect_training_run_series_discovers_shared_algorithm_run(
     tmp_path,
 ):
     runs_dir = tmp_path / "runs"
     write_metrics_csv(
         runs_dir
         / "residual_run"
-        / "ppo_residual_l2"
+        / "ppo"
         / "metrics.csv",
         [(1, 0.6, True)],
     )
@@ -263,11 +263,11 @@ def test_collect_training_run_series_discovers_residual_run(
     assert len(series) == 1
     assert series[0].algorithm == "ppo"
     assert series[0].label == (
-        "residual_run/ppo_residual_l2"
+        "residual_run/ppo"
     )
 
 
-def test_collect_training_run_series_discovers_mixed_baseline_and_residual_runs(
+def test_collect_training_run_series_discovers_multiple_algorithm_runs(
     tmp_path,
 ):
     runs_dir = tmp_path / "runs"
@@ -278,7 +278,7 @@ def test_collect_training_run_series_discovers_mixed_baseline_and_residual_runs(
     write_metrics_csv(
         runs_dir
         / "residual_run"
-        / "ppo_residual_l2"
+        / "ppo"
         / "metrics.csv",
         [(1, 0.6, True)],
     )
@@ -297,7 +297,7 @@ def test_collect_training_run_series_discovers_mixed_baseline_and_residual_runs(
         for item in series
     } == {
         "baseline_run/ppo",
-        "residual_run/ppo_residual_l2",
+        "residual_run/ppo",
     }
 
 

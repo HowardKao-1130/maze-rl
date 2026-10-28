@@ -36,6 +36,7 @@ from scripts.tune_dnn import (
     sample_hyperparameters,
     sample_hyperparameters_with_optuna,
     summarize_evaluation,
+    tuning_trial_run_dir,
     write_best_config_index,
     tuning_artifacts_are_complete,
     tuning_artifact_paths,
@@ -58,6 +59,7 @@ from scripts.summarize_tuning_runs import (
     plot_best_trial_training_summary,
     plot_path_length_summary,
     plot_validation_metric_montage,
+    SUMMARY_ARCHITECTURE_FACE_COLORS,
     summarize_tuning_runs,
     training_metric_series,
 )
@@ -116,6 +118,47 @@ def test_sample_hyperparameters_uses_space_distributions():
     assert 2 <= sample[
         "update_epochs"
     ] <= 4
+
+
+def test_default_search_spaces_include_architecture_choice():
+    for search_space in DEFAULT_SEARCH_SPACES.values():
+        assert search_space["network_architecture"] == {
+            "type": "choice",
+            "values": ["baseline", "residual"],
+        }
+        assert search_space["kernel_size"]["values"] == [3, 5]
+        assert search_space["base_channels"]["values"] == [16, 32, 64]
+        assert search_space["channel_multiplier"]["values"] == [1, 2]
+        assert search_space["conv_depth"]["values"] == [2, 3, 4]
+        assert search_space["feature_dim"]["values"] == [64, 128, 256]
+        assert search_space["residual_layers"]["values"] == [1, 2, 3, 4]
+
+
+def test_architecture_sampling_is_conditional():
+    search_space = {
+        "network_architecture": {
+            "type": "choice",
+            "values": ["residual"],
+        },
+        "conv_depth": {
+            "type": "choice",
+            "values": [2],
+        },
+        "residual_layers": {
+            "type": "choice",
+            "values": [3],
+        },
+    }
+
+    sample = sample_hyperparameters(
+        search_space,
+        np.random.default_rng(123),
+    )
+
+    assert sample == {
+        "network_architecture": "residual",
+        "residual_layers": 3,
+    }
 
 
 def test_sample_hyperparameters_with_optuna_uses_trial_suggestions():
@@ -223,6 +266,7 @@ def test_parse_args_has_no_default_read_or_save_dirs(monkeypatch):
     assert args.early_stopping_patience == 35
     assert args.q_snapshot_count == 11
     assert args.validation_all_tasks is True
+    assert args.train_greedy is False
     assert args.tensorboard is False
     assert args.tensorboard_from_cli is False
     assert args.sampler == "optuna"
@@ -232,6 +276,12 @@ def test_parse_args_has_no_default_read_or_save_dirs(monkeypatch):
     assert args.validation_dataset is None
     assert args.same_layout_dataset is None
     assert args.test_dataset is None
+    assert getattr(
+        args,
+        "natural_validation_dataset",
+        None,
+    ) is None
+    assert args.disable_natural_validation is False
     assert args.output_dir is None
 
 
@@ -251,6 +301,29 @@ def test_parse_args_accepts_validation_sampling_opt_out(
     args = parse_args()
 
     assert args.validation_all_tasks is False
+
+
+def test_parse_args_accepts_auxiliary_validation_opt_outs(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "tune_dnn.py",
+            "--algorithm",
+            "ppo",
+            "--no-train-greedy",
+            "--disable-same-layout",
+            "--disable-natural-validation",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.train_greedy is False
+    assert args.train_greedy_from_cli is True
+    assert args.disable_same_layout is True
+    assert args.disable_natural_validation is True
 
 
 def test_tuning_experiment_output_dir_uses_train_metadata(
@@ -319,12 +392,12 @@ def test_dataset_bundle_resolution_infers_splits_and_output(
     assert args.validation_dataset == (
         resolved_dataset_dir / "validation_tune.npz"
     )
-    assert args.same_layout_dataset == (
-        resolved_dataset_dir / "same_layout_new_goals.npz"
-    )
-    assert args.natural_validation_dataset == (
-        resolved_dataset_dir / "validation_natural.npz"
-    )
+    assert args.same_layout_dataset is None
+    assert getattr(
+        args,
+        "natural_validation_dataset",
+        None,
+    ) is None
     assert args.test_dataset == (
         resolved_dataset_dir / "test.npz"
     )
@@ -573,7 +646,10 @@ def test_resume_config_allows_tensorboard_cli_override():
             "same_layout_dataset": (
                 "data/datasets/dataset_200x50x50_t5_seed42/same_layout_new_goals.npz"
             ),
-            "natural_validation_dataset": None,
+            "train_greedy": True,
+            "natural_validation_dataset": (
+                "data/datasets/dataset_200x50x50_t5_seed42/validation_natural.npz"
+            ),
             "test_dataset": "data/datasets/dataset_200x50x50_t5_seed42/test.npz",
             "natural_test_dataset": None,
             "evaluate_best_on_test": False,
@@ -592,6 +668,11 @@ def test_resume_config_allows_tensorboard_cli_override():
         hyperparameter_combinations_from_cli=True,
         tensorboard=False,
         tensorboard_from_cli=True,
+        train_greedy=False,
+        train_greedy_from_cli=True,
+        disable_same_layout=True,
+        disable_natural_validation=True,
+        natural_validation_from_cli=False,
     )
 
     apply_tuning_config(
@@ -601,6 +682,9 @@ def test_resume_config_allows_tensorboard_cli_override():
 
     assert args.hyperparameter_combinations == 20
     assert args.tensorboard is False
+    assert args.train_greedy is False
+    assert args.same_layout_dataset is None
+    assert args.natural_validation_dataset is None
     assert args.sampler == "random"
     assert args.validation_all_tasks is True
 
@@ -1415,6 +1499,12 @@ def test_training_command_includes_trial_hyperparameters(tmp_path):
             "minibatch_size": 32,
             "task_batch_size": 64,
             "rollout_group_size": 1,
+            "network_architecture": "residual",
+            "residual_layers": 3,
+            "kernel_size": 5,
+            "base_channels": 16,
+            "channel_multiplier": 2,
+            "feature_dim": 64,
         },
     )
 
@@ -1427,6 +1517,24 @@ def test_training_command_includes_trial_hyperparameters(tmp_path):
     assert command[
         command.index("--learning-rate") + 1
     ] == "0.0003"
+    assert command[
+        command.index("--network-architecture") + 1
+    ] == "residual"
+    assert command[
+        command.index("--residual-layers") + 1
+    ] == "3"
+    assert command[
+        command.index("--kernel-size") + 1
+    ] == "5"
+    assert command[
+        command.index("--base-channels") + 1
+    ] == "16"
+    assert command[
+        command.index("--channel-multiplier") + 1
+    ] == "2"
+    assert command[
+        command.index("--feature-dim") + 1
+    ] == "64"
     assert command[
         command.index("--validation-dataset") + 1
     ] == str(tmp_path / "validation.npz")
@@ -1459,6 +1567,19 @@ def test_training_command_includes_trial_hyperparameters(tmp_path):
     ] == "7"
 
 
+def test_tuning_trial_run_dir_uses_shared_algorithm_directory(
+    tmp_path,
+):
+    assert tuning_trial_run_dir(
+        tmp_path / "trial_001",
+        "ppo",
+        {
+            "network_architecture": "residual",
+            "residual_layers": 4,
+        },
+    ) == tmp_path / "trial_001" / "ppo"
+
+
 def test_training_command_can_opt_out_of_all_validation_tasks(
     tmp_path,
 ):
@@ -1488,6 +1609,42 @@ def test_training_command_can_opt_out_of_all_validation_tasks(
 
     assert "--no-validation-all-tasks" in command
     assert "--validation-all-tasks" not in command
+    assert "--same-layout-dataset" not in command
+    assert "--no-same-layout-dataset" in command
+    assert "--no-train-greedy" in command
+
+
+def test_training_command_propagates_natural_validation_disable(
+    tmp_path,
+):
+    args = SimpleNamespace(
+        algorithm="ppo",
+        rollouts_per_task=3,
+        max_steps=7,
+        validation_dataset=tmp_path / "validation.npz",
+        same_layout_dataset=None,
+        natural_validation_dataset=None,
+        disable_natural_validation=True,
+        validation_all_tasks=True,
+        early_stopping_patience=4,
+        early_stopping_min_delta=0.0,
+        q_snapshot_count=7,
+        tensorboard=False,
+        keep_plots=False,
+    )
+
+    command = build_training_command(
+        args=args,
+        trial_dir=tmp_path / "trial",
+        train_dataset=tmp_path / "train.npz",
+        trial_seed=11,
+        hyperparameters={
+            "learning_rate": 0.0003,
+        },
+    )
+
+    assert "--no-natural-validation-dataset" in command
+    assert "--natural-validation-dataset" not in command
 
 
 def test_training_command_keeps_plots_when_requested(tmp_path):
@@ -2519,6 +2676,9 @@ def test_best_trial_training_summary_plots_one_trial_per_agent(
         same_layout_score=0.7,
         training_score=0.6,
         completed=False,
+        hyperparameters={
+            "network_architecture": "residual",
+        },
     )
     write_fake_validation_artifacts(
         output_dir
@@ -2529,6 +2689,9 @@ def test_best_trial_training_summary_plots_one_trial_per_agent(
         same_layout_score=0.45,
         training_score=0.55,
         completed=True,
+        hyperparameters={
+            "network_architecture": "baseline",
+        },
     )
     write_fake_validation_artifacts(
         output_dir
@@ -2546,6 +2709,7 @@ def test_best_trial_training_summary_plots_one_trial_per_agent(
     saved_figures = []
 
     import matplotlib.figure
+    from matplotlib.colors import to_rgba
 
     def fake_savefig(
         self,
@@ -2557,6 +2721,10 @@ def test_best_trial_training_summary_plots_one_trial_per_agent(
             {
                 "path": path,
                 "axis_count": len(self.axes),
+                "facecolors": [
+                    axis.get_facecolor()
+                    for axis in self.axes
+                ],
                 "line_counts": [
                     len(axis.lines)
                     for axis in self.axes
@@ -2614,6 +2782,18 @@ def test_best_trial_training_summary_plots_one_trial_per_agent(
                 / "mean_path_efficiency_best_trial_training_history_summary.png"
             ),
             "axis_count": 2,
+            "facecolors": [
+                to_rgba(
+                    SUMMARY_ARCHITECTURE_FACE_COLORS[
+                        "residual"
+                    ]
+                ),
+                to_rgba(
+                    SUMMARY_ARCHITECTURE_FACE_COLORS[
+                        "baseline"
+                    ]
+                ),
+            ],
             "line_counts": [
                 4,
                 4,
@@ -2853,6 +3033,91 @@ def test_validation_metric_montage_uses_single_5_by_4_sheet_for_twenty_trials(
             ),
             "axis_count": 20,
         }
+    ]
+
+
+def test_validation_metric_montage_colors_network_architectures(
+    tmp_path,
+    monkeypatch,
+):
+    output_dir = tmp_path / "tuning"
+    write_fake_validation_artifacts(
+        output_dir
+        / "trials"
+        / "trial_001"
+        / "ppo",
+        validation_score=0.5,
+        same_layout_score=0.25,
+        hyperparameters={
+            "network_architecture": "baseline",
+        },
+    )
+    write_fake_validation_artifacts(
+        output_dir
+        / "trials"
+        / "trial_002"
+        / "ppo",
+        validation_score=0.4,
+        same_layout_score=0.2,
+        hyperparameters={
+            "network_architecture": "residual",
+        },
+    )
+
+    artifacts = discover_validation_metric_artifacts(
+        output_dir
+    )
+    saved_figures = []
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.figure
+    from matplotlib.colors import to_rgba
+
+    def fake_savefig(
+        self,
+        path,
+        *args,
+        **kwargs,
+    ):
+        saved_figures.append(
+            [
+                axis.get_facecolor()
+                for axis in self.axes[:2]
+            ]
+        )
+
+    monkeypatch.setattr(
+        matplotlib.figure.Figure,
+        "savefig",
+        fake_savefig,
+    )
+
+    assert plot_validation_metric_montage(
+        artifacts,
+        algorithm="ppo",
+        metric="mean_path_efficiency",
+        output_path=(
+            tmp_path
+            / "summary"
+            / "ppo_validation_metrics_trials.png"
+        ),
+    ) == 2
+
+    assert saved_figures == [
+        [
+            to_rgba(
+                SUMMARY_ARCHITECTURE_FACE_COLORS[
+                    "baseline"
+                ]
+            ),
+            to_rgba(
+                SUMMARY_ARCHITECTURE_FACE_COLORS[
+                    "residual"
+                ]
+            ),
+        ]
     ]
 
 
@@ -4255,6 +4520,24 @@ def test_load_search_space_allows_training_loop_parameters(tmp_path):
 
     assert "task_batch_size" in search_space
     assert "rollout_group_size" in search_space
+
+
+def test_load_search_space_allows_network_architecture(tmp_path):
+    path = tmp_path / "space.json"
+    path.write_text(
+        '{"network_architecture": {"type": "choice", '
+        '"values": ["baseline", "residual"]}}'
+    )
+
+    search_space = load_search_space(
+        "ppo",
+        path,
+    )
+
+    assert search_space["network_architecture"]["values"] == [
+        "baseline",
+        "residual",
+    ]
 
 
 def test_load_search_space_allows_dqn_train_frequency(tmp_path):

@@ -7,6 +7,11 @@ from torch.distributions import Categorical
 
 from maze_rl.agents.networks import (
     ActorCriticNetwork,
+    DEFAULT_BASE_CHANNELS,
+    DEFAULT_CHANNEL_MULTIPLIER,
+    DEFAULT_CONV_DEPTH,
+    DEFAULT_FEATURE_DIM,
+    DEFAULT_KERNEL_SIZE,
     DEFAULT_RESIDUAL_LAYERS,
 )
 
@@ -28,6 +33,11 @@ class A2CAgent:
         minibatch_size: int = 64,
         network_architecture: str = "baseline",
         residual_layers: int = DEFAULT_RESIDUAL_LAYERS,
+        feature_dim: int = DEFAULT_FEATURE_DIM,
+        kernel_size: int = DEFAULT_KERNEL_SIZE,
+        base_channels: int = DEFAULT_BASE_CHANNELS,
+        channel_multiplier: int = DEFAULT_CHANNEL_MULTIPLIER,
+        conv_depth: int = DEFAULT_CONV_DEPTH,
     ) -> None:
         self.device = device
         self.gamma = gamma
@@ -55,6 +65,11 @@ class A2CAgent:
             action_count,
             network_architecture=network_architecture,
             residual_layers=residual_layers,
+            feature_dim=feature_dim,
+            kernel_size=kernel_size,
+            base_channels=base_channels,
+            channel_multiplier=channel_multiplier,
+            conv_depth=conv_depth,
         ).to(device)
 
         self.optimizer = torch.optim.Adam(

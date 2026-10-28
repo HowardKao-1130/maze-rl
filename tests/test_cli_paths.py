@@ -141,7 +141,7 @@ def make_metrics(
     )
 
 
-def test_default_checkpoint_path_uses_algorithm_specific_suffix():
+def test_default_checkpoint_path_uses_algorithm_directory():
     assert default_checkpoint_path(
         "q_learning"
     ) == Path("runs/tabular/training/q_learning/checkpoint.pkl")
@@ -152,27 +152,27 @@ def test_default_checkpoint_path_uses_algorithm_specific_suffix():
     )
 
 
-def test_default_checkpoint_path_finds_existing_residual_run(
+def test_default_checkpoint_path_uses_shared_neural_directory(
     monkeypatch,
     tmp_path,
 ):
-    residual_path = (
+    checkpoint_path = (
         tmp_path
         / "training"
-        / "ppo_residual_l2"
+        / "ppo"
         / "checkpoint.pt"
     )
-    residual_path.parent.mkdir(parents=True)
-    residual_path.touch()
+    checkpoint_path.parent.mkdir(parents=True)
+    checkpoint_path.touch()
     monkeypatch.setattr(
         "scripts.evaluate.DEFAULT_EXPERIMENT_OUTPUT_ROOT",
         tmp_path,
     )
 
-    assert default_checkpoint_path("ppo") == residual_path
+    assert default_checkpoint_path("ppo") == checkpoint_path
 
 
-def test_default_checkpoint_path_prefers_existing_baseline_run(
+def test_default_checkpoint_path_uses_canonical_run_directory(
     monkeypatch,
     tmp_path,
 ):
@@ -182,16 +182,8 @@ def test_default_checkpoint_path_prefers_existing_baseline_run(
         / "ppo"
         / "checkpoint.pt"
     )
-    residual_path = (
-        tmp_path
-        / "training"
-        / "ppo_residual_l2"
-        / "checkpoint.pt"
-    )
     baseline_path.parent.mkdir(parents=True)
-    residual_path.parent.mkdir(parents=True)
     baseline_path.touch()
-    residual_path.touch()
     monkeypatch.setattr(
         "scripts.evaluate.DEFAULT_EXPERIMENT_OUTPUT_ROOT",
         tmp_path,
@@ -636,7 +628,7 @@ def test_training_uses_baseline_network_by_default(monkeypatch):
     assert args.residual_layers == 2
 
 
-def test_output_algorithm_name_separates_residual_runs():
+def test_output_algorithm_name_uses_shared_algorithm_directory():
     assert output_algorithm_name(
         "ppo",
         "baseline",
@@ -644,18 +636,18 @@ def test_output_algorithm_name_separates_residual_runs():
     assert output_algorithm_name(
         "ppo",
         "residual",
-    ) == "ppo_residual_l2"
+    ) == "ppo"
 
 
-def test_resume_finds_residual_state_without_architecture_cli_option(
+def test_resume_uses_shared_algorithm_state_directory(
     tmp_path,
 ):
-    residual_state_path = (
+    state_path = (
         tmp_path
-        / "ppo_residual_l2"
+        / "ppo"
         / "training_state.pt"
     )
-    residual_state_path.parent.mkdir()
+    state_path.parent.mkdir()
     torch.save(
         {
             "metadata": {
@@ -663,7 +655,7 @@ def test_resume_finds_residual_state_without_architecture_cli_option(
                 "network_architecture": "residual",
             },
         },
-        residual_state_path,
+        state_path,
     )
 
     resolved_path = resolve_resume_training_state_path(
@@ -673,7 +665,7 @@ def test_resume_finds_residual_state_without_architecture_cli_option(
         network_architecture_was_provided=False,
     )
 
-    assert resolved_path == residual_state_path
+    assert resolved_path == state_path
 
 
 def test_training_accepts_residual_network_configuration(
@@ -773,8 +765,26 @@ def test_training_matches_tuning_early_stopping_defaults(monkeypatch):
     args = parse_train_args()
 
     assert args.validation_all_tasks is True
+    assert args.train_greedy is True
     assert args.early_stopping_patience == 35
     assert args.early_stopping_min_delta == 0.0
+
+
+def test_training_accepts_no_natural_validation_dataset(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "ppo",
+            "--no-natural-validation-dataset",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.natural_validation_dataset is None
+    assert args.disable_natural_validation_dataset is True
 
 
 def test_training_accepts_no_progress(monkeypatch):
@@ -1525,6 +1535,36 @@ def test_resolve_dataset_bundle_args_infers_splits_and_output(
     )
 
 
+def test_resolve_dataset_bundle_args_can_disable_natural_validation(
+    tmp_path,
+):
+    dataset_dir = tmp_path / "dataset_5000x500x500_t5_seed42"
+    dataset_dir.mkdir()
+    for name in (
+        "train.npz",
+        "validation.npz",
+        "same_layout_new_goals.npz",
+        "validation_natural.npz",
+    ):
+        (dataset_dir / name).write_bytes(name.encode())
+
+    args = SimpleNamespace(
+        algorithm="ppo",
+        dataset=dataset_dir,
+        validation_dataset=None,
+        same_layout_dataset=None,
+        natural_validation_dataset=None,
+        disable_natural_validation_dataset=True,
+        output_dir=None,
+        experiment_name=None,
+        experiment_root=tmp_path / "runs",
+    )
+
+    resolve_dataset_bundle_args(args)
+
+    assert args.natural_validation_dataset is None
+
+
 def test_train_dataset_bundle_dir_for_reference_expands_dataset_name():
     assert dataset_bundle_dir_for_reference(
         Path("dataset_5000x500x500_t5_seed42")
@@ -1749,6 +1789,9 @@ def test_load_best_config_overrides_reads_algorithm_index(tmp_path):
                         "gamma": 0.97,
                         "task_batch_size": 32,
                         "rollout_group_size": 1,
+                        "network_architecture": "residual",
+                        "residual_layers": 3,
+                        "kernel_size": 5,
                     },
                 },
             }
@@ -1764,9 +1807,13 @@ def test_load_best_config_overrides_reads_algorithm_index(tmp_path):
     assert overrides.hyperparameters == {
         "learning_rate": 0.0001,
         "gamma": 0.97,
+        "kernel_size": 5,
     }
     assert overrides.task_batch_size == 32
     assert overrides.rollout_group_size == 1
+    assert overrides.network_architecture == "residual"
+    assert overrides.residual_layers == 3
+    assert overrides.hyperparameters["kernel_size"] == 5
 
 
 def test_load_best_config_overrides_reads_algorithm_file(tmp_path):
@@ -1872,21 +1919,21 @@ def test_default_tensorboard_dir_uses_algorithm_run_directory():
     )
 
 
-def test_default_tensorboard_dir_finds_existing_residual_logs(
+def test_default_tensorboard_dir_uses_shared_algorithm_directory(
     tmp_path,
 ):
-    residual_path = (
+    tensorboard_path = (
         tmp_path
-        / "ppo_residual_l2"
+        / "ppo"
         / "tensorboard"
     )
-    residual_path.mkdir(parents=True)
-    (residual_path / "events.out.tfevents.test").touch()
+    tensorboard_path.mkdir(parents=True)
+    (tensorboard_path / "events.out.tfevents.test").touch()
 
     assert default_tensorboard_dir(
         "ppo",
         runs_dir=tmp_path,
-    ) == residual_path
+    ) == tensorboard_path
 
 
 def test_default_tensorboard_dir_prefers_baseline_logs(
@@ -1897,15 +1944,8 @@ def test_default_tensorboard_dir_prefers_baseline_logs(
         / "ppo"
         / "tensorboard"
     )
-    residual_path = (
-        tmp_path
-        / "ppo_residual_l2"
-        / "tensorboard"
-    )
     baseline_path.mkdir(parents=True)
-    residual_path.mkdir(parents=True)
     (baseline_path / "events.out.tfevents.baseline").touch()
-    (residual_path / "events.out.tfevents.residual").touch()
 
     assert default_tensorboard_dir(
         "ppo",
@@ -2333,6 +2373,18 @@ def test_train_greedy_validation_skipped_for_legacy_resume(
     assert not should_record_train_greedy_validation(
         resuming=True,
         validation_metrics_path=metrics_path,
+    )
+
+
+def test_train_greedy_validation_can_be_disabled(
+    tmp_path,
+):
+    assert not should_record_train_greedy_validation(
+        enabled=False,
+        resuming=False,
+        validation_metrics_path=(
+            tmp_path / "validation_metrics.csv"
+        ),
     )
 
 

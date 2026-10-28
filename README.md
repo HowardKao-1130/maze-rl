@@ -156,11 +156,11 @@ unused by default and the medium:long ratio is 3:2. Stratified dataset names rec
 these settings, for example
 `stratified_s00_m60_l40_dedupe070`.
 
-In stratified mode, every filtered split requires enough candidate geometry
-for the configured long-task quota before task selection begins. The default
-minimum is `ceil(tasks-per-maze * long-budget)` candidates per layout; override
-it with `--minimum-long-eligible-tasks`. This prevents a layout from being
-accepted when its geometry cannot support long tasks.
+In stratified mode, each candidate layout is indexed once and must have enough
+candidate geometry for every requested bucket. The complete fixed per-layout
+task assignment is selected before the layout is accepted; selected task pairs
+are retained, so the generator does not perform a second indexing or task
+selection pass.
 
 The filtered/stratified validation and test splits use shared absolute
 difficulty boundaries. By default, short tasks are unused, the minimum path
@@ -170,8 +170,8 @@ length is `3`, Medium tasks have length `3-15`, and Long tasks have length
 quota to every layout; with the defaults, every layout starts with three
 Medium and two Long tasks. Layouts must have enough raw candidates and must
 successfully produce that fixed assignment under the configured deduplication
-search. Tasks are never transferred between layouts. Search diagnostics are
-recorded in `metadata.json`.
+search. Tasks are never transferred between layouts. Generation and selection
+attempt counts are recorded in `metadata.json`.
 
 Generation saves each completed split immediately. If generation is
 interrupted, rerun with `--resume` to load existing split files and generate
@@ -332,7 +332,9 @@ python scripts/train.py --algorithm dqn --rollouts-per-task 20 --learning-rate 0
 
 Neural agents use the original two-convolution encoder by default. A residual
 encoder can be selected explicitly; `--residual-layers` controls the number of
-residual blocks and defaults to 2:
+residual blocks and defaults to 2. Encoder design can also be configured with
+`--kernel-size`, `--base-channels`, `--channel-multiplier`, `--conv-depth`, and
+`--feature-dim`:
 
 ```bash
 python scripts/train.py --algorithm ppo --network-architecture residual --residual-layers 2
@@ -340,9 +342,10 @@ python scripts/train.py --algorithm ppo --network-architecture residual --residu
 
 The selected architecture is stored in checkpoints and training state, so
 evaluation and resume automatically reconstruct the matching encoder.
-Residual runs append the architecture and depth to the algorithm output
-directory; for example, two-block PPO residual runs are stored under
-`ppo_residual_l2` while baseline PPO runs remain under `ppo`.
+All architectures for an algorithm use the same output directory; for
+example, both baseline and residual PPO runs are stored under `ppo`. The
+selected architecture and depth are recorded in checkpoints and training
+state, so evaluation and resume reconstruct the matching encoder.
 
 For DNN agents, `--task-batch-size` controls how many distinct tasks are
 sampled for a training round, and `--rollout-group-size` controls how many
@@ -459,8 +462,8 @@ python scripts/tune_dnn.py --algorithm ppo --dataset dataset_5000x500x500_t5_see
 
 The tuner requires an explicit dataset or split paths. With a dataset
 name, it reads `data/datasets/<dataset>/train_tune.npz`,
-`validation.npz`, `validation_tune.npz`, `same_layout_new_goals.npz`, and
-`validation_natural.npz`, samples 20 hyperparameter
+`validation_tune.npz`, and, when present, `validation_natural.npz`, samples
+20 hyperparameter
 combinations with Optuna's TPE sampler and a 200 rollouts-per-task maximum
 budget per combination, stores per-combination trial directories under the
 matching
@@ -475,6 +478,13 @@ arguments and effective search space for controlled resumes. Pass
 `--hyperparameter-combinations` to change the number of sampled combinations,
 or pass
 `--search-space path/to/search_space.json` to override the default search space.
+The default search space jointly tunes `network_architecture` (`baseline` or
+`residual`), kernel size, channel width and growth, feature dimension, and
+model depth. `conv_depth` applies to baseline encoders, while
+`residual_layers` applies to residual encoders; irrelevant branch-specific
+parameters are omitted from that trial. Pooling is not tuned and remains
+disabled. Define the full search space before starting a sweep so later
+`--resume` runs reuse the stored dimensions.
 Optuna's TPE sampler is the default. From the repository root, install the
 local package extra with `python -m pip install -e '.[tuning]'`, or install
 Optuna directly with `python -m pip install optuna`. Use
@@ -499,9 +509,15 @@ Increasing it usually improves final performance but also changes compute cost,
 so it is best treated as a generous fixed maximum budget for the sweep. The
 tuner requires `train_tune.npz` and `validation_tune.npz` in the same
 bundle and uses them as `train-tune` and `val-tune` for child-run training,
-evaluation, early stopping, and combination selection. It also
-evaluates `val-same` and `val-natural`, saves each combination's
-`best_checkpoint.pt`, and leaves the ordinary `checkpoint.pt` as the training
+evaluation, early stopping, and combination selection. Tuning disables
+`train-greedy`, `val-same`, and `val-natural` by default; `--train-greedy`, an
+explicit `--same-layout-dataset`, or an explicit `--natural-validation-dataset`
+can re-enable them. When resuming an older tuning run, pass
+`--no-train-greedy --disable-same-layout --disable-natural-validation` to
+override its stored settings; these disable options are propagated to resumed
+child training processes so stored validation metadata cannot re-enable them.
+It saves each combination's
+`best_checkpoint.pt` and leaves the ordinary `checkpoint.pt` as the training
 state.
 
 After tuning, train a longer final run from the stored best hyperparameter

@@ -31,6 +31,7 @@ for import_path in [
         )
 
 from scripts.train import (
+    DEFAULT_RESIDUAL_LAYERS,
     NEURAL_ALGORITHMS,
     NEURAL_HYPERPARAMETERS,
 )
@@ -273,6 +274,44 @@ TRAINING_LOOP_PARAMETERS = {
     "task_batch_size",
     "rollout_group_size",
 }
+TUNABLE_ARCHITECTURE_PARAMETERS = {
+    "network_architecture",
+    "residual_layers",
+}
+
+for _search_space in DEFAULT_SEARCH_SPACES.values():
+    _search_space.update(
+        {
+            "kernel_size": {
+                "type": "choice",
+                "values": [3, 5],
+            },
+            "base_channels": {
+                "type": "choice",
+                "values": [16, 32, 64],
+            },
+            "channel_multiplier": {
+                "type": "choice",
+                "values": [1, 2],
+            },
+            "conv_depth": {
+                "type": "choice",
+                "values": [2, 3, 4],
+            },
+            "feature_dim": {
+                "type": "choice",
+                "values": [64, 128, 256],
+            },
+            "residual_layers": {
+                "type": "choice",
+                "values": [1, 2, 3, 4],
+            },
+        }
+    )
+    _search_space["network_architecture"] = {
+        "type": "choice",
+        "values": ["baseline", "residual"],
+    }
 
 TRAINING_LOOP_PARAMETER_ALIASES = {
     "rollout_episodes": "task_batch_size",
@@ -317,6 +356,7 @@ TUNING_ARGUMENT_FIELDS = [
     "validation_dataset",
     "same_layout_dataset",
     "natural_validation_dataset",
+    "train_greedy",
     "test_dataset",
     "natural_test_dataset",
     "evaluate_best_on_test",
@@ -466,8 +506,7 @@ def parse_args(
             "Dataset bundle name under data/datasets, containing "
             "train.npz, train_tune.npz, validation.npz, "
             "validation_tune.npz, "
-            "same_layout_new_goals.npz, "
-            "validation_natural.npz, and optionally test.npz and "
+            "optionally validation_natural.npz, test.npz, and "
             "test_natural.npz. Also determines the tuning "
             "output directory unless --output-dir or "
             "--experiment-name is provided."
@@ -503,6 +542,14 @@ def parse_args(
         ),
     )
     parser.add_argument(
+        "--disable-same-layout",
+        action="store_true",
+        help=(
+            "Disable val-same, including when resuming a tuning "
+            "config that recorded a same-layout dataset."
+        ),
+    )
+    parser.add_argument(
         "--natural-validation-dataset",
         type=Path,
         default=None,
@@ -510,6 +557,15 @@ def parse_args(
             "Explicit natural-layout validation split to monitor "
             "beside the primary val split. Prefer --dataset for "
             "standard dataset bundles."
+        ),
+    )
+    parser.add_argument(
+        "--train-greedy",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Record train-greedy validation metrics in tuning child "
+            "runs. Defaults to disabled."
         ),
     )
     parser.add_argument(
@@ -538,6 +594,14 @@ def parse_args(
             "After tuning, evaluate the best validation "
             "hyperparameter combination on the held-out test "
             "dataset."
+        ),
+    )
+    parser.add_argument(
+        "--disable-natural-validation",
+        action="store_true",
+        help=(
+            "Disable val-natural, including when resuming a tuning "
+            "config that recorded it."
         ),
     )
     parser.add_argument(
@@ -611,7 +675,9 @@ def parse_args(
             "hyperparameters. Existing tuning history uses the "
             "stored tuning arguments except explicit CLI "
             "overrides such as --hyperparameter-combinations "
-            "and --[no-]tensorboard."
+            ", --[no-]tensorboard, --[no-]train-greedy, and "
+            "--disable-same-layout, and "
+            "--disable-natural-validation."
         ),
     )
     parser.add_argument(
@@ -624,16 +690,39 @@ def parse_args(
     )
 
     args = parser.parse_args(argv)
+    if (
+        args.disable_same_layout
+        and args.same_layout_dataset is not None
+    ):
+        parser.error(
+            "--disable-same-layout cannot be combined with "
+            "--same-layout-dataset."
+        )
+    if (
+        args.disable_natural_validation
+        and args.natural_validation_dataset is not None
+    ):
+        parser.error(
+            "--disable-natural-validation cannot be combined with "
+            "--natural-validation-dataset."
+        )
     args.hyperparameter_combinations_from_cli = (
         args.hyperparameter_combinations is not None
     )
     args.tensorboard_from_cli = args.tensorboard is not None
+    args.train_greedy_from_cli = args.train_greedy is not None
+    args.natural_validation_from_cli = (
+        args.natural_validation_dataset is not None
+    )
 
     if args.hyperparameter_combinations is None:
         args.hyperparameter_combinations = 20
 
     if args.tensorboard is None:
         args.tensorboard = False
+
+    if args.train_greedy is None:
+        args.train_greedy = False
 
     return args
 
@@ -768,9 +857,8 @@ def load_search_space(
     valid_parameters = set(
         NEURAL_HYPERPARAMETERS[algorithm]
     )
-    valid_parameters.update(
-        TRAINING_LOOP_PARAMETERS
-    )
+    valid_parameters.update(TRAINING_LOOP_PARAMETERS)
+    valid_parameters.update(TUNABLE_ARCHITECTURE_PARAMETERS)
 
     unsupported = sorted(
         set(data) - valid_parameters
@@ -794,14 +882,40 @@ def load_search_space(
 def sample_hyperparameters(
     search_space: dict[str, dict[str, Any]],
     rng: np.random.Generator,
-) -> dict[str, float | int]:
-    return {
-        name: sample_from_spec(
+) -> dict[str, float | int | str]:
+    hyperparameters = {}
+    architecture = None
+    architecture_spec = search_space.get(
+        "network_architecture"
+    )
+    if architecture_spec is not None:
+        architecture = sample_from_spec(
+            architecture_spec,
+            rng,
+        )
+        hyperparameters["network_architecture"] = architecture
+
+    for name, spec in search_space.items():
+        if name == "network_architecture":
+            continue
+        if (
+            architecture is not None
+            and name == "conv_depth"
+            and architecture == "residual"
+        ):
+            continue
+        if (
+            architecture is not None
+            and name == "residual_layers"
+            and architecture == "baseline"
+        ):
+            continue
+        hyperparameters[name] = sample_from_spec(
             spec,
             rng,
         )
-        for name, spec in search_space.items()
-    }
+
+    return hyperparameters
 
 
 def sample_from_optuna_spec(
@@ -863,15 +977,42 @@ def sample_from_optuna_spec(
 def sample_hyperparameters_with_optuna(
     search_space: dict[str, dict[str, Any]],
     trial: Any,
-) -> dict[str, float | int]:
-    return {
-        name: sample_from_optuna_spec(
+) -> dict[str, float | int | str]:
+    hyperparameters = {}
+    architecture = None
+    architecture_spec = search_space.get(
+        "network_architecture"
+    )
+    if architecture_spec is not None:
+        architecture = sample_from_optuna_spec(
+            "network_architecture",
+            architecture_spec,
+            trial,
+        )
+        hyperparameters["network_architecture"] = architecture
+
+    for name, spec in search_space.items():
+        if name == "network_architecture":
+            continue
+        if (
+            architecture is not None
+            and name == "conv_depth"
+            and architecture == "residual"
+        ):
+            continue
+        if (
+            architecture is not None
+            and name == "residual_layers"
+            and architecture == "baseline"
+        ):
+            continue
+        hyperparameters[name] = sample_from_optuna_spec(
             name,
             spec,
             trial,
         )
-        for name, spec in search_space.items()
-    }
+
+    return hyperparameters
 
 
 def create_optuna_study(
@@ -962,6 +1103,7 @@ def build_tuning_config(
                 getattr(
                     args,
                     name,
+                    False if name == "train_greedy" else None,
                 ),
             )
             for name in TUNING_ARGUMENT_FIELDS
@@ -1015,6 +1157,7 @@ def read_tuning_config(
         name
         for name in TUNING_ARGUMENT_FIELDS
         if name not in arguments
+        and name != "train_greedy"
     ]
     if missing_arguments:
         raise ValueError(
@@ -1092,9 +1235,55 @@ def apply_tuning_config(
         ):
             continue
 
-        argument_name = name
+        if (
+            name == "train_greedy"
+            and getattr(
+                args,
+                "train_greedy_from_cli",
+                False,
+            )
+        ):
+            continue
 
+        if (
+            name == "same_layout_dataset"
+            and getattr(
+                args,
+                "disable_same_layout",
+                False,
+            )
+        ):
+            args.same_layout_dataset = None
+            continue
+
+        if (
+            name == "natural_validation_dataset"
+            and (
+                getattr(
+                    args,
+                    "disable_natural_validation",
+                    False,
+                )
+                or getattr(
+                    args,
+                    "natural_validation_from_cli",
+                    False,
+                )
+            )
+        ):
+            if getattr(
+                args,
+                "disable_natural_validation",
+                False,
+            ):
+                args.natural_validation_dataset = None
+            continue
+
+        argument_name = name
         if argument_name not in arguments:
+            if name == "train_greedy":
+                setattr(args, name, True)
+                continue
             raise ValueError(
                 "Stored tuning config is missing argument "
                 f"{name!r}."
@@ -1127,6 +1316,26 @@ def tuning_results_has_algorithm(
         )
 
 
+def tuning_algorithm_dirs(
+    trial_dir: Path,
+    algorithm: str,
+) -> list[Path]:
+    algorithm_dir = trial_dir / algorithm
+    if not algorithm_dir.is_dir():
+        return []
+
+    return [algorithm_dir]
+
+
+def tuning_trial_run_dir(
+    trial_dir: Path,
+    algorithm: str,
+    hyperparameters: dict[str, Any],
+) -> Path:
+    del hyperparameters
+    return trial_dir / algorithm
+
+
 def tuning_trial_artifacts_exist(
     output_dir: Path,
     algorithm: str,
@@ -1137,7 +1346,7 @@ def tuning_trial_artifacts_exist(
         return False
 
     return any(
-        (trial_dir / algorithm).exists()
+        tuning_algorithm_dirs(trial_dir, algorithm)
         for trial_dir in trials_dir.iterdir()
         if trial_dir.is_dir()
     )
@@ -1190,12 +1399,14 @@ def tuning_artifact_paths(
 
     trials_dir = output_dir / "trials"
     if trials_dir.exists():
-        paths.extend(
-            trial_dir / algorithm
-            for trial_dir in trials_dir.iterdir()
-            if trial_dir.is_dir()
-            and (trial_dir / algorithm).exists()
-        )
+        for trial_dir in trials_dir.iterdir():
+            if trial_dir.is_dir():
+                paths.extend(
+                    tuning_algorithm_dirs(
+                        trial_dir,
+                        algorithm,
+                    )
+                )
 
     return [path for path in paths if path.exists()]
 
@@ -1366,11 +1577,11 @@ def remove_existing_tuning_artifacts(
     trials_dir = output_dir / "trials"
     if trials_dir.exists():
         for trial_dir in trials_dir.iterdir():
-            algorithm_dir = trial_dir / algorithm
-            if algorithm_dir.is_dir():
+            for algorithm_dir in tuning_algorithm_dirs(
+                trial_dir,
+                algorithm,
+            ):
                 shutil.rmtree(algorithm_dir)
-            elif algorithm_dir.exists():
-                algorithm_dir.unlink()
             if trial_dir.is_dir() and not any(trial_dir.iterdir()):
                 trial_dir.rmdir()
 
@@ -1427,7 +1638,7 @@ def cli_name(
 
 
 def cli_value(
-    value: float | int,
+    value: float | int | str,
 ) -> str:
     if isinstance(value, float):
         return f"{value:.12g}"
@@ -1441,7 +1652,7 @@ def build_training_command(
     trial_dir: Path,
     train_dataset: Path,
     trial_seed: int,
-    hyperparameters: dict[str, float | int],
+    hyperparameters: dict[str, float | int | str],
 ) -> list[str]:
     command = [
         sys.executable,
@@ -1456,8 +1667,6 @@ def build_training_command(
         str(args.max_steps),
         "--validation-dataset",
         str(args.validation_dataset),
-        "--same-layout-dataset",
-        str(args.same_layout_dataset),
         "--seed",
         str(trial_seed),
         "--output-dir",
@@ -1465,6 +1674,22 @@ def build_training_command(
         "--q-snapshot-count",
         str(args.q_snapshot_count),
     ]
+
+    if args.same_layout_dataset is not None:
+        command.extend(
+            [
+                "--same-layout-dataset",
+                str(args.same_layout_dataset),
+            ]
+        )
+    else:
+        command.append("--no-same-layout-dataset")
+
+    command.append(
+        "--train-greedy"
+        if getattr(args, "train_greedy", False)
+        else "--no-train-greedy"
+    )
 
     natural_validation_dataset = getattr(
         args,
@@ -1478,6 +1703,14 @@ def build_training_command(
                 str(natural_validation_dataset),
             ]
         )
+    elif getattr(
+        args,
+        "disable_natural_validation",
+        False,
+    ):
+        command.append(
+            "--no-natural-validation-dataset"
+        )
 
     if args.tensorboard:
         command.append("--tensorboard")
@@ -1485,8 +1718,11 @@ def build_training_command(
         command.append("--no-tensorboard")
 
     training_state_path = (
-        trial_dir
-        / args.algorithm
+        tuning_trial_run_dir(
+            trial_dir,
+            args.algorithm,
+            hyperparameters,
+        )
         / "training_state.pt"
     )
     if (
@@ -1623,8 +1859,6 @@ def resolve_dataset_bundle_args(
     ).require_tuning_splits()
     train_tune_dataset = bundle.train_tune
     validation_tune_dataset = bundle.validation_tune
-    same_layout_dataset = bundle.same_layout
-    natural_validation_dataset = bundle.validation_natural
     test_dataset = bundle.test
     natural_test_dataset = bundle.test_natural
 
@@ -1633,15 +1867,6 @@ def resolve_dataset_bundle_args(
 
     if args.validation_dataset is None:
         args.validation_dataset = validation_tune_dataset
-
-    if args.same_layout_dataset is None:
-        args.same_layout_dataset = same_layout_dataset
-
-    if getattr(args, "natural_validation_dataset", None) is None:
-        if natural_validation_dataset.exists():
-            args.natural_validation_dataset = (
-                natural_validation_dataset
-            )
 
     if args.test_dataset is None and test_dataset.exists():
         args.test_dataset = test_dataset
@@ -1672,10 +1897,6 @@ def validate_tuning_paths(
             (
                 "--validation-dataset",
                 args.validation_dataset,
-            ),
-            (
-                "--same-layout-dataset",
-                args.same_layout_dataset,
             ),
         ]
         if value is None
@@ -2251,6 +2472,14 @@ def result_artifacts_match(
             "rollout_group_size"
         ),
     }
+    if "network_architecture" in training_summary:
+        artifact_hyperparameters["network_architecture"] = (
+            training_summary["network_architecture"]
+        )
+    if "residual_layers" in training_summary:
+        artifact_hyperparameters["residual_layers"] = (
+            training_summary["residual_layers"]
+        )
 
     return hyperparameters_match(
         result["hyperparameters"],
@@ -2288,18 +2517,21 @@ def read_completed_results(
 
 def comparable_hyperparameter_value(
     value: Any,
-) -> int | float:
+) -> int | float | str:
     if isinstance(value, bool):
         return int(value)
 
     if isinstance(value, int):
         return value
 
+    if isinstance(value, str):
+        return value
+
     return float(cli_value(float(value)))
 
 
 def hyperparameters_match(
-    expected: dict[str, float | int],
+    expected: dict[str, float | int | str],
     actual: dict[str, Any],
 ) -> bool:
     for name, expected_value in expected.items():
@@ -2319,6 +2551,14 @@ def hyperparameters_match(
                 actual[name]
             )
         )
+
+        if isinstance(expected_comparable, str) or isinstance(
+            actual_comparable,
+            str,
+        ):
+            if expected_comparable != actual_comparable:
+                return False
+            continue
 
         if isinstance(
             expected_comparable,
@@ -2349,7 +2589,7 @@ def result_matches_trial(
     result: dict[str, Any],
     *,
     trial_seed: int,
-    hyperparameters: dict[str, float | int],
+    hyperparameters: dict[str, float | int | str],
 ) -> bool:
     return (
         result["seed"] == trial_seed
@@ -2496,6 +2736,14 @@ def build_result_from_artifacts(
                 "rollout_group_size"
             ),
         }
+        if "network_architecture" in training_summary:
+            result_hyperparameters["network_architecture"] = (
+                training_summary["network_architecture"]
+            )
+        if "residual_layers" in training_summary:
+            result_hyperparameters["residual_layers"] = (
+                training_summary["residual_layers"]
+            )
     except (
         KeyError,
         TypeError,
@@ -2846,6 +3094,8 @@ def main() -> None:
             args.validation_dataset,
             args.same_layout_dataset,
         ]:
+            if dataset_path is None:
+                continue
             if not dataset_path.exists():
                 raise FileNotFoundError(
                     dataset_path
@@ -2963,8 +3213,10 @@ def main() -> None:
             / "trials"
             / f"trial_{trial:03d}"
         )
-        run_dir = (
-            trial_dir / args.algorithm
+        run_dir = tuning_trial_run_dir(
+            trial_dir,
+            args.algorithm,
+            hyperparameters,
         )
         checkpoint_path = (
             run_dir / "checkpoint.pt"

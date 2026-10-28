@@ -35,6 +35,11 @@ from maze_rl.agents.q_learning import QLearningAgent
 from maze_rl.agents.reinforce import ReinforceAgent
 from maze_rl.agents.sarsa import SarsaAgent
 from maze_rl.agents.networks import (
+    DEFAULT_BASE_CHANNELS,
+    DEFAULT_CHANNEL_MULTIPLIER,
+    DEFAULT_CONV_DEPTH,
+    DEFAULT_FEATURE_DIM,
+    DEFAULT_KERNEL_SIZE,
     DEFAULT_RESIDUAL_LAYERS,
     validate_network_architecture,
 )
@@ -90,19 +95,7 @@ def default_checkpoint_path(
         if algorithm in TABULAR_ALGORITHMS:
             return checkpoint_dir / algorithm / "checkpoint.pkl"
 
-        baseline_path = checkpoint_dir / algorithm / "checkpoint.pt"
-        if baseline_path.exists():
-            return baseline_path
-
-        residual_paths = sorted(
-            checkpoint_dir.glob(
-                f"{algorithm}_residual_l*/checkpoint.pt"
-            )
-        )
-        if residual_paths:
-            return residual_paths[0]
-
-        return baseline_path
+        return checkpoint_dir / algorithm / "checkpoint.pt"
 
     if algorithm in TABULAR_ALGORITHMS:
         return (
@@ -112,24 +105,12 @@ def default_checkpoint_path(
             / "checkpoint.pkl"
         )
 
-    baseline_path = (
+    return (
         DEFAULT_EXPERIMENT_OUTPUT_ROOT
         / "training"
         / algorithm
         / "checkpoint.pt"
     )
-    if baseline_path.exists():
-        return baseline_path
-
-    residual_paths = sorted(
-        DEFAULT_EXPERIMENT_OUTPUT_ROOT.glob(
-            f"training/{algorithm}_residual_l*/checkpoint.pt"
-        )
-    )
-    if residual_paths:
-        return residual_paths[0]
-
-    return baseline_path
 
 
 def default_rollout_animation_output_dir(
@@ -586,6 +567,11 @@ def create_agent(
     seed,
     network_architecture="baseline",
     residual_layers=DEFAULT_RESIDUAL_LAYERS,
+    feature_dim=DEFAULT_FEATURE_DIM,
+    kernel_size=DEFAULT_KERNEL_SIZE,
+    base_channels=DEFAULT_BASE_CHANNELS,
+    channel_multiplier=DEFAULT_CHANNEL_MULTIPLIER,
+    conv_depth=DEFAULT_CONV_DEPTH,
 ):
     kwargs = {
         "action_count": env.action_space.n,
@@ -622,6 +608,11 @@ def create_agent(
         "device": device,
         "network_architecture": network_architecture,
         "residual_layers": residual_layers,
+        "feature_dim": feature_dim,
+        "kernel_size": kernel_size,
+        "base_channels": base_channels,
+        "channel_multiplier": channel_multiplier,
+        "conv_depth": conv_depth,
     }
 
     if algorithm == "dqn":
@@ -682,6 +673,38 @@ def checkpoint_network_configuration(
         residual_layers,
     )
     return network_architecture, residual_layers
+
+
+def checkpoint_encoder_configuration(
+    algorithm,
+    checkpoint_path,
+    device,
+):
+    if algorithm in TABULAR_ALGORITHMS:
+        return {}
+
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location=device,
+    )
+    hyperparameters = checkpoint.get(
+        "hyperparameters",
+        {},
+    )
+    if not isinstance(hyperparameters, dict):
+        return {}
+
+    defaults = {
+        "feature_dim": DEFAULT_FEATURE_DIM,
+        "kernel_size": DEFAULT_KERNEL_SIZE,
+        "base_channels": DEFAULT_BASE_CHANNELS,
+        "channel_multiplier": DEFAULT_CHANNEL_MULTIPLIER,
+        "conv_depth": DEFAULT_CONV_DEPTH,
+    }
+    return {
+        name: hyperparameters.get(name, default)
+        for name, default in defaults.items()
+    }
 
 
 def load_checkpoint(
@@ -844,6 +867,11 @@ def main():
             device,
         )
     )
+    encoder_configuration = checkpoint_encoder_configuration(
+        args.algorithm,
+        args.checkpoint,
+        device,
+    )
 
     agent = create_agent(
         args.algorithm,
@@ -852,6 +880,7 @@ def main():
         args.seed,
         network_architecture=network_architecture,
         residual_layers=residual_layers,
+        **encoder_configuration,
     )
 
     checkpoint = load_checkpoint(

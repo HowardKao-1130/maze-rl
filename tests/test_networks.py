@@ -55,6 +55,36 @@ def test_residual_encoder_accepts_configurable_block_count():
     ) == 4
 
 
+def test_encoder_accepts_tunable_design_parameters():
+    encoder = MazeEncoder(
+        11,
+        11,
+        feature_dim=64,
+        kernel_size=5,
+        base_channels=16,
+        channel_multiplier=2,
+        conv_depth=3,
+    )
+
+    convolutions = [
+        module
+        for module in encoder.conv
+        if isinstance(module, nn.Conv2d)
+    ]
+
+    assert tuple(
+        encoder(torch.zeros(2, 3, 11, 11)).shape
+    ) == (2, 64)
+    assert [
+        convolution.out_channels
+        for convolution in convolutions
+    ] == [16, 32, 64]
+    assert all(
+        convolution.kernel_size == (5, 5)
+        for convolution in convolutions
+    )
+
+
 def test_residual_actor_critic_has_expected_output_shapes():
     network = ActorCriticNetwork(
         11,

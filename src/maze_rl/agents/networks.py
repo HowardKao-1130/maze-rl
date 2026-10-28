@@ -9,6 +9,45 @@ NETWORK_ARCHITECTURES = (
     "residual",
 )
 DEFAULT_RESIDUAL_LAYERS = 2
+DEFAULT_KERNEL_SIZE = 3
+DEFAULT_BASE_CHANNELS = 32
+DEFAULT_CHANNEL_MULTIPLIER = 2
+DEFAULT_CONV_DEPTH = 2
+DEFAULT_FEATURE_DIM = 128
+
+
+def validate_encoder_configuration(
+    *,
+    kernel_size: int,
+    base_channels: int,
+    channel_multiplier: int,
+    conv_depth: int,
+    feature_dim: int,
+) -> None:
+    if kernel_size <= 0 or kernel_size % 2 == 0:
+        raise ValueError(
+            "kernel_size must be a positive odd integer."
+        )
+
+    if base_channels <= 0:
+        raise ValueError(
+            "base_channels must be positive."
+        )
+
+    if channel_multiplier <= 0:
+        raise ValueError(
+            "channel_multiplier must be positive."
+        )
+
+    if conv_depth <= 0:
+        raise ValueError(
+            "conv_depth must be positive."
+        )
+
+    if feature_dim <= 0:
+        raise ValueError(
+            "feature_dim must be positive."
+        )
 
 
 def validate_network_architecture(
@@ -29,22 +68,28 @@ def validate_network_architecture(
 
 
 class ResidualBlock(nn.Module):
-    def __init__(self, channels: int) -> None:
+    def __init__(
+        self,
+        channels: int,
+        kernel_size: int = DEFAULT_KERNEL_SIZE,
+    ) -> None:
         super().__init__()
+
+        padding = kernel_size // 2
 
         self.layers = nn.Sequential(
             nn.Conv2d(
                 channels,
                 channels,
-                kernel_size=3,
-                padding=1,
+                kernel_size=kernel_size,
+                padding=padding,
             ),
             nn.ReLU(),
             nn.Conv2d(
                 channels,
                 channels,
-                kernel_size=3,
-                padding=1,
+                kernel_size=kernel_size,
+                padding=padding,
             ),
         )
         self.activation = nn.ReLU()
@@ -66,6 +111,10 @@ class MazeEncoder(nn.Module):
         feature_dim: int = 128,
         network_architecture: str = "baseline",
         residual_layers: int = DEFAULT_RESIDUAL_LAYERS,
+        kernel_size: int = DEFAULT_KERNEL_SIZE,
+        base_channels: int = DEFAULT_BASE_CHANNELS,
+        channel_multiplier: int = DEFAULT_CHANNEL_MULTIPLIER,
+        conv_depth: int = DEFAULT_CONV_DEPTH,
     ) -> None:
         super().__init__()
 
@@ -73,36 +122,55 @@ class MazeEncoder(nn.Module):
             network_architecture,
             residual_layers,
         )
+        validate_encoder_configuration(
+            kernel_size=kernel_size,
+            base_channels=base_channels,
+            channel_multiplier=channel_multiplier,
+            conv_depth=conv_depth,
+            feature_dim=feature_dim,
+        )
+
+        padding = kernel_size // 2
 
         if network_architecture == "baseline":
+            layers = []
+            in_channels = 3
+            for layer_index in range(conv_depth):
+                out_channels = base_channels * (
+                    channel_multiplier ** layer_index
+                )
+                layers.extend(
+                    [
+                        nn.Conv2d(
+                            in_channels,
+                            out_channels,
+                            kernel_size=kernel_size,
+                            padding=padding,
+                        ),
+                        nn.ReLU(),
+                    ]
+                )
+                in_channels = out_channels
+
             self.conv = nn.Sequential(
-                nn.Conv2d(
-                    3,
-                    32,
-                    kernel_size=3,
-                    padding=1,
-                ),
-                nn.ReLU(),
-                nn.Conv2d(
-                    32,
-                    64,
-                    kernel_size=3,
-                    padding=1,
-                ),
-                nn.ReLU(),
+                *layers,
                 nn.Flatten(),
             )
         else:
+            channels = base_channels * channel_multiplier
             self.conv = nn.Sequential(
                 nn.Conv2d(
                     3,
-                    64,
-                    kernel_size=3,
-                    padding=1,
+                    channels,
+                    kernel_size=kernel_size,
+                    padding=padding,
                 ),
                 nn.ReLU(),
                 *(
-                    ResidualBlock(64)
+                    ResidualBlock(
+                        channels,
+                        kernel_size=kernel_size,
+                    )
                     for _ in range(residual_layers)
                 ),
                 nn.Flatten(),
@@ -145,6 +213,11 @@ class QNetwork(nn.Module):
         action_count: int,
         network_architecture: str = "baseline",
         residual_layers: int = DEFAULT_RESIDUAL_LAYERS,
+        feature_dim: int = DEFAULT_FEATURE_DIM,
+        kernel_size: int = DEFAULT_KERNEL_SIZE,
+        base_channels: int = DEFAULT_BASE_CHANNELS,
+        channel_multiplier: int = DEFAULT_CHANNEL_MULTIPLIER,
+        conv_depth: int = DEFAULT_CONV_DEPTH,
     ) -> None:
         super().__init__()
 
@@ -153,10 +226,15 @@ class QNetwork(nn.Module):
             width,
             network_architecture=network_architecture,
             residual_layers=residual_layers,
+            feature_dim=feature_dim,
+            kernel_size=kernel_size,
+            base_channels=base_channels,
+            channel_multiplier=channel_multiplier,
+            conv_depth=conv_depth,
         )
 
         self.head = nn.Linear(
-            128,
+            feature_dim,
             action_count,
         )
 
@@ -179,6 +257,11 @@ class PolicyNetwork(nn.Module):
         action_count: int,
         network_architecture: str = "baseline",
         residual_layers: int = DEFAULT_RESIDUAL_LAYERS,
+        feature_dim: int = DEFAULT_FEATURE_DIM,
+        kernel_size: int = DEFAULT_KERNEL_SIZE,
+        base_channels: int = DEFAULT_BASE_CHANNELS,
+        channel_multiplier: int = DEFAULT_CHANNEL_MULTIPLIER,
+        conv_depth: int = DEFAULT_CONV_DEPTH,
     ) -> None:
         super().__init__()
 
@@ -187,10 +270,15 @@ class PolicyNetwork(nn.Module):
             width,
             network_architecture=network_architecture,
             residual_layers=residual_layers,
+            feature_dim=feature_dim,
+            kernel_size=kernel_size,
+            base_channels=base_channels,
+            channel_multiplier=channel_multiplier,
+            conv_depth=conv_depth,
         )
 
         self.policy = nn.Linear(
-            128,
+            feature_dim,
             action_count,
         )
 
@@ -213,6 +301,11 @@ class ActorCriticNetwork(nn.Module):
         action_count: int,
         network_architecture: str = "baseline",
         residual_layers: int = DEFAULT_RESIDUAL_LAYERS,
+        feature_dim: int = DEFAULT_FEATURE_DIM,
+        kernel_size: int = DEFAULT_KERNEL_SIZE,
+        base_channels: int = DEFAULT_BASE_CHANNELS,
+        channel_multiplier: int = DEFAULT_CHANNEL_MULTIPLIER,
+        conv_depth: int = DEFAULT_CONV_DEPTH,
     ) -> None:
         super().__init__()
 
@@ -221,15 +314,20 @@ class ActorCriticNetwork(nn.Module):
             width,
             network_architecture=network_architecture,
             residual_layers=residual_layers,
+            feature_dim=feature_dim,
+            kernel_size=kernel_size,
+            base_channels=base_channels,
+            channel_multiplier=channel_multiplier,
+            conv_depth=conv_depth,
         )
 
         self.actor = nn.Linear(
-            128,
+            feature_dim,
             action_count,
         )
 
         self.critic = nn.Linear(
-            128,
+            feature_dim,
             1,
         )
 

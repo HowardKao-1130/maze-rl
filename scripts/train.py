@@ -37,6 +37,11 @@ from maze_rl.agents.q_learning import QLearningAgent
 from maze_rl.agents.reinforce import ReinforceAgent
 from maze_rl.agents.sarsa import SarsaAgent
 from maze_rl.agents.networks import (
+    DEFAULT_BASE_CHANNELS,
+    DEFAULT_CHANNEL_MULTIPLIER,
+    DEFAULT_CONV_DEPTH,
+    DEFAULT_FEATURE_DIM,
+    DEFAULT_KERNEL_SIZE,
     DEFAULT_RESIDUAL_LAYERS,
     NETWORK_ARCHITECTURES,
     validate_network_architecture,
@@ -146,6 +151,19 @@ NEURAL_HYPERPARAMETERS = {
     },
 }
 
+NEURAL_ARCHITECTURE_HYPERPARAMETERS = {
+    "base_channels",
+    "channel_multiplier",
+    "conv_depth",
+    "feature_dim",
+    "kernel_size",
+}
+
+for _neural_hyperparameters in NEURAL_HYPERPARAMETERS.values():
+    _neural_hyperparameters.update(
+        NEURAL_ARCHITECTURE_HYPERPARAMETERS
+    )
+
 NEURAL_HYPERPARAMETER_DESTS = sorted(
     {
         name
@@ -177,6 +195,8 @@ class BestConfigOverrides:
     hyperparameters: dict[str, float | int]
     task_batch_size: int | None = None
     rollout_group_size: int | None = None
+    network_architecture: str | None = None
+    residual_layers: int | None = None
 
 
 def configure_reproducibility(seed: int) -> None:
@@ -281,13 +301,14 @@ def output_algorithm_name(
     network_architecture: str,
     residual_layers: int = DEFAULT_RESIDUAL_LAYERS,
 ) -> str:
-    if network_architecture == "baseline":
-        return algorithm
+    """Return the canonical output directory for an algorithm.
 
-    return (
-        f"{algorithm}_{network_architecture}"
-        f"_l{residual_layers}"
-    )
+    Architecture choices are stored in training metadata and checkpoints,
+    rather than encoded in the directory name.  The architecture arguments
+    remain in this helper's signature for callers that still pass them.
+    """
+    del network_architecture, residual_layers
+    return algorithm
 
 
 def resolve_resume_training_state_path(
@@ -298,42 +319,15 @@ def resolve_resume_training_state_path(
     network_architecture_was_provided: bool,
     residual_layers: int = DEFAULT_RESIDUAL_LAYERS,
 ) -> Path:
-    requested_path = (
+    del network_architecture
+    del network_architecture_was_provided
+    del residual_layers
+
+    return (
         output_dir
-        / output_algorithm_name(
-            algorithm,
-            network_architecture,
-            residual_layers,
-        )
+        / algorithm
         / "training_state.pt"
     )
-
-    if (
-        network_architecture_was_provided
-        or requested_path.exists()
-    ):
-        return requested_path
-
-    baseline_path = (
-        output_dir
-        / output_algorithm_name(
-            algorithm,
-            "baseline",
-        )
-        / "training_state.pt"
-    )
-    if baseline_path.exists():
-        return baseline_path
-
-    residual_paths = sorted(
-        output_dir.glob(
-            f"{algorithm}_residual_l*/training_state.pt"
-        )
-    )
-    if residual_paths:
-        return residual_paths[0]
-
-    return requested_path
 
 
 def dataset_bundle_output_dir(
@@ -384,10 +378,25 @@ def resolve_dataset_bundle_args(args) -> None:
     if args.validation_dataset is None:
         args.validation_dataset = validation_dataset
 
-    if args.same_layout_dataset is None:
+    if (
+        args.same_layout_dataset is None
+        and "same_layout_dataset"
+        not in getattr(
+            args,
+            "resume_metadata_cli_fields",
+            set(),
+        )
+    ):
         args.same_layout_dataset = same_layout_dataset
 
-    if getattr(args, "natural_validation_dataset", None) is None:
+    if (
+        getattr(args, "natural_validation_dataset", None) is None
+        and not getattr(
+            args,
+            "disable_natural_validation_dataset",
+            False,
+        )
+    ):
         if natural_validation_dataset.exists():
             args.natural_validation_dataset = (
                 natural_validation_dataset
@@ -427,14 +436,35 @@ RESUME_METADATA_CLI_OPTIONS = {
     "residual_layers": (
         "--residual-layers",
     ),
+    "kernel_size": (
+        "--kernel-size",
+    ),
+    "base_channels": (
+        "--base-channels",
+    ),
+    "channel_multiplier": (
+        "--channel-multiplier",
+    ),
+    "conv_depth": (
+        "--conv-depth",
+    ),
+    "feature_dim": (
+        "--feature-dim",
+    ),
     "validation_dataset": (
         "--validation-dataset",
     ),
     "same_layout_dataset": (
         "--same-layout-dataset",
+        "--no-same-layout-dataset",
     ),
     "natural_validation_dataset": (
         "--natural-validation-dataset",
+        "--no-natural-validation-dataset",
+    ),
+    "train_greedy": (
+        "--train-greedy",
+        "--no-train-greedy",
     ),
     "validation_episodes": (
         "--validation-episodes",
@@ -871,7 +901,8 @@ def parse_args():
             "selection."
         ),
     )
-    parser.add_argument(
+    same_layout_group = parser.add_mutually_exclusive_group()
+    same_layout_group.add_argument(
         "--same-layout-dataset",
         type=Path,
         default=None,
@@ -881,13 +912,32 @@ def parse_args():
             "selection."
         ),
     )
-    parser.add_argument(
+    same_layout_group.add_argument(
+        "--no-same-layout-dataset",
+        dest="disable_same_layout_dataset",
+        action="store_true",
+        help=(
+            "Disable same-layout validation, including when a "
+            "resumed training state recorded one."
+        ),
+    )
+    natural_validation_group = parser.add_mutually_exclusive_group()
+    natural_validation_group.add_argument(
         "--natural-validation-dataset",
         type=Path,
         default=None,
         help=(
             "Optional natural-layout validation dataset evaluated "
             "as val-natural."
+        ),
+    )
+    natural_validation_group.add_argument(
+        "--no-natural-validation-dataset",
+        dest="disable_natural_validation_dataset",
+        action="store_true",
+        help=(
+            "Disable natural-layout validation, including when a "
+            "resumed training state recorded one."
         ),
     )
     parser.add_argument(
@@ -903,6 +953,15 @@ def parse_args():
             "Evaluate every validation task. Use "
             "--no-validation-all-tasks with --validation-episodes "
             "for sampling."
+        ),
+    )
+    parser.add_argument(
+        "--train-greedy",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Record greedy evaluation on the training tasks during "
+            "periodic validation. Defaults to enabled."
         ),
     )
     parser.add_argument(
@@ -1066,6 +1125,39 @@ def parse_args():
             "network architecture. Defaults to 2."
         ),
     )
+    neural_group.add_argument(
+        "--kernel-size",
+        type=int,
+        default=None,
+        help="Odd convolution kernel size for the maze encoder.",
+    )
+    neural_group.add_argument(
+        "--base-channels",
+        type=int,
+        default=None,
+        help="Initial convolution channel width.",
+    )
+    neural_group.add_argument(
+        "--channel-multiplier",
+        type=int,
+        default=None,
+        help=(
+            "Channel-width multiplier between baseline convolution "
+            "layers."
+        ),
+    )
+    neural_group.add_argument(
+        "--conv-depth",
+        type=int,
+        default=None,
+        help="Number of convolutional layers in the baseline encoder.",
+    )
+    neural_group.add_argument(
+        "--feature-dim",
+        type=int,
+        default=None,
+        help="Output width of the maze encoder feature vector.",
+    )
 
     argv = sys.argv[1:]
     args = parser.parse_args()
@@ -1150,6 +1242,28 @@ def load_best_config_overrides(
         )
 
     hyperparameters = dict(raw_hyperparameters)
+    network_architecture = hyperparameters.pop(
+        "network_architecture",
+        selected_config.get("network_architecture"),
+    )
+    if network_architecture is not None and not isinstance(
+        network_architecture,
+        str,
+    ):
+        raise ValueError(
+            f"{path} network_architecture must be a string."
+        )
+    residual_layers = hyperparameters.pop(
+        "residual_layers",
+        selected_config.get("residual_layers"),
+    )
+    if residual_layers is not None:
+        try:
+            residual_layers = int(residual_layers)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{path} residual_layers must be an integer."
+            ) from exc
     task_batch_size = hyperparameters.pop(
         "task_batch_size",
         selected_config.get("task_batch_size"),
@@ -1164,6 +1278,8 @@ def load_best_config_overrides(
         hyperparameters=hyperparameters,
         task_batch_size=task_batch_size,
         rollout_group_size=rollout_group_size,
+        network_architecture=network_architecture,
+        residual_layers=residual_layers,
     )
 
 
@@ -1171,9 +1287,9 @@ def neural_hyperparameters_from_args(
     args,
 ) -> dict[str, float | int]:
     return {
-        name: getattr(args, name)
+        name: getattr(args, name, None)
         for name in NEURAL_HYPERPARAMETER_DESTS
-        if getattr(args, name) is not None
+        if getattr(args, name, None) is not None
     }
 
 
@@ -1334,6 +1450,29 @@ def create_agent(
         hyperparameters,
     )
 
+    encoder_hyperparameters = {
+        "feature_dim": hyperparameters.pop(
+            "feature_dim",
+            DEFAULT_FEATURE_DIM,
+        ),
+        "kernel_size": hyperparameters.pop(
+            "kernel_size",
+            DEFAULT_KERNEL_SIZE,
+        ),
+        "base_channels": hyperparameters.pop(
+            "base_channels",
+            DEFAULT_BASE_CHANNELS,
+        ),
+        "channel_multiplier": hyperparameters.pop(
+            "channel_multiplier",
+            DEFAULT_CHANNEL_MULTIPLIER,
+        ),
+        "conv_depth": hyperparameters.pop(
+            "conv_depth",
+            DEFAULT_CONV_DEPTH,
+        ),
+    }
+
     kwargs = {
         "action_count": env.action_space.n,
     }
@@ -1369,6 +1508,7 @@ def create_agent(
         "device": device,
         "network_architecture": network_architecture,
         "residual_layers": residual_layers,
+        **encoder_hyperparameters,
     }
 
     if algorithm == "dqn":
@@ -1827,6 +1967,7 @@ def training_state_metadata(
             if getattr(args, "natural_validation_dataset", None) is None
             else str(args.natural_validation_dataset)
         ),
+        "train_greedy": getattr(args, "train_greedy", True),
         "validation_episodes": args.validation_episodes,
         "validation_all_tasks": args.validation_all_tasks,
         "early_stopping_patience": (
@@ -1856,6 +1997,10 @@ def validate_training_state_metadata(
     metadata.setdefault(
         "natural_validation_dataset",
         None,
+    )
+    metadata.setdefault(
+        "train_greedy",
+        True,
     )
     allowed_mismatches = allowed_mismatches or set()
 
@@ -2206,6 +2351,12 @@ def apply_retroactive_resume_metadata(
         metadata,
         "natural_validation_dataset",
     )
+    args.train_greedy = bool(
+        metadata.get(
+            "train_greedy",
+            True,
+        )
+    )
     args.validation_episodes = int(
         metadata["validation_episodes"]
     )
@@ -2265,6 +2416,12 @@ def apply_resume_training_state_defaults(
             metadata,
             "natural_validation_dataset",
         ),
+        "train_greedy": bool(
+            metadata.get(
+                "train_greedy",
+                True,
+            )
+        ),
         "validation_episodes": int(
             metadata["validation_episodes"]
         ),
@@ -2297,6 +2454,12 @@ def resume_training_state_allowed_mismatches(
         set(),
     )
     allowed_by_field = {
+        "same_layout_dataset": {
+            "same_layout_dataset",
+        },
+        "natural_validation_dataset": {
+            "natural_validation_dataset",
+        },
         "rollouts_per_task": {
             "rollouts_per_task",
             "task_selection_pass_budget",
@@ -2312,6 +2475,9 @@ def resume_training_state_allowed_mismatches(
         },
         "early_stopping_min_delta": {
             "early_stopping_min_delta",
+        },
+        "train_greedy": {
+            "train_greedy",
         },
     }
     allowed = set()
@@ -2474,9 +2640,13 @@ def validation_metrics_have_train_greedy_split(
 
 def should_record_train_greedy_validation(
     *,
+    enabled: bool = True,
     resuming: bool,
     validation_metrics_path: Path,
 ) -> bool:
+    if not enabled:
+        return False
+
     if not resuming:
         return True
 
@@ -3407,20 +3577,6 @@ def main():
             "--dataset must name a dataset bundle or training .npz file."
         )
 
-    validate_network_architecture(
-        args.network_architecture,
-        args.residual_layers,
-    )
-
-    if (
-        args.algorithm in TABULAR_ALGORITHMS
-        and args.network_architecture != "baseline"
-    ):
-        raise ValueError(
-            "--network-architecture is only supported for "
-            "neural agents."
-        )
-
     resolve_dataset_bundle_args(args)
 
     if args.best_config == BEST_CONFIG_DEFAULT_SENTINEL:
@@ -3438,6 +3594,48 @@ def main():
         args.best_config = resolve_best_config_path(
             args.best_config,
             args.algorithm,
+        )
+
+    best_config_overrides = None
+    if args.best_config is not None and not args.resume:
+        if args.algorithm not in NEURAL_ALGORITHMS:
+            raise ValueError(
+                "--best-config is only supported for DNN agents."
+            )
+
+        best_config_overrides = load_best_config_overrides(
+            args.best_config,
+            args.algorithm,
+        )
+        if (
+            best_config_overrides.network_architecture is not None
+            and "network_architecture"
+            not in args.resume_metadata_cli_fields
+        ):
+            args.network_architecture = (
+                best_config_overrides.network_architecture
+            )
+        if (
+            best_config_overrides.residual_layers is not None
+            and "residual_layers"
+            not in args.resume_metadata_cli_fields
+        ):
+            args.residual_layers = (
+                best_config_overrides.residual_layers
+            )
+
+    validate_network_architecture(
+        args.network_architecture,
+        args.residual_layers,
+    )
+
+    if (
+        args.algorithm in TABULAR_ALGORITHMS
+        and args.network_architecture != "baseline"
+    ):
+        raise ValueError(
+            "--network-architecture is only supported for "
+            "neural agents."
         )
 
     if args.output_dir is None:
@@ -3492,6 +3690,7 @@ def main():
         )
         if existing_action == "resume":
             args.resume = True
+            best_config_overrides = None
         elif existing_action == "reuse":
             print(
                 "Reusing the existing completed training run."
@@ -3564,21 +3763,6 @@ def main():
         max_steps=args.max_steps,
         fixed_index=args.fixed_index,
     )
-
-    best_config_overrides = None
-    if (
-        args.best_config is not None
-        and resume_training_metadata is None
-    ):
-        if args.algorithm not in NEURAL_ALGORITHMS:
-            raise ValueError(
-                "--best-config is only supported for DNN agents."
-            )
-
-        best_config_overrides = load_best_config_overrides(
-            args.best_config,
-            args.algorithm,
-        )
 
     loaded_hyperparameters = (
         dict(
@@ -4154,6 +4338,7 @@ def main():
     write_running_training_summary()
 
     if validation_envs and should_record_train_greedy_validation(
+        enabled=args.train_greedy,
         resuming=(
             args.resume
         ),
