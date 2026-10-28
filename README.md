@@ -594,6 +594,11 @@ validation-selected checkpoint on the filtered/stratified `test.npz`.
 When the bundle contains `test_natural.npz`, the same command also writes a
 separate `best_test_natural_evaluation.csv` generalization report.
 
+The patience value is expressed in rollout-equivalent units. For GRPO, the
+trainer applies `ceil(early_stopping_patience / rollout_group_size)` validation
+checks, so grouped trials receive comparable patience even though each check
+covers multiple rollouts per task.
+
 Neural checkpoints for `dqn`, `a2c`, and `ppo` include model snapshots using the
 same epoch schedule as tabular Q-table snapshots. Evaluation renders `dqn`
 snapshot Q-value frames and videos under `q_value_plots`; `a2c` and `ppo`

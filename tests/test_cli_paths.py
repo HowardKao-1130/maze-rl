@@ -48,6 +48,7 @@ from scripts.train import (
     configure_reproducibility,
     dataset_bundle_dir_for_reference,
     default_experiment_output_dir,
+    effective_early_stopping_patience,
     format_task_selection_pass_task_progress_message,
     format_training_epoch_progress_message,
     format_validation_progress_message,
@@ -2277,6 +2278,28 @@ def test_early_stopping_still_applies_after_positive_validation():
         checks_without_improvement=4,
         has_positive_validation_score=True,
     )
+
+
+@pytest.mark.parametrize(
+    ("base_patience", "rollout_group_size", "expected"),
+    [
+        (35, 1, 35),
+        (35, 4, 9),
+        (35, 8, 5),
+        (35, 16, 3),
+        (0, 16, 0),
+        (None, 16, None),
+    ],
+)
+def test_effective_early_stopping_patience_scales_by_group_size(
+    base_patience,
+    rollout_group_size,
+    expected,
+):
+    assert effective_early_stopping_patience(
+        base_patience,
+        rollout_group_size,
+    ) == expected
 
 
 def test_append_validation_csv_migrates_legacy_schema(tmp_path):

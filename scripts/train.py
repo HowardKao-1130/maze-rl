@@ -2565,6 +2565,26 @@ def should_stop_early(
     )
 
 
+def effective_early_stopping_patience(
+    base_patience: int | None,
+    rollout_group_size: int,
+) -> int | None:
+    """Convert rollout-equivalent patience into validation checks."""
+    if base_patience is None:
+        return None
+
+    if rollout_group_size <= 0:
+        raise ValueError(
+            "rollout_group_size must be positive."
+        )
+
+    return (
+        base_patience
+        + rollout_group_size
+        - 1
+    ) // rollout_group_size
+
+
 def parse_validation_csv_row(
     row: dict[str, str],
 ) -> dict:
@@ -3812,6 +3832,12 @@ def main():
             ),
         )
     )
+    effective_patience = (
+        effective_early_stopping_patience(
+            args.early_stopping_patience,
+            rollout_group_size,
+        )
+    )
     task_selection_pass_budget = (
         task_selection_passes_for_budget(
             args.rollouts_per_task,
@@ -4287,7 +4313,7 @@ def main():
             replayed_early_stop = (
                 replay_early_stopping_from_validation_metrics(
                     validation_metrics_path,
-                    patience=args.early_stopping_patience,
+                    patience=effective_patience,
                     min_delta=args.early_stopping_min_delta,
                 )
             )
@@ -4469,7 +4495,7 @@ def main():
                         validation_checks_without_improvement
                     ),
                     early_stopping_patience=(
-                        args.early_stopping_patience
+                        effective_patience
                     ),
                 )
             )
@@ -4668,7 +4694,7 @@ def main():
 
             if (
                 should_stop_early(
-                    args.early_stopping_patience,
+                    effective_patience,
                     validation_checks_without_improvement,
                     validation_has_positive_score,
                 )
