@@ -7,12 +7,49 @@ import torch
 from maze_rl.agents.a2c import A2CAgent
 from maze_rl.agents.dqn import DQNAgent
 from maze_rl.agents.dqn import Transition
+from maze_rl.agents.grpo import GRPOAgent
 from maze_rl.agents.reinforce import ReinforceAgent
 from maze_rl.agents.sarsa import SarsaAgent
 from maze_rl.training.trainers import train_grpo_round
 from maze_rl.training.trainers import train_sarsa_episode
 from maze_rl.training.trainers import train_reinforce_round
 from scripts.train import HierarchicalTaskSampler
+
+
+def test_grpo_batched_action_api_returns_batch_shapes():
+    agent = GRPOAgent(
+        height=11,
+        width=11,
+        action_count=4,
+        device=torch.device("cpu"),
+    )
+    observations = np.zeros(
+        (1, 3, 11, 11),
+        dtype=np.float32,
+    )
+
+    actions, log_probabilities = agent.choose_actions(
+        observations
+    )
+
+    assert actions.shape == (1,)
+    assert log_probabilities.shape == (1,)
+    assert actions.dtype == np.int64
+    assert log_probabilities.dtype == np.float32
+
+
+def test_grpo_batched_action_api_rejects_invalid_observation_shape():
+    agent = GRPOAgent(
+        height=11,
+        width=11,
+        action_count=4,
+        device=torch.device("cpu"),
+    )
+
+    with pytest.raises(ValueError, match="batched observations"):
+        agent.choose_actions(
+            np.zeros((3, 11, 11), dtype=np.float32)
+        )
 
 
 class OneStepGoalEnv:

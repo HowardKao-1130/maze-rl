@@ -17,6 +17,10 @@ from maze_rl.agents.ppo import PPOAgent
 from maze_rl.agents.q_learning import QLearningAgent
 from maze_rl.agents.reinforce import ReinforceAgent
 from maze_rl.agents.sarsa import SarsaAgent
+from maze_rl.envs.maze_env import MazeEnv
+from maze_rl.envs.vectorized_maze_env import (
+    VectorizedMazeEnv,
+)
 from maze_rl.training.metrics import EpisodeMetrics
 
 
@@ -932,20 +936,11 @@ def _choose_grpo_actions(
     agent: GRPOAgent,
     observations,
 ):
-    choose_actions = getattr(
-        agent,
-        "choose_actions",
-        None,
-    )
-
-    if choose_actions is None:
-        return [
-            agent.choose_action(observation)
-            for observation in observations
-        ]
-
-    actions, log_probabilities = choose_actions(
-        observations
+    actions, log_probabilities = (
+        _choose_grpo_action_arrays(
+            agent,
+            observations,
+        )
     )
 
     return [
@@ -960,11 +955,181 @@ def _choose_grpo_actions(
     ]
 
 
+def _choose_grpo_action_arrays(
+    agent: GRPOAgent,
+    observations,
+):
+    choose_actions = getattr(
+        agent,
+        "choose_actions",
+        None,
+    )
+
+    if choose_actions is None:
+        action_pairs = [
+            agent.choose_action(observation)
+            for observation in observations
+        ]
+        if not action_pairs:
+            return (
+                np.empty(0, dtype=np.int64),
+                np.empty(0, dtype=np.float32),
+            )
+        actions, log_probabilities = zip(*action_pairs)
+        return (
+            np.asarray(actions, dtype=np.int64),
+            np.asarray(log_probabilities, dtype=np.float32),
+        )
+
+    actions, log_probabilities = choose_actions(
+        observations
+    )
+
+    actions = np.asarray(actions, dtype=np.int64)
+    log_probabilities = np.asarray(
+        log_probabilities,
+        dtype=np.float32,
+    )
+    if actions.shape != (len(observations),):
+        raise ValueError(
+            "GRPO choose_actions must return one action per observation."
+        )
+    if log_probabilities.shape != actions.shape:
+        raise ValueError(
+            "GRPO choose_actions must return one log probability per action."
+        )
+    return actions, log_probabilities
+
+
+def _sample_grpo_task_index(env, task_index):
+    if task_index is not None:
+        return int(task_index)
+
+    fixed_index = getattr(env, "fixed_index", None)
+    if fixed_index is not None:
+        return int(fixed_index)
+
+    return int(env.np_random.integers(env.num_tasks))
+
+
+def _collect_grpo_rollout_groups_vectorized(
+    env: MazeEnv,
+    agent: GRPOAgent,
+    rollout_groups,
+):
+    vector_env = getattr(
+        env,
+        "_grpo_vectorized_env",
+        None,
+    )
+    if vector_env is None:
+        vector_env = VectorizedMazeEnv.from_maze_env(env)
+        env._grpo_vectorized_env = vector_env
+
+    grouped_rollouts = []
+    all_rollouts = []
+    task_indices = []
+
+    for episode_specs in rollout_groups:
+        group = []
+        for (
+            episode,
+            epoch,
+            task_index,
+        ) in episode_specs:
+            group.append(
+                {
+                    "episode": episode,
+                    "epoch": epoch,
+                    "observation": None,
+                    "observations": [],
+                    "actions": [],
+                    "log_probabilities": [],
+                    "rewards": [],
+                }
+            )
+            task_indices.append(
+                _sample_grpo_task_index(env, task_index)
+            )
+        grouped_rollouts.append(group)
+        all_rollouts.extend(group)
+
+    observations, _ = vector_env.reset(task_indices)
+    for slot, rollout in enumerate(all_rollouts):
+        rollout["slot"] = slot
+        rollout["observation"] = observations[slot]
+
+    active_slots = np.ones(
+        len(all_rollouts),
+        dtype=bool,
+    )
+
+    while np.any(active_slots):
+        slots = np.flatnonzero(active_slots)
+        actions, log_probabilities = _choose_grpo_action_arrays(
+            agent,
+            observations[slots],
+        )
+        all_actions = np.zeros(
+            len(all_rollouts),
+            dtype=np.int64,
+        )
+
+        for index, slot in enumerate(slots):
+            rollout = all_rollouts[slot]
+            rollout["observations"].append(
+                observations[slot].copy()
+            )
+            rollout["actions"].append(int(actions[index]))
+            rollout["log_probabilities"].append(
+                float(log_probabilities[index])
+            )
+            all_actions[slot] = actions[index]
+
+        (
+            next_observations,
+            rewards,
+            terminated,
+            truncated,
+            infos,
+        ) = vector_env.step(all_actions)
+
+        for slot in slots:
+            rollout = all_rollouts[slot]
+            rollout["rewards"].append(float(rewards[slot]))
+            done = bool(terminated[slot] or truncated[slot])
+            if done:
+                rollout["metrics"] = _metrics(
+                    rollout["episode"],
+                    rollout["epoch"],
+                    float(sum(rollout["rewards"])),
+                    infos[slot],
+                    None,
+                    None,
+                    None,
+                )
+                rollout["return"] = agent.compute_episode_return(
+                    rollout["rewards"]
+                )
+                active_slots[slot] = False
+
+        observations = next_observations
+
+    return grouped_rollouts
+
+
 def _collect_grpo_rollout_groups(
     env,
     agent: GRPOAgent,
     rollout_groups,
 ):
+    if isinstance(env, MazeEnv):
+        return _collect_grpo_rollout_groups_vectorized(
+            env,
+            agent,
+            rollout_groups,
+        )
+
     active_rollouts = []
     grouped_rollouts = []
 
