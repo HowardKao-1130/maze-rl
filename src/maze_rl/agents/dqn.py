@@ -94,6 +94,7 @@ class DQNAgent:
     ) -> None:
         self.action_count = action_count
         self.device = device
+        self.observation_shape = (3, height, width)
         self.gamma = gamma
 
         self.epsilon = epsilon_start
@@ -190,7 +191,7 @@ class DQNAgent:
             device=self.device,
         ).unsqueeze(0)
 
-        with torch.no_grad():
+        with torch.inference_mode():
             q_values = self.online_network(
                 observation_tensor
             )
@@ -200,6 +201,66 @@ class DQNAgent:
                 dim=1
             ).item()
         )
+
+    @torch.inference_mode()
+    def choose_actions(
+        self,
+        observations: np.ndarray,
+        explore: bool = True,
+    ) -> np.ndarray:
+        observations = np.asarray(observations)
+        if (
+            observations.ndim != 4
+            or tuple(observations.shape[1:])
+            != self.observation_shape
+        ):
+            raise ValueError(
+                "Expected batched observations with shape "
+                f"[batch, {self.observation_shape[0]}, "
+                f"{self.observation_shape[1]}, "
+                f"{self.observation_shape[2]}], got "
+                f"{observations.shape}."
+            )
+
+        actions = np.empty(
+            len(observations),
+            dtype=np.int64,
+        )
+        exploratory = np.zeros(
+            len(observations),
+            dtype=bool,
+        )
+        if explore:
+            exploratory = (
+                self.rng.random(len(observations))
+                < self.epsilon
+            )
+            exploratory_indices = np.flatnonzero(
+                exploratory
+            )
+            actions[exploratory_indices] = (
+                self.rng.integers(
+                    self.action_count,
+                    size=len(exploratory_indices),
+                )
+            )
+
+        greedy_indices = np.flatnonzero(~exploratory)
+        if len(greedy_indices):
+            q_values = self.online_network(
+                torch.as_tensor(
+                    observations[greedy_indices],
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+            )
+            actions[greedy_indices] = (
+                q_values.argmax(dim=1)
+                .cpu()
+                .numpy()
+            )
+
+        return actions
 
     def store_transition(
         self,

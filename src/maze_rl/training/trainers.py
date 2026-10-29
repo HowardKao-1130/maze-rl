@@ -512,6 +512,43 @@ def train_reinforce_round(
     agent: ReinforceAgent,
     episode_specs,
 ):
+    if isinstance(env, MazeEnv):
+        rollouts = _collect_vectorized_on_policy_rollouts(
+            env,
+            agent,
+            episode_specs,
+            algorithm="reinforce",
+        )
+        metrics = [rollout["metrics"] for rollout in rollouts]
+        observations = [
+            observation
+            for rollout in rollouts
+            for observation in rollout["observations"]
+        ]
+        actions = [
+            action
+            for rollout in rollouts
+            for action in rollout["actions"]
+        ]
+        returns = [
+            value
+            for rollout in rollouts
+            for value in rollout["returns"]
+        ]
+        loss = agent.update_rollout(
+            observations=observations,
+            actions=actions,
+            returns=returns,
+        )
+        return _apply_round_diagnostics(
+            metrics,
+            _minibatch_count(
+                len(actions),
+                agent.minibatch_size,
+            ),
+            loss,
+        )
+
     metrics = []
     observations = []
     actions = []
@@ -671,6 +708,49 @@ def train_a2c_round(
     agent: A2CAgent,
     episode_specs,
 ):
+    if isinstance(env, MazeEnv):
+        rollouts = _collect_vectorized_on_policy_rollouts(
+            env,
+            agent,
+            episode_specs,
+            algorithm="a2c",
+        )
+        metrics = [rollout["metrics"] for rollout in rollouts]
+        observations = [
+            observation
+            for rollout in rollouts
+            for observation in rollout["observations"]
+        ]
+        actions = [
+            action
+            for rollout in rollouts
+            for action in rollout["actions"]
+        ]
+        advantages = [
+            value
+            for rollout in rollouts
+            for value in rollout["advantages"]
+        ]
+        returns = [
+            value
+            for rollout in rollouts
+            for value in rollout["returns"]
+        ]
+        loss = agent.update_rollout(
+            observations=observations,
+            actions=actions,
+            advantages=advantages,
+            returns=returns,
+        )
+        return _apply_round_diagnostics(
+            metrics,
+            _minibatch_count(
+                len(actions),
+                agent.minibatch_size,
+            ),
+            loss,
+        )
+
     metrics = []
     observations = []
     actions = []
@@ -843,6 +923,56 @@ def train_ppo_round(
     agent: PPOAgent,
     episode_specs,
 ):
+    if isinstance(env, MazeEnv):
+        rollouts = _collect_vectorized_on_policy_rollouts(
+            env,
+            agent,
+            episode_specs,
+            algorithm="ppo",
+        )
+        metrics = [rollout["metrics"] for rollout in rollouts]
+        observations = [
+            observation
+            for rollout in rollouts
+            for observation in rollout["observations"]
+        ]
+        actions = [
+            action
+            for rollout in rollouts
+            for action in rollout["actions"]
+        ]
+        log_probabilities = [
+            value
+            for rollout in rollouts
+            for value in rollout["log_probabilities"]
+        ]
+        advantages = [
+            value
+            for rollout in rollouts
+            for value in rollout["advantages"]
+        ]
+        returns = [
+            value
+            for rollout in rollouts
+            for value in rollout["returns"]
+        ]
+        loss = agent.update(
+            observations=observations,
+            actions=actions,
+            old_log_probabilities=log_probabilities,
+            advantages=advantages,
+            returns=returns,
+        )
+        return _apply_round_diagnostics(
+            metrics,
+            agent.update_epochs
+            * _minibatch_count(
+                len(actions),
+                agent.minibatch_size,
+            ),
+            loss,
+        )
+
     metrics = []
     observations = []
     actions = []
@@ -904,6 +1034,184 @@ def train_ppo_round(
         internal_updates,
         loss,
     )
+
+
+def _collect_vectorized_on_policy_rollouts(
+    env: MazeEnv,
+    agent,
+    episode_specs,
+    algorithm: str,
+):
+    vector_env = getattr(
+        env,
+        "_dnn_vectorized_env",
+        None,
+    )
+    if vector_env is None:
+        vector_env = VectorizedMazeEnv.from_maze_env(env)
+        env._dnn_vectorized_env = vector_env
+
+    episode_specs = list(episode_specs)
+    task_indices = [
+        _sample_grpo_task_index(env, task_index)
+        for _, _, task_index in episode_specs
+    ]
+    observations, _ = vector_env.reset(task_indices)
+    rollouts = []
+    for slot, (episode, epoch, _) in enumerate(episode_specs):
+        rollouts.append(
+            {
+                "episode": episode,
+                "epoch": epoch,
+                "observations": [],
+                "actions": [],
+                "log_probabilities": [],
+                "values": [],
+                "rewards": [],
+                "terminated_flags": [],
+                "slot": slot,
+            }
+        )
+
+    active_slots = np.ones(
+        len(rollouts),
+        dtype=bool,
+    )
+    while np.any(active_slots):
+        slots = np.flatnonzero(active_slots)
+        active_observations = observations[slots]
+
+        if algorithm == "reinforce":
+            actions = agent.choose_actions(
+                active_observations
+            )
+            values = None
+            log_probabilities = None
+        elif algorithm == "a2c":
+            actions, values = agent.choose_actions(
+                active_observations
+            )
+            log_probabilities = None
+        elif algorithm == "ppo":
+            (
+                actions,
+                log_probabilities,
+                values,
+            ) = agent.choose_actions(
+                active_observations
+            )
+        else:
+            raise ValueError(
+                f"Unsupported on-policy algorithm: {algorithm}."
+            )
+
+        all_actions = np.zeros(
+            len(rollouts),
+            dtype=np.int64,
+        )
+        for index, slot in enumerate(slots):
+            rollout = rollouts[slot]
+            rollout["observations"].append(
+                observations[slot].copy()
+            )
+            rollout["actions"].append(int(actions[index]))
+            if values is not None:
+                rollout["values"].append(float(values[index]))
+            if log_probabilities is not None:
+                rollout["log_probabilities"].append(
+                    float(log_probabilities[index])
+                )
+            all_actions[slot] = actions[index]
+
+        (
+            next_observations,
+            rewards,
+            terminated,
+            truncated,
+            infos,
+        ) = vector_env.step(all_actions)
+        for slot in slots:
+            rollout = rollouts[slot]
+            rollout["rewards"].append(float(rewards[slot]))
+            rollout["terminated_flags"].append(
+                bool(terminated[slot])
+            )
+            if terminated[slot] or truncated[slot]:
+                rollout["metrics"] = _metrics(
+                    rollout["episode"],
+                    rollout["epoch"],
+                    float(sum(rollout["rewards"])),
+                    infos[slot],
+                    None,
+                    None,
+                    None,
+                )
+                rollout["last_observation"] = (
+                    next_observations[slot].copy()
+                )
+                rollout["terminated"] = bool(terminated[slot])
+                active_slots[slot] = False
+
+        observations = next_observations
+
+    truncated_slots = [
+        slot
+        for slot, rollout in enumerate(rollouts)
+        if not rollout["terminated"]
+    ]
+    bootstrap_values = {}
+    if truncated_slots:
+        last_observations = np.asarray(
+            [
+                rollouts[slot]["last_observation"]
+                for slot in truncated_slots
+            ]
+        )
+        estimate_values = getattr(
+            agent,
+            "estimate_values",
+            None,
+        )
+        if estimate_values is not None:
+            values = estimate_values(last_observations)
+        else:
+            values = np.asarray(
+                [
+                    agent.estimate_value(
+                        observation
+                    )
+                    for observation in last_observations
+                ]
+            )
+        bootstrap_values = {
+            slot: float(value)
+            for slot, value in zip(
+                truncated_slots,
+                values,
+            )
+        }
+
+    for slot, rollout in enumerate(rollouts):
+        if algorithm == "reinforce":
+            rollout["returns"] = agent.compute_returns(
+                rollout["rewards"]
+            )
+        else:
+            last_value = (
+                0.0
+                if rollout["terminated"]
+                else bootstrap_values[slot]
+            )
+            advantages, returns = agent.compute_gae(
+                rewards=rollout["rewards"],
+                values=rollout["values"],
+                terminated_flags=rollout["terminated_flags"],
+                last_value=last_value,
+            )
+            rollout["advantages"] = advantages
+            rollout["returns"] = returns
+
+    return rollouts
 
 
 def train_grpo_episode(

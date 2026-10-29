@@ -37,6 +37,8 @@ class ReinforceAgent:
         conv_depth: int = DEFAULT_CONV_DEPTH,
     ) -> None:
         self.device = device
+        self.observation_shape = (3, height, width)
+        self.action_count = action_count
         self.gamma = gamma
         self.entropy_coefficient = (
             entropy_coefficient
@@ -76,7 +78,7 @@ class ReinforceAgent:
             * self.entropy_coefficient_decay,
         )
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def choose_action(
         self,
         observation: np.ndarray,
@@ -98,6 +100,37 @@ class ReinforceAgent:
         action = distribution.sample()
 
         return int(action.item())
+
+    @torch.inference_mode()
+    def choose_actions(
+        self,
+        observations: np.ndarray,
+    ) -> np.ndarray:
+        observations = np.asarray(observations)
+        if (
+            observations.ndim != 4
+            or tuple(observations.shape[1:])
+            != self.observation_shape
+        ):
+            raise ValueError(
+                "Expected batched observations with shape "
+                f"[batch, {self.observation_shape[0]}, "
+                f"{self.observation_shape[1]}, "
+                f"{self.observation_shape[2]}], got "
+                f"{observations.shape}."
+            )
+
+        logits = self.policy(
+            torch.as_tensor(
+                observations,
+                dtype=torch.float32,
+                device=self.device,
+            )
+        )
+        actions = Categorical(
+            logits=logits
+        ).sample()
+        return actions.cpu().numpy()
 
     def compute_returns(
         self,

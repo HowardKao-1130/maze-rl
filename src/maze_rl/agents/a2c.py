@@ -40,6 +40,8 @@ class A2CAgent:
         conv_depth: int = DEFAULT_CONV_DEPTH,
     ) -> None:
         self.device = device
+        self.observation_shape = (3, height, width)
+        self.action_count = action_count
         self.gamma = gamma
         self.gae_lambda = gae_lambda
 
@@ -86,7 +88,7 @@ class A2CAgent:
             * self.entropy_coefficient_decay,
         )
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def choose_action(
         self,
         observation: np.ndarray,
@@ -112,7 +114,41 @@ class A2CAgent:
             float(value.item()),
         )
 
-    @torch.no_grad()
+    @torch.inference_mode()
+    def choose_actions(
+        self,
+        observations: np.ndarray,
+    ):
+        observations = np.asarray(observations)
+        if (
+            observations.ndim != 4
+            or tuple(observations.shape[1:])
+            != self.observation_shape
+        ):
+            raise ValueError(
+                "Expected batched observations with shape "
+                f"[batch, {self.observation_shape[0]}, "
+                f"{self.observation_shape[1]}, "
+                f"{self.observation_shape[2]}], got "
+                f"{observations.shape}."
+            )
+
+        logits, values = self.network(
+            torch.as_tensor(
+                observations,
+                dtype=torch.float32,
+                device=self.device,
+            )
+        )
+        actions = Categorical(
+            logits=logits
+        ).sample()
+        return (
+            actions.cpu().numpy(),
+            values.cpu().numpy(),
+        )
+
+    @torch.inference_mode()
     def estimate_value(
         self,
         observation: np.ndarray,
@@ -128,6 +164,33 @@ class A2CAgent:
         )
 
         return float(value.item())
+
+    @torch.inference_mode()
+    def estimate_values(
+        self,
+        observations: np.ndarray,
+    ) -> np.ndarray:
+        observations = np.asarray(observations)
+        if (
+            observations.ndim != 4
+            or tuple(observations.shape[1:])
+            != self.observation_shape
+        ):
+            raise ValueError(
+                "Expected batched observations with shape "
+                f"[batch, {self.observation_shape[0]}, "
+                f"{self.observation_shape[1]}, "
+                f"{self.observation_shape[2]}], got "
+                f"{observations.shape}."
+            )
+        _, values = self.network(
+            torch.as_tensor(
+                observations,
+                dtype=torch.float32,
+                device=self.device,
+            )
+        )
+        return values.cpu().numpy()
 
     def compute_gae(
         self,

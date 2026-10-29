@@ -8,6 +8,7 @@ from maze_rl.agents.a2c import A2CAgent
 from maze_rl.agents.dqn import DQNAgent
 from maze_rl.agents.dqn import Transition
 from maze_rl.agents.grpo import GRPOAgent
+from maze_rl.agents.ppo import PPOAgent
 from maze_rl.agents.reinforce import ReinforceAgent
 from maze_rl.agents.sarsa import SarsaAgent
 from maze_rl.training.trainers import train_grpo_round
@@ -50,6 +51,56 @@ def test_grpo_batched_action_api_rejects_invalid_observation_shape():
         agent.choose_actions(
             np.zeros((3, 11, 11), dtype=np.float32)
         )
+
+
+def test_dnn_batched_action_apis_return_expected_shapes():
+    observations = np.zeros(
+        (3, 3, 11, 11),
+        dtype=np.float32,
+    )
+    device = torch.device("cpu")
+
+    reinforce_actions = ReinforceAgent(
+        11,
+        11,
+        4,
+        device,
+    ).choose_actions(observations)
+    assert reinforce_actions.shape == (3,)
+
+    a2c_actions, a2c_values = A2CAgent(
+        11,
+        11,
+        4,
+        device,
+    ).choose_actions(observations)
+    assert a2c_actions.shape == (3,)
+    assert a2c_values.shape == (3,)
+
+    ppo_actions, ppo_log_probabilities, ppo_values = PPOAgent(
+        11,
+        11,
+        4,
+        device,
+    ).choose_actions(observations)
+    assert ppo_actions.shape == (3,)
+    assert ppo_log_probabilities.shape == (3,)
+    assert ppo_values.shape == (3,)
+
+    dqn_actions = DQNAgent(
+        11,
+        11,
+        4,
+        device,
+    ).choose_actions(
+        observations,
+        explore=False,
+    )
+    assert dqn_actions.shape == (3,)
+    assert np.all(
+        (dqn_actions >= 0)
+        & (dqn_actions < 4)
+    )
 
 
 class OneStepGoalEnv:
