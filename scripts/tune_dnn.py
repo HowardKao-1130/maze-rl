@@ -84,7 +84,7 @@ DEFAULT_SEARCH_SPACES: dict[
         },
         "task_batch_size": {
             "type": "choice",
-            "values": [1],
+            "values": [1, 8, 16, 32],
         },
         "rollout_group_size": {
             "type": "choice",

@@ -249,6 +249,15 @@ def test_ordered_search_space_restores_default_order_from_sorted_config():
     assert actual == expected
 
 
+def test_dqn_search_space_explores_vectorized_task_batches():
+    assert DEFAULT_SEARCH_SPACES["dqn"][
+        "task_batch_size"
+    ] == {
+        "type": "choice",
+        "values": [1, 8, 16, 32],
+    }
+
+
 def test_parse_args_has_no_default_read_or_save_dirs(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",

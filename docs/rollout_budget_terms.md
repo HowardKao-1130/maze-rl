@@ -144,7 +144,7 @@ The tuner searches these training-loop dimensions as follows:
 
 ```text
 algorithm   task_batch_size search   rollout_group_size search
-dqn         [1]                      [1]
+dqn         [1, 8, 16, 32]           [1]
 reinforce   [8, 16, 32]              [1]
 a2c         [8, 16, 32]              [1]
 ppo         [32, 64, 128]            [1]
@@ -154,8 +154,12 @@ grpo        [8, 16, 32]              [4, 8, 16]
 ## DQN
 
 DQN collects one selected task and one rollout per training round by default.
-The episode writes transitions into replay memory, and the agent samples replay
-minibatches according to its replay settings.
+The tuner also evaluates larger task batches now that DQN collection supports
+vectorized environment interaction. Each transition still invokes the normal
+DQN replay/update cadence; task batching changes collection concurrency rather
+than reducing updates per transition. The episode writes transitions into
+replay memory, and the agent samples replay minibatches according to its replay
+settings.
 
 ```mermaid
 flowchart LR
