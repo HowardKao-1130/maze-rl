@@ -9,6 +9,7 @@ from maze_rl.envs.vectorized_maze_env import VectorizedMazeEnv
 from maze_rl.agents.dqn import DQNAgent
 from maze_rl.training.trainers import train_grpo_round
 from maze_rl.training.trainers import train_dqn_round
+from maze_rl.training.trainers import train_reinforce_round
 
 
 def write_dataset(path):
@@ -225,3 +226,39 @@ def test_dqn_round_uses_vectorized_environment_slots(tmp_path):
         env._dnn_vectorized_env,
         VectorizedMazeEnv,
     )
+
+
+class TruncatedReinforceAgent:
+    minibatch_size = 2
+
+    def choose_actions(self, observations):
+        return np.zeros(len(observations), dtype=np.int64)
+
+    def compute_returns(self, rewards):
+        return list(rewards)
+
+    def update_rollout(self, observations, actions, returns):
+        assert len(observations) == len(actions) == len(returns)
+        return 0.0
+
+
+def test_reinforce_vectorized_collection_does_not_bootstrap_values(tmp_path):
+    dataset_path = tmp_path / "reinforce_tasks.npz"
+    np.savez(
+        dataset_path,
+        layouts=np.zeros((1, 2, 2), dtype=np.int8),
+        layout_indices=np.asarray([0]),
+        starts=np.asarray([[0, 0]]),
+        goals=np.asarray([[1, 1]]),
+    )
+    env = MazeEnv(dataset_path, max_steps=1)
+
+    metrics = train_reinforce_round(
+        env,
+        TruncatedReinforceAgent(),
+        [(1, 1, 0)],
+    )
+
+    assert len(metrics) == 1
+    assert metrics[0].steps == 1
+    assert metrics[0].success is False

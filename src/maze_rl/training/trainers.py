@@ -1259,11 +1259,15 @@ def _collect_vectorized_on_policy_rollouts(
 
         observations = next_observations
 
-    truncated_slots = [
-        slot
-        for slot, rollout in enumerate(rollouts)
-        if not rollout["terminated"]
-    ]
+    truncated_slots = (
+        [
+            slot
+            for slot, rollout in enumerate(rollouts)
+            if not rollout["terminated"]
+        ]
+        if algorithm != "reinforce"
+        else []
+    )
     bootstrap_values = {}
     if truncated_slots:
         last_observations = np.asarray(
