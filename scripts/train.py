@@ -48,7 +48,9 @@ from maze_rl.agents.networks import (
 )
 from maze_rl.envs.maze_env import MazeEnv
 from maze_rl.evaluation.evaluator import evaluate
-from maze_rl.training.metrics import append_metrics_csv
+from maze_rl.training.metrics import (
+    append_metrics_csv_batch,
+)
 from maze_rl.training.plots import (
     plot_task_training_metrics,
     plot_training_metrics,
@@ -4010,13 +4012,21 @@ def main():
         )
     }
 
+    pending_metrics = []
+
+    def flush_metrics_csv() -> None:
+        if not pending_metrics:
+            return
+        append_metrics_csv_batch(
+            metrics_path,
+            pending_metrics,
+        )
+        pending_metrics.clear()
+
     def record_episode_metrics(metrics):
         nonlocal cumulative_transitions
 
-        append_metrics_csv(
-            metrics_path,
-            metrics,
-        )
+        pending_metrics.append(metrics)
 
         cumulative_transitions += int(
             metrics.steps
@@ -4416,6 +4426,7 @@ def main():
         epoch_metrics_by_epoch,
         next_epoch_to_log: int,
     ) -> None:
+        flush_metrics_csv()
         save_training_state(
             training_state_path,
             {

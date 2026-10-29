@@ -37,6 +37,16 @@ def append_metrics_csv(
     path: str | Path,
     metrics: EpisodeMetrics,
 ) -> None:
+    append_metrics_csv_batch(path, [metrics])
+
+
+def append_metrics_csv_batch(
+    path: str | Path,
+    metrics_rows,
+) -> None:
+    if not metrics_rows:
+        return
+
     path = Path(path)
 
     path.parent.mkdir(
@@ -44,7 +54,8 @@ def append_metrics_csv(
         exist_ok=True,
     )
 
-    row = asdict(metrics)
+    rows = [asdict(metrics) for metrics in metrics_rows]
+    fieldnames = list(rows[0].keys())
 
     with path.open(
         "a+",
@@ -52,7 +63,6 @@ def append_metrics_csv(
     ) as file:
         file.seek(0)
         existing_header = file.readline().strip()
-        fieldnames = list(row.keys())
         write_header = not existing_header
 
         if existing_header:
@@ -103,4 +113,4 @@ def append_metrics_csv(
         if write_header:
             writer.writeheader()
 
-        writer.writerow(row)
+        writer.writerows(rows)
