@@ -1386,13 +1386,18 @@ def tuning_artifact_paths(
     results_path: Path,
     tuning_config_path: Path | None,
 ) -> list[Path]:
-    paths = [
+    paths = []
+    if tuning_results_has_algorithm(
         results_path,
+        algorithm,
+    ):
+        paths.append(results_path)
+    paths.append(
         best_config_path_for_algorithm(
             output_dir,
             algorithm,
-        ),
-    ]
+        )
+    )
 
     if tuning_config_path is not None:
         paths.append(tuning_config_path)

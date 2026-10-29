@@ -258,6 +258,25 @@ def test_dqn_search_space_explores_vectorized_task_batches():
     }
 
 
+def test_tuning_artifact_paths_ignore_results_for_other_algorithms(
+    tmp_path,
+):
+    results_path = tmp_path / "tuning_results.csv"
+    results_path.write_text(
+        "trial,algorithm\n"
+        "1,grpo\n"
+    )
+
+    paths = tuning_artifact_paths(
+        output_dir=tmp_path,
+        algorithm="dqn",
+        results_path=results_path,
+        tuning_config_path=None,
+    )
+
+    assert results_path not in paths
+
+
 def test_parse_args_has_no_default_read_or_save_dirs(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
