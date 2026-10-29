@@ -427,6 +427,111 @@ def train_dqn_episode(
         diagnostics,
     )
 
+
+def train_dqn_round(
+    env,
+    agent: DQNAgent,
+    episode_specs,
+):
+    if not isinstance(env, MazeEnv):
+        return [
+            train_dqn_episode(
+                env,
+                agent,
+                episode,
+                epoch,
+                task_index,
+            )
+            for episode, epoch, task_index in episode_specs
+        ]
+
+    vector_env = getattr(
+        env,
+        "_dnn_vectorized_env",
+        None,
+    )
+    if vector_env is None:
+        vector_env = VectorizedMazeEnv.from_maze_env(env)
+        env._dnn_vectorized_env = vector_env
+
+    episode_specs = list(episode_specs)
+    task_indices = [
+        _sample_grpo_task_index(env, task_index)
+        for _, _, task_index in episode_specs
+    ]
+    observations, _ = vector_env.reset(task_indices)
+    rollouts = [
+        {
+            "episode": episode,
+            "epoch": epoch,
+            "losses": [],
+            "episode_return": 0.0,
+        }
+        for episode, epoch, _ in episode_specs
+    ]
+    active_slots = np.ones(
+        len(rollouts),
+        dtype=bool,
+    )
+
+    while np.any(active_slots):
+        slots = np.flatnonzero(active_slots)
+        actions = agent.choose_actions(
+            observations[slots],
+            explore=True,
+        )
+        all_actions = np.zeros(
+            len(rollouts),
+            dtype=np.int64,
+        )
+        for index, slot in enumerate(slots):
+            all_actions[slot] = actions[index]
+
+        (
+            next_observations,
+            rewards,
+            terminated,
+            truncated,
+            infos,
+        ) = vector_env.step(all_actions)
+
+        for index, slot in enumerate(slots):
+            rollout = rollouts[slot]
+            agent.store_transition(
+                Transition(
+                    state=observations[slot].copy(),
+                    action=int(actions[index]),
+                    reward=float(rewards[slot]),
+                    next_state=next_observations[slot].copy(),
+                    terminated=bool(terminated[slot]),
+                )
+            )
+            loss = agent.train_step()
+            if loss is not None:
+                rollout["losses"].append(loss)
+            rollout["episode_return"] += float(rewards[slot])
+
+            if terminated[slot] or truncated[slot]:
+                diagnostics = _mean_diagnostics(
+                    rollout["losses"]
+                )
+                rollout["metrics"] = _metrics(
+                    rollout["episode"],
+                    rollout["epoch"],
+                    rollout["episode_return"],
+                    infos[slot],
+                    len(rollout["losses"]),
+                    None,
+                    None,
+                    diagnostics,
+                )
+                active_slots[slot] = False
+
+        observations = next_observations
+
+    return [rollout["metrics"] for rollout in rollouts]
+
+
 def train_reinforce_episode(
     env,
     agent: ReinforceAgent,

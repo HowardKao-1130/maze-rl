@@ -57,7 +57,7 @@ from maze_rl.training.plots import (
 )
 from maze_rl.training.trainers import (
     train_a2c_round,
-    train_dqn_episode,
+    train_dqn_round,
     train_grpo_round,
     train_monte_carlo_episode,
     train_ppo_round,
@@ -4918,70 +4918,74 @@ def main():
             if not rollout_specs:
                 break
 
-            round_metrics = []
-
-            for (
-                rollout_id,
-                dataset_epoch,
-                task_index,
-            ) in flatten_rollout_groups(
+            episode_specs = flatten_rollout_groups(
                 build_rollout_groups(
                     rollout_specs
                 )
-            ):
-                if args.algorithm == "mc":
-                    metrics = (
-                        train_monte_carlo_episode(
-                            env,
-                            agent,
-                            rollout_id,
-                            dataset_epoch,
-                            task_index,
-                        )
-                    )
+            )
 
-                elif args.algorithm == "sarsa":
-                    metrics = train_sarsa_episode(
-                        env,
-                        agent,
-                        rollout_id,
-                        dataset_epoch,
-                        task_index,
-                    )
-
-                elif args.algorithm in {
-                    "q_learning",
-                    "dyna_q",
-                }:
-                    metrics = (
-                        train_q_learning_episode(
-                            env,
-                            agent,
-                            rollout_id,
-                            dataset_epoch,
-                            task_index,
-                        )
-                    )
-
-                else:
-                    metrics = train_dqn_episode(
-                        env,
-                        agent,
-                        rollout_id,
-                        dataset_epoch,
-                        task_index,
-                    )
-
-                round_metrics.append(metrics)
-                record_episode_metrics(metrics)
-                epoch_metrics_by_epoch.setdefault(
-                    metrics.epoch,
-                    [],
-                ).append(metrics)
-                write_task_progress_line(
-                    metrics.epoch,
-                    epoch_metrics_by_epoch,
+            if args.algorithm == "dqn":
+                round_metrics = train_dqn_round(
+                    env,
+                    agent,
+                    episode_specs,
                 )
+                for metrics in round_metrics:
+                    record_episode_metrics(metrics)
+                    epoch_metrics_by_epoch.setdefault(
+                        metrics.epoch,
+                        [],
+                    ).append(metrics)
+                    write_task_progress_line(
+                        metrics.epoch,
+                        epoch_metrics_by_epoch,
+                    )
+            else:
+                round_metrics = []
+                for (
+                    rollout_id,
+                    dataset_epoch,
+                    task_index,
+                ) in episode_specs:
+                    if args.algorithm == "mc":
+                        metrics = (
+                            train_monte_carlo_episode(
+                                env,
+                                agent,
+                                rollout_id,
+                                dataset_epoch,
+                                task_index,
+                            )
+                        )
+
+                    elif args.algorithm == "sarsa":
+                        metrics = train_sarsa_episode(
+                            env,
+                            agent,
+                            rollout_id,
+                            dataset_epoch,
+                            task_index,
+                        )
+
+                    else:
+                        metrics = train_q_learning_episode(
+                            env,
+                            agent,
+                            rollout_id,
+                            dataset_epoch,
+                            task_index,
+                        )
+
+                    round_metrics.append(metrics)
+                    record_episode_metrics(metrics)
+                    epoch_metrics_by_epoch.setdefault(
+                        metrics.epoch,
+                        [],
+                    ).append(metrics)
+                    write_task_progress_line(
+                        metrics.epoch,
+                        epoch_metrics_by_epoch,
+                    )
 
             record_training_round(
                 round_metrics

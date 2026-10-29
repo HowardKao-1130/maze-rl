@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import torch
 
 from maze_rl.envs.maze_env import MazeEnv
 from maze_rl.envs.vectorized_maze_env import VectorizedMazeEnv
+from maze_rl.agents.dqn import DQNAgent
 from maze_rl.training.trainers import train_grpo_round
+from maze_rl.training.trainers import train_dqn_round
 
 
 def write_dataset(path):
@@ -181,5 +184,44 @@ def test_grpo_uses_vectorized_collection_for_maze_env(tmp_path):
     assert all(metric.success for metric in metrics)
     assert isinstance(
         env._grpo_vectorized_env,
+        VectorizedMazeEnv,
+    )
+
+
+def test_dqn_round_uses_vectorized_environment_slots(tmp_path):
+    dataset_path = tmp_path / "dqn_tasks.npz"
+    np.savez(
+        dataset_path,
+        layouts=np.zeros((1, 2, 2), dtype=np.int8),
+        layout_indices=np.asarray([0, 0]),
+        starts=np.asarray([[0, 0], [1, 0]]),
+        goals=np.asarray([[0, 1], [1, 1]]),
+    )
+    env = MazeEnv(dataset_path, max_steps=1)
+    agent = DQNAgent(
+        2,
+        2,
+        4,
+        torch.device("cpu"),
+        epsilon_start=0.0,
+        min_replay_size=2,
+        batch_size=2,
+        train_frequency=1,
+    )
+
+    metrics = train_dqn_round(
+        env,
+        agent,
+        [
+            (1, 1, 0),
+            (2, 1, 1),
+        ],
+    )
+
+    assert len(metrics) == 2
+    assert [metric.steps for metric in metrics] == [1, 1]
+    assert len(agent.replay_buffer) == 2
+    assert isinstance(
+        env._dnn_vectorized_env,
         VectorizedMazeEnv,
     )

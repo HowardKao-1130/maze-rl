@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 import torch
 
+from maze_rl.envs.maze_env import MazeEnv
 from maze_rl.evaluation.evaluator import (
     choose_greedy_action,
     evaluate,
@@ -250,3 +251,54 @@ def test_greedy_action_from_scores_rejects_non_finite_scores():
             torch.tensor([[0.0, float("nan")]]),
             2,
         )
+
+
+class BatchDQNGreedyAgent:
+    device = torch.device("cpu")
+
+    class Network:
+        def __call__(self, observations):
+            return torch.tensor(
+                [[0.1, 0.2, 0.3, 0.9]]
+                * len(observations),
+                dtype=torch.float32,
+            )
+
+    online_network = Network()
+
+
+def test_evaluate_vectorizes_maze_neural_rollouts(tmp_path):
+    dataset_path = tmp_path / "evaluation_tasks.npz"
+    np.savez(
+        dataset_path,
+        layouts=np.zeros((1, 2, 2), dtype=np.int8),
+        layout_indices=np.asarray([0, 0]),
+        starts=np.asarray([[0, 0], [1, 0]]),
+        goals=np.asarray([[0, 1], [1, 1]]),
+    )
+    env = MazeEnv(dataset_path, max_steps=3)
+    progress = []
+
+    results, summary = evaluate(
+        algorithm="dqn",
+        agent=BatchDQNGreedyAgent(),
+        env=env,
+        episodes=99,
+        task_indices=[0, 1],
+        capture_rollouts=True,
+        progress_callback=lambda episode, total: progress.append(
+            (episode, total)
+        ),
+    )
+
+    assert [result["task_index"] for result in results] == [0, 1]
+    assert [result["steps"] for result in results] == [1, 1]
+    assert summary["success_rate"] == 1.0
+    assert progress == [(1, 2), (2, 2)]
+    assert results[0]["rollout_trace"] == {
+        "positions": [[0, 0], [0, 1]],
+        "actions": [3],
+        "rewards": [1.0],
+        "terminated": True,
+        "truncated": False,
+    }
