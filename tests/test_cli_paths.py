@@ -1084,6 +1084,24 @@ def test_validation_progress_formats_early_stopping_status():
     )
 
 
+def test_validation_progress_can_include_pass_prefix():
+    assert (
+        format_validation_progress_message(
+            "validation",
+            dataset_epoch=3,
+            task_selection_pass_budget=1000,
+            validation_score=0.483,
+            success_rate=0.491,
+            best_score=0.483,
+            early_stopping_counter=0,
+            early_stopping_patience=35,
+            include_pass_prefix=True,
+        )
+        == "pass    3/1000 [0.3%] | val          eff=0.483 "
+        "succ=0.491 es=0/35 (best=0.483)"
+    )
+
+
 def test_validation_progress_formats_train_greedy_label():
     assert (
         format_validation_progress_message(
@@ -2381,6 +2399,18 @@ def test_replay_early_stopping_from_validation_metrics(
     assert replayed["latest_validation_by_split"][
         "same_layout"
     ]["mean_path_efficiency"] == 0.5
+    assert [
+        progress["row"]["dataset_epoch"]
+        for progress in replayed["validation_progress"]
+    ] == [1, 2, 3, 4]
+    assert [
+        progress["early_stopping_counter"]
+        for progress in replayed["validation_progress"]
+    ] == [0, 0, 1, 2]
+    assert [
+        progress["best_score"]
+        for progress in replayed["validation_progress"]
+    ] == [0.4, 0.45, 0.45, 0.45]
 
 
 def test_train_greedy_validation_recorded_for_new_runs(

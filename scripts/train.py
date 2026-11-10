@@ -2689,6 +2689,7 @@ def replay_early_stopping_from_validation_metrics(
     has_positive_validation_score = False
     stopped_early = False
     stopped_epoch = None
+    validation_progress = []
 
     if not path.exists():
         return {
@@ -2702,6 +2703,7 @@ def replay_early_stopping_from_validation_metrics(
             "validation_has_positive_score": (
                 has_positive_validation_score
             ),
+            "validation_progress": validation_progress,
             "stopped_early": stopped_early,
             "stopped_epoch": stopped_epoch,
         }
@@ -2745,6 +2747,18 @@ def replay_early_stopping_from_validation_metrics(
             else:
                 checks_without_improvement += 1
 
+            validation_progress.append(
+                {
+                    "row": row,
+                    "best_score": best_validation[
+                        "mean_path_efficiency"
+                    ],
+                    "early_stopping_counter": (
+                        checks_without_improvement
+                    ),
+                }
+            )
+
             if (
                 not stopped_early
                 and should_stop_early(
@@ -2769,6 +2783,7 @@ def replay_early_stopping_from_validation_metrics(
         "validation_has_positive_score": (
             has_positive_validation_score
         ),
+        "validation_progress": validation_progress,
         "stopped_early": stopped_early,
         "stopped_epoch": stopped_epoch,
     }
@@ -3039,6 +3054,7 @@ def format_validation_progress_message(
     best_score: float | None = None,
     early_stopping_counter: int | None = None,
     early_stopping_patience: int | None = None,
+    include_pass_prefix: bool = False,
 ) -> str:
     split_label = {
         "validation": "val",
@@ -3047,9 +3063,16 @@ def format_validation_progress_message(
         "train_greedy": "train-greedy",
     }.get(split, split)
     message = (
-        format_progress_continuation_prefix(
-            dataset_epoch,
-            task_selection_pass_budget,
+        (
+            format_task_selection_pass_progress_prefix(
+                dataset_epoch,
+                task_selection_pass_budget,
+            )
+            if include_pass_prefix
+            else format_progress_continuation_prefix(
+                dataset_epoch,
+                task_selection_pass_budget,
+            )
         )
         + f"{split_label:<12s} eff={validation_score:.3f}"
     )
@@ -4319,38 +4342,37 @@ def main():
             ),
         )
 
-        if args.retroactive_early_stop:
-            replayed_early_stop = (
-                replay_early_stopping_from_validation_metrics(
-                    validation_metrics_path,
-                    patience=effective_patience,
-                    min_delta=args.early_stopping_min_delta,
-                )
+        replayed_validation = (
+            replay_early_stopping_from_validation_metrics(
+                validation_metrics_path,
+                patience=effective_patience,
+                min_delta=args.early_stopping_min_delta,
             )
-            best_validation = replayed_early_stop[
+        )
+
+        if args.retroactive_early_stop:
+            best_validation = replayed_validation[
                 "best_validation"
             ]
             latest_validation_by_split = (
-                replayed_early_stop[
+                replayed_validation[
                     "latest_validation_by_split"
                 ]
             )
             validation_checks_without_improvement = int(
-                replayed_early_stop[
+                replayed_validation[
                     "validation_checks_without_improvement"
                 ]
             )
             validation_has_positive_score = bool(
-                replayed_early_stop[
+                replayed_validation[
                     "validation_has_positive_score"
                 ]
             )
             stopped_early = bool(
-                replayed_early_stop[
-                    "stopped_early"
-                ]
+                replayed_validation["stopped_early"]
             )
-            stopped_epoch = replayed_early_stop[
+            stopped_epoch = replayed_validation[
                 "stopped_epoch"
             ]
 
@@ -4358,6 +4380,31 @@ def main():
             "Loaded full training state from "
             f"{training_state_path}"
         )
+
+        if not args.no_progress:
+            for progress in replayed_validation[
+                "validation_progress"
+            ]:
+                row = progress["row"]
+                print(
+                    format_validation_progress_message(
+                        "validation",
+                        row["dataset_epoch"],
+                        task_selection_pass_budget,
+                        row["mean_path_efficiency"],
+                        success_rate=row["success_rate"],
+                        best_score=progress["best_score"],
+                        early_stopping_counter=(
+                            progress[
+                                "early_stopping_counter"
+                            ]
+                        ),
+                        early_stopping_patience=(
+                            effective_patience
+                        ),
+                        include_pass_prefix=True,
+                    )
+                )
 
         if args.retroactive_early_stop:
             if stopped_early:
