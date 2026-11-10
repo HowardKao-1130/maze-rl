@@ -1,6 +1,44 @@
 # maze-rl
 practice project for RL
 
+## Interactive Maze Inference
+
+Launch a local editor for a hand-configured maze and compare the latest
+completed agents in parallel. The editor displays two rows and three columns:
+`(0, 0)` is the editable source maze, followed by `a2c`, `dqn`, `grpo`, `ppo`,
+and `reinforce` in alphabetical order. The grid defaults to the 11x11
+dimensions used by the current trained checkpoints, but both dimensions are
+configurable:
+
+```bash
+python scripts/interactive_maze.py
+```
+
+On startup, each algorithm uses its latest completed version. `v1` means the
+low tier: the smaller ordinary dataset (currently 2,000 training layouts).
+`v2` means the medium tier: the larger ordinary dataset (currently 5,000
+training layouts). `v3` means the high tier: the stratified/deduplicated
+dataset. If an algorithm has no completed
+checkpoint, its panel remains reserved and says `Training not complete`. Build
+the source layout by choosing Wall, Start, or Goal mode. In Wall mode, click a
+cell to toggle it or drag across the grid to paint a continuous wall; Start and
+Goal cells are never overwritten. The source title shows the current optimal
+path length. Press Run inference to copy the layout into
+the five agent panels and run each agent independently. Each panel displays its
+own rollout and happy/sad result face. For a checkpoint trained on another grid
+size, pass `--height N --width M`; all available checkpoints must match those
+dimensions. Each inference run is appended to
+`runs/interactive_maze/failure_runs.jsonl`, including the maze snapshot and
+failed/missed agents. Each failure is deduplicated by exact task configuration,
+algorithm, and version; action/position trajectories are intentionally not
+stored because the current goal is a compact failure/task catalogue. Override
+the destination with `--failure-log PATH` when needed.
+
+The Edit mode box also has `Load random train` and `Load random val` buttons.
+They load an unseeded task from the v3 dataset: train samples from `train.npz`
+or `train_tune.npz`, while val samples from `validation.npz`,
+`validation_tune.npz`, or `validation_natural.npz`.
+
 ## Command Reference
 
 The commands below use automatic dataset naming and store generated

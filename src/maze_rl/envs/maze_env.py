@@ -99,6 +99,92 @@ class MazeEnv(gym.Env):
         self.wall_collisions = 0
         self.optimal_path_length = None
 
+    @classmethod
+    def from_arrays(
+        cls,
+        maze: np.ndarray,
+        start: tuple[int, int],
+        goal: tuple[int, int],
+        max_steps: int = 200,
+        goal_reward: float = 1.0,
+        step_penalty: float = -0.01,
+        wall_penalty: float = -0.05,
+    ) -> "MazeEnv":
+        """Create a single-task environment from an in-memory maze."""
+        env = cls.__new__(cls)
+        gym.Env.__init__(env)
+
+        maze_array = np.asarray(maze, dtype=np.uint8)
+        if maze_array.ndim != 2:
+            raise ValueError(
+                "maze must be a two-dimensional array."
+            )
+        if not np.isin(maze_array, (0, 1)).all():
+            raise ValueError(
+                "maze must contain only 0 (free) and 1 (wall)."
+            )
+
+        start_array = np.asarray(start, dtype=np.int64)
+        goal_array = np.asarray(goal, dtype=np.int64)
+        if start_array.shape != (2,) or goal_array.shape != (2,):
+            raise ValueError(
+                "start and goal must each contain row and column."
+            )
+
+        height, width = maze_array.shape
+        start_position = tuple(int(x) for x in start_array)
+        goal_position = tuple(int(x) for x in goal_array)
+        for name, position in (
+            ("start", start_position),
+            ("goal", goal_position),
+        ):
+            row, col = position
+            if not (0 <= row < height and 0 <= col < width):
+                raise ValueError(
+                    f"{name} must be inside the maze."
+                )
+            if maze_array[position] == 1:
+                raise ValueError(
+                    f"{name} must be on a free cell."
+                )
+        if start_position == goal_position:
+            raise ValueError(
+                "start and goal must be different cells."
+            )
+
+        env.layouts = maze_array[None, ...]
+        env.layout_indices = np.asarray([0], dtype=np.int64)
+        env.mazes = env.layouts
+        env.starts = np.asarray([start_position], dtype=np.int64)
+        env.goals = np.asarray([goal_position], dtype=np.int64)
+        env.num_layouts = 1
+        env.num_tasks = 1
+        env.num_mazes = 1
+        env.height = height
+        env.width = width
+        env.max_steps = max_steps
+        env.goal_reward = goal_reward
+        env.step_penalty = step_penalty
+        env.wall_penalty = wall_penalty
+        env.fixed_index = 0
+        env.action_space = spaces.Discrete(4)
+        env.observation_space = spaces.Box(
+            low=0.0,
+            high=1.0,
+            shape=(3, height, width),
+            dtype=np.float32,
+        )
+        env.task_index = 0
+        env.layout_index = 0
+        env.maze_index = 0
+        env.maze = None
+        env.agent_position = None
+        env.goal_position = None
+        env.steps = 0
+        env.wall_collisions = 0
+        env.optimal_path_length = None
+        return env
+
     def _get_observation(self) -> np.ndarray:
         observation = np.zeros(
             (3, self.height, self.width),
