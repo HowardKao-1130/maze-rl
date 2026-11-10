@@ -45,16 +45,6 @@ from maze_rl.agents.networks import (
 )
 from maze_rl.envs.maze_env import MazeEnv
 from maze_rl.evaluation.evaluator import evaluate
-from maze_rl.evaluation.q_plots import plot_q_snapshots
-from maze_rl.evaluation.q_plots import plot_neural_snapshots
-from maze_rl.evaluation.rollout_animations import (
-    plot_rollout_animations,
-)
-from maze_rl.training.plots import (
-    plot_task_training_metrics,
-    plot_training_metrics,
-    write_task_training_metrics_html,
-)
 from scripts.experiment_naming import (
     DEFAULT_DNN_TUNING_OUTPUT_ROOT,
     DEFAULT_EXPERIMENT_OUTPUT_ROOT,
@@ -955,6 +945,10 @@ def main():
     )
 
     if not args.no_rollout_animations:
+        from maze_rl.evaluation.rollout_animations import (
+            plot_rollout_animations,
+        )
+
         rollout_animation_dir = (
             args.rollout_animation_output_dir
             if args.rollout_animation_output_dir is not None
@@ -1053,6 +1047,8 @@ def main():
         args.algorithm in TABULAR_ALGORITHMS
         and not args.no_q_plots
     ):
+        from maze_rl.evaluation.q_plots import plot_q_snapshots
+
         q_snapshots = checkpoint.get(
             "q_snapshots",
             [],
@@ -1118,6 +1114,8 @@ def main():
         }
         and not args.no_q_plots
     ):
+        from maze_rl.evaluation.q_plots import plot_neural_snapshots
+
         model_snapshots = checkpoint.get(
             "model_snapshots",
             [],
@@ -1189,6 +1187,12 @@ def main():
 
     if args.no_plot:
         return
+
+    from maze_rl.training.plots import (
+        plot_task_training_metrics,
+        plot_training_metrics,
+        write_task_training_metrics_html,
+    )
 
     metrics_path = (
         args.training_metrics
