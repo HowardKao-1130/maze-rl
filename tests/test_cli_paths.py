@@ -1067,6 +1067,23 @@ def test_validation_progress_formats_best_in_parentheses():
     )
 
 
+def test_validation_progress_formats_early_stopping_status():
+    assert (
+        format_validation_progress_message(
+            "validation",
+            dataset_epoch=103,
+            task_selection_pass_budget=200,
+            validation_score=0.419,
+            success_rate=0.625,
+            best_score=0.439,
+            early_stopping_counter=2,
+            early_stopping_patience=3,
+        )
+        == "                       val          eff=0.419 "
+        "succ=0.625 es=2/3 (best=0.439)"
+    )
+
+
 def test_validation_progress_formats_train_greedy_label():
     assert (
         format_validation_progress_message(
@@ -1122,12 +1139,10 @@ def test_training_epoch_progress_includes_success_and_efficiency():
                     epoch=2,
                 ),
             ],
-            early_stopping_counter=7,
-            early_stopping_patience=35,
         )
         == "pass 2/4 [50.0%] | task 1/1 [100.0%]\n"
         "                   train        eff=0.714 "
-        "succ=1.000 steps=7.0 es=7/35"
+        "succ=1.000 steps=7.0"
     )
 
 
@@ -1164,12 +1179,10 @@ def test_training_epoch_progress_formats_epoch_summary():
                     path_efficiency=0.0,
                 ),
             ],
-            early_stopping_counter=3,
-            early_stopping_patience=10,
         )
         == "pass    5/1000 [0.5%] | task 2/2 [100.0%]\n"
         "                        train        eff=0.400 "
-        "succ=0.500 steps=16.0 es=3/10"
+        "succ=0.500 steps=16.0"
     )
 
 

@@ -262,8 +262,10 @@ Subplot titles use short score labels (`t`, `v`, `vs`, `tg`) and red
 `INCOMPLETE` badges mark runs that cannot be confirmed complete from
 `training_summary.json`.
 
-The command also writes separate training-history plots for success rate,
-length-weighted path success, and length-weighted path efficiency. The
+The command also writes separate training-history plots for path efficiency
+and success rate by default. Pass `--metric` to replace the path-efficiency
+plot with another supported metric. The memory-intensive optimal path-length
+diagnostic is opt-in with `--include-optimal-path-length`. The
 `optimal_path_length_summary.png` plot shows the observed optimal-path-length
 distribution and the corresponding mean success rate and path efficiency for
 each length in the raw training rollouts.
@@ -565,7 +567,8 @@ The command writes
 subplot summary of the best validation trial for each agent, and one
 `<algorithm>_validation_metrics_trials.png` grid per neural agent containing
 per-trial `val`, `val-same`, and `val-natural` curves overlaid with the
-matching epoch-aligned training curve when `metrics.csv` is available.
+matching validation-aligned training curve on a dataset-epoch x-axis when
+`metrics.csv` is available.
 Trial subplot titles show performance at the validation-selected checkpoint and
 use short score labels (`t`, `v`, `vs`, `vn`). Red `INCOMPLETE` badges mark unfinished
 trials or missing grid slots when they cannot be confirmed complete from
@@ -609,7 +612,9 @@ subplots but draws one line per task. It also writes
 `task_training_metrics.html`, a self-contained interactive version with task
 filters for comparing selected tasks when the static lines overlap. Rolling
 means are disabled by default; pass `--rolling-window 10` to add the rolling
-mean to the aggregate plot.
+mean to the aggregate plot. Training curves use dataset epoch as their primary
+x-axis; cumulative environment steps and internal updates remain available as
+additional views.
 
 Evaluation also writes the training plot automatically when it can find
 `metrics.csv` next to the checkpoint. The checkpoint path defaults to

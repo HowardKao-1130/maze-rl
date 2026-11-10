@@ -150,18 +150,73 @@ def aggregate_episode_rows_by(
 def path_length_metrics(
     rows: Iterable[Mapping[str, Any]],
 ) -> dict[int, dict[str, float]]:
-    grouped: dict[int, list[Mapping[str, Any]]] = defaultdict(list)
+    stats_by_length: dict[int, dict[str, float]] = {}
 
     for row in rows:
         length = _path_length(row)
         if length is None:
             continue
-        grouped[int(length)].append(row)
 
-    summaries = {}
-    for length, length_rows in sorted(grouped.items()):
-        summary = aggregate_episode_rows(length_rows)
-        if summary is not None:
-            summaries[length] = summary
+        length_key = int(length)
+        stats = stats_by_length.setdefault(
+            length_key,
+            {
+                "episodes": 0.0,
+                "success_sum": 0.0,
+                "success_count": 0.0,
+                "efficiency_sum": 0.0,
+                "efficiency_count": 0.0,
+                "weighted_success": 0.0,
+                "path_length_total": 0.0,
+                "weighted_efficiency": 0.0,
+                "weighted_efficiency_total": 0.0,
+            },
+        )
+        stats["episodes"] += 1.0
+        stats["path_length_total"] += length
+
+        success = _success(row)
+        if success is not None:
+            stats["success_sum"] += float(success)
+            stats["success_count"] += 1.0
+            stats["weighted_success"] += (
+                length * float(success)
+            )
+
+        efficiency = _efficiency(row)
+        if efficiency is not None:
+            stats["efficiency_sum"] += efficiency
+            stats["efficiency_count"] += 1.0
+            stats["weighted_efficiency"] += (
+                length * efficiency
+            )
+            stats["weighted_efficiency_total"] += length
+
+    summaries: dict[int, dict[str, float]] = {}
+    for length, stats in sorted(stats_by_length.items()):
+        summary = {
+            "episodes": stats["episodes"],
+        }
+        if stats["success_count"] > 0:
+            summary["success_rate"] = (
+                stats["success_sum"]
+                / stats["success_count"]
+            )
+        if stats["efficiency_count"] > 0:
+            summary["mean_path_efficiency"] = (
+                stats["efficiency_sum"]
+                / stats["efficiency_count"]
+            )
+        if stats["path_length_total"] > 0:
+            summary[WEIGHTED_PATH_SUCCESS] = (
+                stats["weighted_success"]
+                / stats["path_length_total"]
+            )
+        if stats["weighted_efficiency_total"] > 0:
+            summary[WEIGHTED_PATH_EFFICIENCY] = (
+                stats["weighted_efficiency"]
+                / stats["weighted_efficiency_total"]
+            )
+        summaries[length] = summary
 
     return summaries

@@ -3270,7 +3270,7 @@ def test_validation_metric_montage_uses_fixed_bounded_trial_scale(
     )
 
 
-def test_validation_metric_montage_uses_requested_budget_x_axis_for_early_stop(
+def test_validation_metric_montage_uses_early_stop_dataset_epoch_limit(
     tmp_path,
     monkeypatch,
 ):
@@ -3347,14 +3347,12 @@ def test_validation_metric_montage_uses_requested_budget_x_axis_for_early_stop(
 
     assert saved_figures[0]["first_xlim"] == (
         0.0,
-        8.0,
+        2.0,
     )
     assert saved_figures[0]["first_xticks"] == (
         0,
+        1,
         2,
-        4,
-        6,
-        8,
     )
     assert saved_figures[0][
         "first_xtick_labels_visible"

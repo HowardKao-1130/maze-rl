@@ -27,7 +27,6 @@ from scripts.dataset_paths import dataset_bundle_dir_for_reference
 from scripts.summary_metrics import (
     WEIGHTED_PATH_EFFICIENCY,
     WEIGHTED_PATH_SUCCESS,
-    aggregate_episode_rows,
     path_length_metrics,
 )
 
@@ -219,6 +218,14 @@ def parse_args() -> argparse.Namespace:
             "plot raw epoch means."
         ),
     )
+    parser.add_argument(
+        "--include-optimal-path-length",
+        action="store_true",
+        help=(
+            "Also generate the memory-intensive optimal path-length "
+            "diagnostic plot."
+        ),
+    )
     args = parser.parse_args()
     resolve_summary_paths(args)
     return args
@@ -349,6 +356,171 @@ def read_training_summary(
         return json.load(file)
 
 
+def training_epoch_limit(
+    metrics_path: Path,
+) -> int | None:
+    """Return the effective dataset-epoch budget for a training run."""
+    summary_path = metrics_path.parent / "training_summary.json"
+
+    if not summary_path.exists():
+        return None
+
+    try:
+        summary = read_training_summary(summary_path)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(summary, dict):
+        return None
+
+    limits = []
+    for field in (
+        "dataset_epochs_requested",
+        "task_selection_passes_requested",
+    ):
+        try:
+            value = int(summary.get(field))
+        except (TypeError, ValueError):
+            continue
+
+        if value > 0:
+            limits.append(value)
+
+    if (
+        summary.get("stopped_early") is True
+        or summary.get("status") == "early_stopped"
+    ):
+        for field in (
+            "stopped_epoch",
+            "dataset_epochs_completed",
+            "task_selection_passes_completed",
+        ):
+            try:
+                stopped_epoch = int(summary.get(field))
+            except (TypeError, ValueError):
+                continue
+
+            if stopped_epoch > 0:
+                limits.append(stopped_epoch)
+                break
+
+    return min(limits) if limits else None
+
+
+def iter_training_rows(
+    metrics_path: Path,
+):
+    limit = training_epoch_limit(metrics_path)
+
+    with metrics_path.open(newline="") as file:
+        for row in csv.DictReader(file):
+            epoch = parse_float(
+                row.get("epoch")
+                or row.get("dataset_epoch")
+            )
+            if epoch is None or (
+                limit is not None
+                and epoch > limit
+            ):
+                continue
+
+            yield row
+
+
+def training_metric_points(
+    metrics_path: Path,
+    *,
+    metric: str,
+) -> list[tuple[int, float]]:
+    sums_by_epoch: dict[int, float] = {}
+    counts_by_epoch: dict[int, int] = {}
+    weighted_by_epoch: dict[int, dict[str, float]] = {}
+
+    for row in iter_training_rows(metrics_path):
+        epoch_value = parse_float(row.get("epoch"))
+        if epoch_value is None:
+            continue
+        epoch = int(epoch_value)
+
+        if metric in {
+            WEIGHTED_PATH_SUCCESS,
+            WEIGHTED_PATH_EFFICIENCY,
+        }:
+            stats = weighted_by_epoch.setdefault(
+                epoch,
+                {
+                    "path_length_total": 0.0,
+                    "weighted_success": 0.0,
+                    "weighted_efficiency_total": 0.0,
+                    "weighted_efficiency": 0.0,
+                },
+            )
+            path_length = parse_float(
+                row.get("optimal_path_length")
+            )
+            if path_length is None or path_length <= 0:
+                continue
+
+            stats["path_length_total"] += path_length
+            success = parse_float(row.get("success"))
+            if success is not None:
+                stats["weighted_success"] += (
+                    path_length * float(bool(success))
+                )
+
+            efficiency = parse_float(
+                row.get("path_efficiency")
+            )
+            if efficiency is not None:
+                stats["weighted_efficiency_total"] += path_length
+                stats["weighted_efficiency"] += (
+                    path_length * efficiency
+                )
+            continue
+
+        value = parse_float(
+            row.get(metric_column(metric))
+        )
+        if value is None:
+            continue
+
+        sums_by_epoch[epoch] = sums_by_epoch.get(epoch, 0.0) + value
+        counts_by_epoch[epoch] = counts_by_epoch.get(epoch, 0) + 1
+
+    if metric in {
+        WEIGHTED_PATH_SUCCESS,
+        WEIGHTED_PATH_EFFICIENCY,
+    }:
+        points = []
+        for epoch, stats in sorted(weighted_by_epoch.items()):
+            if metric == WEIGHTED_PATH_SUCCESS:
+                denominator = stats["path_length_total"]
+                value = (
+                    stats["weighted_success"] / denominator
+                    if denominator > 0
+                    else None
+                )
+            else:
+                denominator = stats["weighted_efficiency_total"]
+                value = (
+                    stats["weighted_efficiency"] / denominator
+                    if denominator > 0
+                    else None
+                )
+
+            if value is not None:
+                points.append((epoch, value))
+        return points
+
+    return [
+        (
+            epoch,
+            sums_by_epoch[epoch] / counts_by_epoch[epoch],
+        )
+        for epoch in sorted(sums_by_epoch)
+    ]
+
+
 def training_summary_completed(
     training_summary: dict[str, Any],
 ) -> bool:
@@ -451,57 +623,13 @@ def load_training_run_series(
     if not is_neural_training_run(metrics_path):
         return None
 
-    values_by_epoch: dict[int, list[float]] = {}
+    train_points = training_metric_points(
+        metrics_path,
+        metric=metric,
+    )
 
-    with metrics_path.open(newline="") as file:
-        rows = list(csv.DictReader(file))
-
-    if metric in {
-        WEIGHTED_PATH_SUCCESS,
-        WEIGHTED_PATH_EFFICIENCY,
-    }:
-        rows_by_epoch: dict[int, list[dict[str, str]]] = {}
-        for row in rows:
-            epoch_value = parse_float(row.get("epoch"))
-            if epoch_value is None:
-                continue
-            rows_by_epoch.setdefault(int(epoch_value), []).append(row)
-
-        for epoch, epoch_rows in rows_by_epoch.items():
-            summary = aggregate_episode_rows(epoch_rows)
-            if summary is None or metric not in summary:
-                continue
-            values_by_epoch[epoch] = [summary[metric]]
-    else:
-        column_name = metric_column(metric)
-        for row in rows:
-            value = parse_float(row.get(column_name))
-            if value is None:
-                continue
-
-            epoch_value = parse_float(row.get("epoch"))
-            if epoch_value is None:
-                continue
-
-            values_by_epoch.setdefault(
-                int(epoch_value),
-                [],
-            ).append(value)
-
-    if not values_by_epoch:
+    if not train_points:
         return None
-
-    train_points = [
-        (
-            epoch,
-            float(
-                np.mean(values)
-            ),
-        )
-        for epoch, values in sorted(
-            values_by_epoch.items()
-        )
-    ]
 
     return TrainingRunSeries(
         algorithm=infer_algorithm(metrics_path),
@@ -537,13 +665,12 @@ def load_validation_run_series(
         str,
         dict[int, list[float]],
     ] = {}
+    limit = training_epoch_limit(metrics_path)
 
     with metrics_path.open(
         newline="",
     ) as file:
-        reader = csv.DictReader(file)
-
-        for row in reader:
+        for row in csv.DictReader(file):
             value = parse_float(
                 row.get(column_name)
             )
@@ -555,7 +682,10 @@ def load_validation_run_series(
                 row.get("dataset_epoch")
             )
 
-            if epoch_value is None:
+            if epoch_value is None or (
+                limit is not None
+                and epoch_value > limit
+            ):
                 continue
 
             split = canonical_split(
@@ -1108,10 +1238,9 @@ def plot_path_length_summary(
     records = []
 
     for item in series:
-        with item.metrics_path.open(newline="") as file:
-            rows = list(csv.DictReader(file))
-
-        metrics = path_length_metrics(rows)
+        metrics = path_length_metrics(
+            iter_training_rows(item.metrics_path)
+        )
         if metrics:
             records.append((item, metrics))
 
@@ -1155,6 +1284,7 @@ def plot_path_length_summary(
             lengths,
             success_rates,
             marker="o",
+            markersize=3.8,
             color="#1f77b4",
         )
         success_axis.set_title(f"{item.label}: success by path length")
@@ -1166,6 +1296,7 @@ def plot_path_length_summary(
             lengths,
             efficiencies,
             marker="o",
+            markersize=3.8,
             color="#d62728",
         )
         efficiency_axis.set_title(
@@ -1203,15 +1334,11 @@ def plot_path_length_summary(
 
 def main() -> None:
     args = parse_args()
-    summary_metrics = []
-    for metric in (
+    summary_metrics = [
         args.metric,
         "success_rate",
-        WEIGHTED_PATH_SUCCESS,
-        WEIGHTED_PATH_EFFICIENCY,
-    ):
-        if metric not in summary_metrics:
-            summary_metrics.append(metric)
+    ]
+    summary_metrics = list(dict.fromkeys(summary_metrics))
 
     for metric in summary_metrics:
         print_summary_section(
@@ -1244,33 +1371,34 @@ def main() -> None:
             )
         )
 
-    path_series = collect_training_run_series(
-        args.runs_dir,
-        metric="success_rate",
-    )
-    path_length_output_path = (
-        args.output_dir / "optimal_path_length_summary.png"
-    )
-    print_summary_section(
-        "Summary: optimal path length diagnostics",
-    )
-    path_length_count = plot_path_length_summary(
-        path_series,
-        output_path=path_length_output_path,
-    )
-    if path_length_count:
-        print(
-            format_saved_file_message(
-                "Saved optimal path length diagnostics to ",
-                path_length_output_path,
-                f" ({path_length_count} run(s))",
+    if args.include_optimal_path_length:
+        path_series = collect_training_run_series(
+            args.runs_dir,
+            metric="success_rate",
+        )
+        path_length_output_path = (
+            args.output_dir / "optimal_path_length_summary.png"
+        )
+        print_summary_section(
+            "Summary: optimal path length diagnostics",
+        )
+        path_length_count = plot_path_length_summary(
+            path_series,
+            output_path=path_length_output_path,
+        )
+        if path_length_count:
+            print(
+                format_saved_file_message(
+                    "Saved optimal path length diagnostics to ",
+                    path_length_output_path,
+                    f" ({path_length_count} run(s))",
+                )
             )
-        )
-    else:
-        print(
-            "Skipped optimal path length diagnostics; no raw episode "
-            "metrics were found."
-        )
+        else:
+            print(
+                "Skipped optimal path length diagnostics; no raw episode "
+                "metrics were found."
+            )
 
 
 if __name__ == "__main__":

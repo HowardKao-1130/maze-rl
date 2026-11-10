@@ -27,7 +27,6 @@ from scripts.dataset_paths import dataset_bundle_dir_for_reference
 from scripts.summary_metrics import (
     WEIGHTED_PATH_EFFICIENCY,
     WEIGHTED_PATH_SUCCESS,
-    aggregate_episode_rows,
     path_length_metrics,
 )
 from scripts.train import NEURAL_ALGORITHMS
@@ -73,6 +72,74 @@ def read_training_summary(
 ) -> dict[str, Any]:
     with path.open() as file:
         return json.load(file)
+
+
+def training_epoch_limit(
+    metrics_path: Path,
+) -> int | None:
+    """Return the effective dataset-epoch budget for a training run."""
+    summary_path = metrics_path.parent / "training_summary.json"
+
+    if not summary_path.exists():
+        return None
+
+    try:
+        summary = read_training_summary(summary_path)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(summary, dict):
+        return None
+
+    limits = []
+    for field in (
+        "dataset_epochs_requested",
+        "task_selection_passes_requested",
+    ):
+        try:
+            value = int(summary.get(field))
+        except (TypeError, ValueError):
+            continue
+
+        if value > 0:
+            limits.append(value)
+
+    if (
+        summary.get("stopped_early") is True
+        or summary.get("status") == "early_stopped"
+    ):
+        for field in (
+            "stopped_epoch",
+            "dataset_epochs_completed",
+            "task_selection_passes_completed",
+        ):
+            try:
+                stopped_epoch = int(summary.get(field))
+            except (TypeError, ValueError):
+                continue
+
+            if stopped_epoch > 0:
+                limits.append(stopped_epoch)
+                break
+
+    return min(limits) if limits else None
+
+
+def iter_training_rows(
+    metrics_path: Path,
+):
+    limit = training_epoch_limit(metrics_path)
+
+    with metrics_path.open(newline="") as file:
+        for row in csv.DictReader(file):
+            epoch = parse_summary_float(row.get("epoch"))
+            if epoch is None or (
+                limit is not None
+                and epoch > limit
+            ):
+                continue
+
+            yield row
 
 
 def training_summary_completed(
@@ -585,81 +652,21 @@ def best_train_metric(
     if not metrics_path.exists():
         return None
 
-    if metric in {
-        WEIGHTED_PATH_SUCCESS,
-        WEIGHTED_PATH_EFFICIENCY,
-    }:
-        series = training_metric_series(
-            metrics_path,
-            metric=metric,
-        )
-        if aligned_epochs is not None:
-            series = [
-                point
-                for point in series
-                if point[0] in aligned_epochs
-            ]
-        return max(
-            (value for _, value in series),
-            default=None,
-        )
+    series = training_metric_series(
+        metrics_path,
+        metric=metric,
+    )
+    if aligned_epochs is not None:
+        series = [
+            point
+            for point in series
+            if point[0] in aligned_epochs
+        ]
 
-    with metrics_path.open(
-        newline="",
-    ) as file:
-        rows = list(
-            csv.DictReader(file)
-        )
-
-    for candidate in train_metric_candidates(
-        metric
-    ):
-        values_by_epoch: dict[int, list[float]] = {}
-
-        for row in rows:
-            if candidate not in row:
-                continue
-
-            if not training_metric_row_matches(
-                row,
-                metric=metric,
-                candidate=candidate,
-            ):
-                continue
-
-            value = parse_summary_float(
-                row.get(candidate)
-            )
-
-            if value is None:
-                continue
-
-            epoch = int(
-                row.get("epoch")
-                or row.get("episode")
-                or 0
-            )
-
-            if (
-                aligned_epochs is not None
-                and epoch not in aligned_epochs
-            ):
-                continue
-
-            values_by_epoch.setdefault(
-                epoch,
-                [],
-            ).append(value)
-
-        if values_by_epoch:
-            return max(
-                float(
-                    np.mean(epoch_values)
-                )
-                for epoch_values in values_by_epoch.values()
-            )
-
-    return None
+    return max(
+        (value for _, value in series),
+        default=None,
+    )
 
 
 def validation_metric_series(
@@ -671,13 +678,14 @@ def validation_metric_series(
         split: {}
         for split in SUMMARY_SPLITS
     }
+    limit = training_epoch_limit(
+        metrics_path.parent / "metrics.csv"
+    )
 
     with metrics_path.open(
         newline="",
     ) as file:
-        reader = csv.DictReader(file)
-
-        for row in reader:
+        for row in csv.DictReader(file):
             split = canonical_summary_split(
                 row.get(
                     "split",
@@ -698,6 +706,8 @@ def validation_metric_series(
             epoch = int(
                 row["dataset_epoch"]
             )
+            if limit is not None and epoch > limit:
+                continue
             points_by_split[split].setdefault(
                 epoch,
                 [],
@@ -769,77 +779,14 @@ def aligned_training_metric_series(
     if not metrics_path.exists() or not aligned_epochs:
         return []
 
-    if metric in {
-        WEIGHTED_PATH_SUCCESS,
-        WEIGHTED_PATH_EFFICIENCY,
-    }:
-        return [
-            point
-            for point in training_metric_series(
-                metrics_path,
-                metric=metric,
-            )
-            if point[0] in aligned_epochs
-        ]
-
-    with metrics_path.open(
-        newline="",
-    ) as file:
-        rows = list(
-            csv.DictReader(file)
+    return [
+        point
+        for point in training_metric_series(
+            metrics_path,
+            metric=metric,
         )
-
-    for candidate in train_metric_candidates(
-        metric
-    ):
-        values_by_epoch: dict[int, list[float]] = {}
-
-        for row in rows:
-            if candidate not in row:
-                continue
-
-            if not training_metric_row_matches(
-                row,
-                metric=metric,
-                candidate=candidate,
-            ):
-                continue
-
-            epoch = int(
-                row.get("epoch")
-                or row.get("episode")
-                or 0
-            )
-
-            if epoch not in aligned_epochs:
-                continue
-
-            value = parse_summary_float(
-                row.get(candidate)
-            )
-
-            if value is None:
-                continue
-
-            values_by_epoch.setdefault(
-                epoch,
-                [],
-            ).append(value)
-
-        if values_by_epoch:
-            return [
-                (
-                    epoch,
-                    float(
-                        np.mean(values)
-                    ),
-                )
-                for epoch, values in sorted(
-                    values_by_epoch.items()
-                )
-            ]
-
-    return []
+        if point[0] in aligned_epochs
+    ]
 
 
 def training_metric_series(
@@ -850,43 +797,84 @@ def training_metric_series(
     if not metrics_path.exists():
         return []
 
-    with metrics_path.open(
-        newline="",
-    ) as file:
-        rows = list(
-            csv.DictReader(file)
-        )
-
     if metric in {
         WEIGHTED_PATH_SUCCESS,
         WEIGHTED_PATH_EFFICIENCY,
     }:
-        rows_by_epoch: dict[int, list[dict[str, str]]] = {}
-        for row in rows:
-            epoch = parse_summary_float(
+        weighted_by_epoch: dict[int, dict[str, float]] = {}
+        for row in iter_training_rows(metrics_path):
+            epoch_value = parse_summary_float(
                 row.get("epoch")
             )
-            if epoch is None:
+            path_length = parse_summary_float(
+                row.get("optimal_path_length")
+            )
+            if (
+                epoch_value is None
+                or path_length is None
+                or path_length <= 0
+            ):
                 continue
-            rows_by_epoch.setdefault(int(epoch), []).append(row)
+
+            epoch = int(epoch_value)
+            stats = weighted_by_epoch.setdefault(
+                epoch,
+                {
+                    "path_length_total": 0.0,
+                    "weighted_success": 0.0,
+                    "weighted_efficiency_total": 0.0,
+                    "weighted_efficiency": 0.0,
+                },
+            )
+            stats["path_length_total"] += path_length
+            success = parse_summary_float(row.get("success"))
+            if success is not None:
+                stats["weighted_success"] += (
+                    path_length * float(bool(success))
+                )
+            efficiency = parse_summary_float(
+                row.get("path_efficiency")
+            )
+            if efficiency is not None:
+                stats["weighted_efficiency_total"] += path_length
+                stats["weighted_efficiency"] += (
+                    path_length * efficiency
+                )
 
         points = []
-        for epoch, epoch_rows in sorted(rows_by_epoch.items()):
-            summary = aggregate_episode_rows(epoch_rows)
-            if summary is None or metric not in summary:
-                continue
-            points.append((epoch, summary[metric]))
+        for epoch, stats in sorted(weighted_by_epoch.items()):
+            if metric == WEIGHTED_PATH_SUCCESS:
+                denominator = stats["path_length_total"]
+                value = (
+                    stats["weighted_success"] / denominator
+                    if denominator > 0
+                    else None
+                )
+            else:
+                denominator = stats["weighted_efficiency_total"]
+                value = (
+                    stats["weighted_efficiency"] / denominator
+                    if denominator > 0
+                    else None
+                )
+
+            if value is not None:
+                points.append((epoch, value))
         return points
 
-    for candidate in train_metric_candidates(
-        metric
-    ):
-        values_by_epoch: dict[int, list[float]] = {}
+    values_by_candidate = {
+        candidate: {}
+        for candidate in train_metric_candidates(metric)
+    }
+    for row in iter_training_rows(metrics_path):
+        epoch_value = parse_summary_float(row.get("epoch"))
+        if epoch_value is None:
+            continue
+        epoch = int(epoch_value)
 
-        for row in rows:
+        for candidate in values_by_candidate:
             if candidate not in row:
                 continue
-
             if not training_metric_row_matches(
                 row,
                 metric=metric,
@@ -894,34 +882,25 @@ def training_metric_series(
             ):
                 continue
 
-            epoch = int(
-                row.get("epoch")
-                or row.get("episode")
-                or 0
-            )
-            value = parse_summary_float(
-                row.get(candidate)
-            )
-
+            value = parse_summary_float(row.get(candidate))
             if value is None:
                 continue
-
-            values_by_epoch.setdefault(
+            epoch_values = values_by_candidate[candidate].setdefault(
                 epoch,
-                [],
-            ).append(value)
+                [0.0, 0],
+            )
+            epoch_values[0] += value
+            epoch_values[1] += 1
 
+    for candidate in train_metric_candidates(metric):
+        values_by_epoch = values_by_candidate[candidate]
         if values_by_epoch:
             return [
                 (
                     epoch,
-                    float(
-                        np.mean(values)
-                    ),
+                    values[0] / values[1],
                 )
-                for epoch, values in sorted(
-                    values_by_epoch.items()
-                )
+                for epoch, values in sorted(values_by_epoch.items())
             ]
 
     return []
@@ -2041,9 +2020,15 @@ def plot_path_length_summary(
         if not source_path.exists():
             continue
 
-        with source_path.open(newline="") as file:
-            rows = list(csv.DictReader(file))
-        metrics = path_length_metrics(rows)
+        if source_path == artifact["training_metrics_path"]:
+            metrics = path_length_metrics(
+                iter_training_rows(source_path)
+            )
+        else:
+            with source_path.open(newline="") as file:
+                metrics = path_length_metrics(
+                    csv.DictReader(file)
+                )
         if metrics:
             source_label = (
                 "validation"
@@ -2096,6 +2081,7 @@ def plot_path_length_summary(
             lengths,
             success_rates,
             marker="o",
+            markersize=3.8,
             color="#1f77b4",
         )
         success_axis.set_title(f"{title_prefix}: success by length")
@@ -2107,6 +2093,7 @@ def plot_path_length_summary(
             lengths,
             efficiencies,
             marker="o",
+            markersize=3.8,
             color="#d62728",
         )
         efficiency_axis.set_title(f"{title_prefix}: efficiency by length")
@@ -2140,61 +2127,12 @@ def plot_path_length_summary(
     return len(records)
 
 
-def parse_summary_positive_int(
-    value: Any,
-) -> int | None:
-    if isinstance(
-        value,
-        bool,
-    ):
-        return None
-
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-
-    if parsed <= 0:
-        return None
-
-    return parsed
-
-
 def summary_axis_requested_budget(
     artifact: dict[str, Any],
 ) -> int | None:
-    training_summary_path = artifact_training_summary_path(
-        artifact
+    return training_epoch_limit(
+        artifact["training_metrics_path"]
     )
-
-    if not training_summary_path.exists():
-        return None
-
-    try:
-        training_summary = read_training_summary(
-            training_summary_path
-        )
-    except (OSError, json.JSONDecodeError):
-        return None
-
-    if not isinstance(
-        training_summary,
-        dict,
-    ):
-        return None
-
-    for name in (
-        "dataset_epochs_requested",
-        "task_selection_passes_requested",
-    ):
-        budget = parse_summary_positive_int(
-            training_summary.get(name)
-        )
-
-        if budget is not None:
-            return budget
-
-    return None
 
 
 def plotted_summary_max_epoch(
@@ -2922,14 +2860,13 @@ def plot_validation_metric_montage(
                 axis,
                 artifact,
             )
+            validation_series = validation_metric_series(
+                artifact["metrics_path"],
+                metric=metric,
+            )
             draw_best_epoch_marker(
                 axis,
-                best_validation_epoch(
-                    validation_metric_series(
-                        artifact["metrics_path"],
-                        metric=metric,
-                    )
-                ),
+                best_validation_epoch(validation_series),
             )
 
             if plotted:

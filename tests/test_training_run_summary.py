@@ -7,12 +7,31 @@ from scripts.summarize_training_runs import (
     collect_training_run_series,
     file_url_for_path,
     format_saved_file_message,
+    parse_args,
     plot_path_length_summary,
     plot_training_run_summary,
     print_summary_section,
     resolve_summary_paths,
     subplot_title,
 )
+
+
+def test_optimal_path_length_diagnostics_are_opt_in(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "summarize_training_runs.py",
+            "--runs-dir",
+            str(tmp_path),
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.include_optimal_path_length is False
 
 
 def write_metrics_csv(

@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 
 
 X_AXIS_LABELS = {
-    "epoch": "Epoch",
+    "epoch": "Dataset epoch",
     "env_steps": "Cumulative env steps",
     "internal_updates": "Cumulative internal updates",
 }
@@ -59,10 +59,81 @@ def parse_optional_bool(value) -> bool | None:
     )
 
 
+def training_epoch_limit(
+    metrics_path: Path,
+) -> int | None:
+    summary_path = metrics_path.parent / "training_summary.json"
+
+    if not summary_path.exists():
+        return None
+
+    try:
+        with summary_path.open() as file:
+            summary = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(summary, dict):
+        return None
+
+    limits = []
+    for field in (
+        "dataset_epochs_requested",
+        "task_selection_passes_requested",
+    ):
+        try:
+            value = int(summary.get(field))
+        except (TypeError, ValueError):
+            continue
+
+        if value > 0:
+            limits.append(value)
+
+    if (
+        summary.get("stopped_early") is True
+        or summary.get("status") == "early_stopped"
+    ):
+        for field in (
+            "stopped_epoch",
+            "dataset_epochs_completed",
+            "task_selection_passes_completed",
+        ):
+            try:
+                stopped_epoch = int(summary.get(field))
+            except (TypeError, ValueError):
+                continue
+
+            if stopped_epoch > 0:
+                limits.append(stopped_epoch)
+                break
+
+    return min(limits) if limits else None
+
+
 def load_rows(path: Path) -> list[dict]:
     with path.open(newline="") as file:
         reader = csv.DictReader(file)
-        return list(reader)
+        rows = list(reader)
+
+    limit = training_epoch_limit(path)
+    if limit is None:
+        return rows
+
+    filtered_rows = []
+    for row in rows:
+        try:
+            epoch = int(
+                row.get("epoch")
+                or row.get("dataset_epoch")
+                or 0
+            )
+        except (TypeError, ValueError):
+            continue
+
+        if epoch <= limit:
+            filtered_rows.append(row)
+
+    return filtered_rows
 
 
 def add_cumulative_counters(
@@ -1209,6 +1280,7 @@ def plot_validation_metrics(
                 [value for _, value in points],
                 marker="o",
                 linewidth=1.5,
+                markersize=3.8,
                 label=VALIDATION_SPLIT_LABELS.get(
                     split,
                     split,

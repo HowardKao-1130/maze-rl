@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help=(
-            "Number of epochs used for rolling means. "
+            "Number of training points used for rolling means. "
             "Use 0 to disable rolling means."
         ),
     )

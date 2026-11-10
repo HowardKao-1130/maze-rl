@@ -2971,8 +2971,6 @@ def format_training_epoch_progress_message(
     task_selection_pass_budget: int,
     epoch_metrics,
     total_tasks: int | None = None,
-    early_stopping_counter: int | None = None,
-    early_stopping_patience: int | None = None,
 ) -> str:
     success_rate = float(
         np.mean(
@@ -2997,14 +2995,6 @@ def format_training_epoch_progress_message(
                 for metrics in epoch_metrics
             ]
         )
-    )
-    early_stopping_status = (
-        "-"
-        if (
-            early_stopping_counter is None
-            or early_stopping_patience is None
-        )
-        else f"{early_stopping_counter}/{early_stopping_patience}"
     )
     completed_tasks = (
         len(
@@ -3036,8 +3026,7 @@ def format_training_epoch_progress_message(
         )
         + f"{'train':<12s} eff={mean_path_efficiency:.3f} "
         f"succ={success_rate:.3f} "
-        f"steps={mean_steps:.1f} "
-        f"es={early_stopping_status}"
+        f"steps={mean_steps:.1f}"
     )
 
 
@@ -3048,6 +3037,8 @@ def format_validation_progress_message(
     validation_score: float,
     success_rate: float | None = None,
     best_score: float | None = None,
+    early_stopping_counter: int | None = None,
+    early_stopping_patience: int | None = None,
 ) -> str:
     split_label = {
         "validation": "val",
@@ -3065,6 +3056,15 @@ def format_validation_progress_message(
 
     if success_rate is not None:
         message += f" succ={success_rate:.3f}"
+
+    if (
+        early_stopping_counter is not None
+        and early_stopping_patience is not None
+    ):
+        message += (
+            f" es={early_stopping_counter}/"
+            f"{early_stopping_patience}"
+        )
 
     if best_score is not None:
         message += f" (best={best_score:.3f})"
@@ -4502,12 +4502,6 @@ def main():
                     task_selection_pass_budget,
                     epoch_metrics,
                     total_tasks=sampler.total_task_count,
-                    early_stopping_counter=(
-                        validation_checks_without_improvement
-                    ),
-                    early_stopping_patience=(
-                        effective_patience
-                    ),
                 )
             )
 
@@ -4700,6 +4694,12 @@ def main():
                         best_score=best_validation[
                             "mean_path_efficiency"
                         ],
+                        early_stopping_counter=(
+                            validation_checks_without_improvement
+                        ),
+                        early_stopping_patience=(
+                            effective_patience
+                        ),
                     )
                 )
 
