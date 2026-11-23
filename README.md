@@ -85,6 +85,29 @@ If the output already contains dataset artifacts, the generator prompts to
 `resume` or `override`; use `--resume` to select resume behavior directly.
 Resume generates only missing splits and preserves completed ones.
 
+### Augment handcrafted failure tasks
+
+Build a new, split-aware dataset from the tracked interactive failure log:
+
+```bash
+PYTHONPATH=src:. python scripts/augment_failure_log.py \
+  --failure-log runs/interactive_maze/failure_runs.jsonl \
+  --output-dir data/datasets/handcrafted_augmented \
+  --perturbations-per-task 2 \
+  --max-variants-per-family 64 \
+  --max-edits 4 \
+  --max-path-increase 5
+```
+
+The pipeline groups D4-equivalent wall layouts into atomic source families,
+stratifies those families by optimal path length, and assigns each family to
+exactly one of `train.npz`, `validation.npz`, or `test.npz`. It then generates
+spatial/reversal variants and bounded wall perturbations without shortening the
+source task's optimal path. Each split also contains `family_indices`,
+`source_record_indices`, `optimal_path_lengths`, and inverse family
+`variant_weights` for downstream sampling and auditability. The current command
+emits the weights; training-sampler integration is a separate step.
+
 ### Train an agent
 
 Train a neural agent against a dataset bundle. The bundle name automatically

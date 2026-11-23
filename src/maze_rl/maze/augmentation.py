@@ -186,6 +186,22 @@ def generate_spatial_variants(task: MazeTask) -> list[TaskVariant]:
     return _spatial_variants_for_base(base)
 
 
+def canonical_layout_key(
+    layout: np.ndarray,
+) -> tuple[tuple[int, int], bytes]:
+    """Return a D4-invariant identity for a maze layout."""
+    array = np.asarray(layout, dtype=np.uint8)
+    if array.ndim != 2:
+        raise ValueError("Maze layouts must be two-dimensional.")
+    candidates = []
+    for quarter_turns in range(4):
+        rotated = np.rot90(array, quarter_turns)
+        candidates.append((rotated.shape, rotated.tobytes()))
+        reflected = np.fliplr(rotated)
+        candidates.append((reflected.shape, reflected.tobytes()))
+    return min(candidates)
+
+
 def generate_perturbed_variants(
     task: MazeTask,
     count: int,
