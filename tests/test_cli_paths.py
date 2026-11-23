@@ -1692,6 +1692,61 @@ def test_resolve_dataset_bundle_args_infers_splits_and_output(
     )
 
 
+def test_resolve_dataset_bundle_args_allows_missing_same_layout_split(
+    tmp_path,
+):
+    dataset_dir = tmp_path / "v4_dataset"
+    dataset_dir.mkdir()
+    train_path = dataset_dir / "train.npz"
+    validation_path = dataset_dir / "validation.npz"
+    train_path.write_bytes(b"train")
+    validation_path.write_bytes(b"validation")
+
+    args = SimpleNamespace(
+        algorithm="ppo",
+        dataset=dataset_dir,
+        validation_dataset=None,
+        same_layout_dataset=None,
+        output_dir=None,
+        experiment_name=None,
+        experiment_root=tmp_path / "runs",
+    )
+
+    resolve_dataset_bundle_args(args)
+
+    assert args.dataset == train_path
+    assert args.validation_dataset == validation_path
+    assert args.same_layout_dataset is None
+
+
+def test_resolve_dataset_bundle_args_can_disable_found_same_layout_split(
+    tmp_path,
+):
+    dataset_dir = tmp_path / "dataset_bundle"
+    dataset_dir.mkdir()
+    for name in (
+        "train.npz",
+        "validation.npz",
+        "same_layout_new_goals.npz",
+    ):
+        (dataset_dir / name).write_bytes(name.encode())
+
+    args = SimpleNamespace(
+        algorithm="ppo",
+        dataset=dataset_dir,
+        validation_dataset=None,
+        same_layout_dataset=None,
+        disable_same_layout_dataset=True,
+        output_dir=None,
+        experiment_name=None,
+        experiment_root=tmp_path / "runs",
+    )
+
+    resolve_dataset_bundle_args(args)
+
+    assert args.same_layout_dataset is None
+
+
 def test_resolve_dataset_bundle_args_can_disable_natural_validation(
     tmp_path,
 ):

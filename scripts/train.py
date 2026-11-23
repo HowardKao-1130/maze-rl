@@ -382,12 +382,18 @@ def resolve_dataset_bundle_args(args) -> None:
 
     if (
         args.same_layout_dataset is None
+        and not getattr(
+            args,
+            "disable_same_layout_dataset",
+            False,
+        )
         and "same_layout_dataset"
         not in getattr(
             args,
             "resume_metadata_cli_fields",
             set(),
         )
+        and same_layout_dataset.exists()
     ):
         args.same_layout_dataset = same_layout_dataset
 
