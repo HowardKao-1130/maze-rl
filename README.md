@@ -39,7 +39,10 @@ Override the destination with `--failure-log PATH` when needed.
 The Edit mode box also has `Load random train` and `Load random val` buttons.
 They load an unseeded task from the v3 dataset: train samples from `train.npz`
 or `train_tune.npz`, while val samples from `validation.npz`,
-`validation_tune.npz`, or `validation_natural.npz`.
+`validation_tune.npz`, or `validation_natural.npz`. Enter a one-based row
+number in `Log row` and press `Load row` to restore the task configuration
+stored in that row of `runs/interactive_maze/failure_runs.jsonl`. The log path
+can be changed with `--failure-log`.
 
 ## Command Reference
 

@@ -4,6 +4,8 @@ import hashlib
 import json
 from types import SimpleNamespace
 
+from matplotlib.backend_bases import ResizeEvent
+import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
@@ -12,8 +14,10 @@ from scripts.interactive_maze import (
     AGENT_PANEL_POSITIONS,
     AvailableAgent,
     InteractiveMazeApp,
+    TaskRowTextBox,
     TARGET_ALGORITHMS,
     discover_available_agents,
+    load_recorded_task,
     load_random_v3_task,
     parse_args,
 )
@@ -140,6 +144,61 @@ def test_load_random_v3_task_uses_requested_split(tmp_path):
 def test_load_random_v3_task_rejects_unknown_split(tmp_path):
     with pytest.raises(ValueError, match="train.*val"):
         load_random_v3_task("test", tmp_path)
+
+
+def test_load_recorded_task_uses_one_based_log_row(tmp_path):
+    failure_log_path = tmp_path / "failure_runs.jsonl"
+    records = [
+        {
+            "maze": {
+                "layout": [[0, 0], [0, 0]],
+                "start": [0, 0],
+                "goal": [1, 1],
+            }
+        },
+        {
+            "maze": {
+                "layout": [[0, 1], [0, 0]],
+                "start": [1, 0],
+                "goal": [1, 1],
+            }
+        },
+    ]
+    failure_log_path.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    task = load_recorded_task(2, failure_log_path)
+
+    assert task.source == failure_log_path
+    assert task.start == (1, 0)
+    assert task.goal == (1, 1)
+    assert np.array_equal(task.layout, np.asarray([[0, 1], [0, 0]]))
+
+
+def test_load_recorded_task_rejects_invalid_row_and_missing_row(tmp_path):
+    failure_log_path = tmp_path / "failure_runs.jsonl"
+    failure_log_path.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="positive integer"):
+        load_recorded_task(0, failure_log_path)
+    with pytest.raises(ValueError, match="does not contain a maze config"):
+        load_recorded_task(1, failure_log_path)
+    with pytest.raises(IndexError, match="no row 2"):
+        load_recorded_task(2, failure_log_path)
+
+
+def test_task_row_textbox_handles_resize_events():
+    figure, axis = plt.subplots()
+    try:
+        TaskRowTextBox(axis, "Log row: ", initial="1")
+        figure.canvas.callbacks.process(
+            "resize_event",
+            ResizeEvent("resize_event", figure.canvas),
+        )
+    finally:
+        plt.close(figure)
 
 
 def test_maze_env_can_be_created_from_arrays():
