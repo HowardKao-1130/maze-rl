@@ -21,6 +21,21 @@ DEFAULT_STRATIFIED_BUCKET_BUDGETS = {
 DEFAULT_DEDUPE_SCOPE = "within_layout_bucket"
 
 
+def dataset_version(
+    *,
+    train_mazes: int,
+    stratify: bool,
+) -> int | None:
+    """Return the established version for the current dataset tiers."""
+    if stratify and train_mazes == 5_000:
+        return 3
+    if train_mazes == 2_000:
+        return 1
+    if train_mazes == 5_000:
+        return 2
+    return None
+
+
 def dataset_run_output_dir(
     root: Path,
     dataset_name: str,
@@ -80,7 +95,18 @@ def _dataset_name_with_prefix(
     dedupe_scope: str,
 ) -> str:
     dataset_name = (
-        f"{prefix}_"
+        (
+            f"v{version}_"
+            if (
+                version := dataset_version(
+                    train_mazes=train_mazes,
+                    stratify=stratify,
+                )
+            )
+            is not None
+            else ""
+        )
+        + f"{prefix}_"
         + dataset_size_suffix(
             train_mazes=train_mazes,
             validation_mazes=validation_mazes,

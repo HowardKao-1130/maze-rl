@@ -60,7 +60,7 @@ def test_discover_available_agents_uses_completed_tier_checkpoints(
         tmp_path
         / "runs"
         / "dnn"
-        / "dataset_2000x200x200_t5_seed42"
+        / "v1_dataset_2000x200x200_t5_seed42"
         / "training"
     )
     complete_dir = training_root / "dqn"
@@ -86,10 +86,10 @@ def test_discover_available_agents_prefers_latest_completed_generation(
     tmp_path,
 ):
     for dataset_name, status in (
-        ("dataset_2000x200x200_t5_seed42", "early_stopped"),
-        ("dataset_5000x500x500_t5_seed42", "early_stopped"),
+        ("v1_dataset_2000x200x200_t5_seed42", "early_stopped"),
+        ("v2_dataset_5000x500x500_t5_seed42", "early_stopped"),
         (
-            "dataset_5000x500x500_t5_seed42_stratified_s00_m60_l40_dedupe050",
+            "v3_dataset_5000x500x500_t5_seed42_stratified_s00_m60_l40_dedupe050",
             "early_stopped",
         ),
     ):
@@ -112,7 +112,7 @@ def test_load_random_v3_task_uses_requested_split(tmp_path):
         tmp_path
         / "data"
         / "datasets"
-        / "dataset_5000x500x500_t5_seed42_stratified_s00_m60_l40_dedupe050"
+        / "v3_dataset_5000x500x500_t5_seed42_stratified_s00_m60_l40_dedupe050"
     )
     dataset_dir.mkdir(parents=True)
     (dataset_dir / "metadata.json").write_text(

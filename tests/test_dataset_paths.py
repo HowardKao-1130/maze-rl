@@ -10,7 +10,7 @@ from scripts.dataset_paths import (
 
 
 DATASET_NAME = (
-    "dataset_5000x500x500_t5_seed42_stratified_s00_m60_l40_dedupe050"
+    "v3_dataset_5000x500x500_t5_seed42_stratified_s00_m60_l40_dedupe050"
 )
 
 

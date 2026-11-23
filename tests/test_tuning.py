@@ -382,7 +382,7 @@ def test_tuning_experiment_output_dir_uses_train_metadata(
     ) == (
         tmp_path
         / "runs"
-        / "dataset_5000x500x500_t5_seed42"
+        / "v2_dataset_5000x500x500_t5_seed42"
         / "tuning"
     )
 

@@ -319,7 +319,7 @@ metrics are available, the plot includes train, `val`, `val-same`,
 `val-natural`, and greedy train-evaluation curves:
 
 ```bash
-python scripts/summarize_training_runs.py --dataset dataset_5000x500x500_t5_seed42
+python scripts/summarize_training_runs.py --dataset v2_dataset_5000x500x500_t5_seed42
 ```
 
 Greedy train-evaluation points are read from `validation_metrics.csv` rows with
@@ -523,13 +523,16 @@ enabled) stratification settings:
 python scripts/generate_dataset.py --train-mazes 5000 --validation-mazes 500 --test-mazes 500 --tasks-per-maze 5
 ```
 
-Without `--output-dir`, generated splits are stored under
-`data/datasets/dataset_<train>x<validation>x<test>_t<tasks>_seed<seed>`.
-Stratified datasets append
+Without `--output-dir`, the current dataset tiers are versioned under
+`data/datasets`: the 2,000-layout ordinary tier uses
+`v1_dataset_<train>x<validation>x<test>_t<tasks>_seed<seed>`, the 5,000-layout
+ordinary tier uses `v2_dataset_<train>x<validation>x<test>_t<tasks>_seed<seed>`,
+and the 5,000-layout stratified tier uses the corresponding `v3_dataset_`
+prefix. Stratified datasets append
 `_stratified_s<short>_m<medium>_l<long>_dedupe<threshold>`.
 
 For example, the bundle
-`dataset_5000x500x500_t5_seed42_stratified_s00_m60_l40_dedupe050` contains:
+`v3_dataset_5000x500x500_t5_seed42_stratified_s00_m60_l40_dedupe050` contains:
 
 ```text
 data/datasets/<dataset>/
@@ -547,7 +550,7 @@ data/datasets/<dataset>/
 Then tune against the pre-generated dataset bundle:
 
 ```bash
-python scripts/tune_dnn.py --algorithm ppo --dataset dataset_5000x500x500_t5_seed42_stratified_s00_m60_l40_dedupe050
+python scripts/tune_dnn.py --algorithm ppo --dataset v3_dataset_5000x500x500_t5_seed42_stratified_s00_m60_l40_dedupe050
 ```
 
 The tuner requires an explicit dataset or split paths. With a dataset
@@ -618,7 +621,7 @@ under `data/datasets` or point at a dataset directory; training then uses its
 under the matching `runs/dnn/<dataset-directory>/training/<algorithm>` directory:
 
 ```bash
-python scripts/train_dnn.py --algorithm ppo --best-config --dataset dataset_5000x500x500_t5_seed42_stratified_s00_m60_l40_dedupe050 --rollouts-per-task 1000
+python scripts/train_dnn.py --algorithm ppo --best-config --dataset v3_dataset_5000x500x500_t5_seed42_stratified_s00_m60_l40_dedupe050 --rollouts-per-task 1000
 ```
 
 `--best-config` reads
@@ -629,7 +632,8 @@ With a dataset bundle, tabular training writes to
 `runs/dnn/<dataset>/training/<algorithm>`. Without a dataset, the default
 backend-level location is `runs/<backend>/training/<algorithm>`. With
 `--experiment-name`, training reads the dataset metadata and writes under
-`runs/dnn/<name>_<train>x<validation>x<test>_t<tasks>_seed<seed>/training/<algorithm>`.
+`runs/dnn/v{version}_<name>_<train>x<validation>x<test>_t<tasks>_seed<seed>/training/<algorithm>`
+for the established versioned tiers.
 Explicit training flags still override loaded values.
 
 Training writes `validation_metrics.png` beside `validation_metrics.csv`; the
@@ -641,7 +645,7 @@ percentages at validation checks.
 Summarize completed DNN sweeps across agents with:
 
 ```bash
-python scripts/summarize_tuning_runs.py --dataset dataset_5000x500x500_t5_seed42_stratified_s00_m60_l40_dedupe050
+python scripts/summarize_tuning_runs.py --dataset v3_dataset_5000x500x500_t5_seed42_stratified_s00_m60_l40_dedupe050
 ```
 
 The command writes

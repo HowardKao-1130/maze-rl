@@ -1630,7 +1630,7 @@ def test_parse_train_args_leaves_dataset_name_output_for_resolution(
         tmp_path
         / "data"
         / "datasets"
-        / "dataset_5000x500x500_t5_seed42"
+        / "v2_dataset_5000x500x500_t5_seed42"
     )
     dataset_dir.mkdir(
         parents=True,
@@ -1649,14 +1649,14 @@ def test_parse_train_args_leaves_dataset_name_output_for_resolution(
 
     args = parse_train_args()
 
-    assert args.dataset == Path("dataset_5000x500x500_t5_seed42")
+    assert args.dataset == Path("v2_dataset_5000x500x500_t5_seed42")
     assert args.output_dir is None
 
 
 def test_resolve_dataset_bundle_args_infers_splits_and_output(
     tmp_path,
 ):
-    dataset_dir = tmp_path / "dataset_5000x500x500_t5_seed42"
+    dataset_dir = tmp_path / "v2_dataset_5000x500x500_t5_seed42"
     dataset_dir.mkdir()
     train_path = dataset_dir / "train.npz"
     validation_path = dataset_dir / "validation.npz"
@@ -1687,7 +1687,7 @@ def test_resolve_dataset_bundle_args_infers_splits_and_output(
     assert args.output_dir == (
         tmp_path
         / "runs"
-        / "dataset_5000x500x500_t5_seed42"
+        / "v2_dataset_5000x500x500_t5_seed42"
         / "training"
     )
 
@@ -1695,7 +1695,7 @@ def test_resolve_dataset_bundle_args_infers_splits_and_output(
 def test_resolve_dataset_bundle_args_can_disable_natural_validation(
     tmp_path,
 ):
-    dataset_dir = tmp_path / "dataset_5000x500x500_t5_seed42"
+    dataset_dir = tmp_path / "v2_dataset_5000x500x500_t5_seed42"
     dataset_dir.mkdir()
     for name in (
         "train.npz",
@@ -1724,11 +1724,11 @@ def test_resolve_dataset_bundle_args_can_disable_natural_validation(
 
 def test_train_dataset_bundle_dir_for_reference_expands_dataset_name():
     assert dataset_bundle_dir_for_reference(
-        Path("dataset_5000x500x500_t5_seed42")
+        Path("v2_dataset_5000x500x500_t5_seed42")
     ) == (
         Path("data")
         / "datasets"
-        / "dataset_5000x500x500_t5_seed42"
+        / "v2_dataset_5000x500x500_t5_seed42"
     )
 
 
@@ -1757,7 +1757,7 @@ def test_resolve_dataset_bundle_args_accepts_dataset_name(
         tmp_path
         / "data"
         / "datasets"
-        / "dataset_5000x500x500_t5_seed42"
+        / "v2_dataset_5000x500x500_t5_seed42"
     )
     dataset_dir.mkdir(
         parents=True,
@@ -1772,7 +1772,7 @@ def test_resolve_dataset_bundle_args_accepts_dataset_name(
 
     args = SimpleNamespace(
         algorithm="ppo",
-        dataset=Path("dataset_5000x500x500_t5_seed42"),
+        dataset=Path("v2_dataset_5000x500x500_t5_seed42"),
         validation_dataset=None,
         same_layout_dataset=None,
         output_dir=None,
@@ -1792,7 +1792,7 @@ def test_resolve_dataset_bundle_args_accepts_dataset_name(
     assert args.output_dir == (
         tmp_path
         / "runs"
-        / "dataset_5000x500x500_t5_seed42"
+        / "v2_dataset_5000x500x500_t5_seed42"
         / "training"
     )
 
@@ -1923,7 +1923,7 @@ def test_train_experiment_output_dir_uses_dataset_metadata(
     ) == (
         tmp_path
         / "runs"
-        / "dataset_2000x200x200_t5_seed42"
+        / "v1_dataset_2000x200x200_t5_seed42"
         / "training"
     )
 
