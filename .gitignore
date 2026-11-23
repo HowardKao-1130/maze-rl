@@ -1,5 +1,9 @@
 data/
-runs/
+runs/*
+!runs/
+!runs/interactive_maze/
+runs/interactive_maze/*
+!runs/interactive_maze/failure_runs.jsonl
 __pycache__/
 *.py[cod]
 .pytest_cache/
