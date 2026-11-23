@@ -65,12 +65,18 @@ class DatasetBundlePaths:
         return self
 
     def require_training_splits(self) -> "DatasetBundlePaths":
+        """Require the core train/validation splits.
+
+        Same-layout validation is an optional generalization split. Callers
+        can include it when ``self.same_layout`` exists, but a bundle does not
+        need to provide it to be trainable.
+        """
         self.require_train()
-        missing = [
-            path.name
-            for path in (self.validation, self.same_layout)
-            if not path.exists()
-        ]
+        missing = (
+            [self.validation.name]
+            if not self.validation.exists()
+            else []
+        )
         if missing:
             raise ValueError(
                 "Dataset directory is missing required training split(s): "
