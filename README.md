@@ -365,6 +365,22 @@ early-stopping patience and min-delta to differ from the stored state, replay
 the existing `validation_metrics.csv`, and stop immediately when that history
 already satisfies the requested early-stopping rule. This mode changes the
 resume decision; it does not rewind model weights to an earlier epoch.
+For transfer learning or fine-tuning on a new dataset, pass a neural checkpoint
+with `--init-checkpoint`. This loads only the model weights from that exact
+checkpoint path and starts fresh optimizer, replay, sampler, RNG, and progress
+state for the new dataset. The source and target algorithm, maze dimensions,
+action count, and encoder settings must be compatible; encoder settings are
+inherited from the source checkpoint unless explicitly supplied. For example,
+to fine-tune a PPO checkpoint from a v3 dataset on v4:
+
+```bash
+python scripts/train_dnn.py --algorithm ppo \
+  --dataset data/datasets/v4 \
+  --init-checkpoint runs/dnn/v3/training/ppo/best_checkpoint.pt
+```
+
+`--init-checkpoint` cannot be combined with `--resume`: use `--resume` when the
+goal is to continue the original run with its complete training state.
 Training prints completed task-selection-pass progress by default, including
 training-set mean path efficiency and success rate. When validation datasets are
 enabled, validation progress also prints mean path efficiency and success rate.

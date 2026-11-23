@@ -45,6 +45,7 @@ from scripts.train import (
     apply_resume_training_state_defaults,
     apply_retroactive_resume_metadata,
     confirm_overwrite_existing_training_output,
+    configure_initial_checkpoint,
     configure_reproducibility,
     dataset_bundle_dir_for_reference,
     default_experiment_output_dir,
@@ -54,6 +55,8 @@ from scripts.train import (
     format_validation_progress_message,
     load_best_config_overrides,
     load_agent_training_state,
+    load_initial_checkpoint_into_agent,
+    load_neural_checkpoint_payload,
     load_runtime_rng_state,
     load_training_state,
     log_tensorboard_episode,
@@ -627,6 +630,128 @@ def test_training_uses_baseline_network_by_default(monkeypatch):
 
     assert args.network_architecture == "baseline"
     assert args.residual_layers == 2
+
+
+def test_parse_train_args_accepts_initial_checkpoint(
+    monkeypatch,
+    tmp_path,
+):
+    checkpoint = tmp_path / "v3" / "best_checkpoint.pt"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "ppo",
+            "--dataset",
+            str(tmp_path / "v4.npz"),
+            "--init-checkpoint",
+            str(checkpoint),
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.init_checkpoint == checkpoint
+
+
+def test_initial_checkpoint_configuration_uses_checkpoint_encoder(
+    tmp_path,
+):
+    args = SimpleNamespace(
+        algorithm="ppo",
+        network_architecture="baseline",
+        residual_layers=2,
+        resume_metadata_cli_fields=set(),
+    )
+    checkpoint = {
+        "algorithm": "ppo",
+        "network_architecture": "residual",
+        "residual_layers": 4,
+        "hyperparameters": {
+            "feature_dim": 96,
+            "kernel_size": 5,
+        },
+    }
+
+    encoder = configure_initial_checkpoint(args, checkpoint)
+
+    assert args.network_architecture == "residual"
+    assert args.residual_layers == 4
+    assert encoder["feature_dim"] == 96
+    assert encoder["kernel_size"] == 5
+
+
+def test_initial_checkpoint_loads_weights_and_syncs_dqn_target(
+    tmp_path,
+):
+    source = torch.nn.Linear(3, 2)
+    target_online = torch.nn.Linear(3, 2)
+    target_network = torch.nn.Linear(3, 2)
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    torch.save(
+        {
+            "algorithm": "dqn",
+            "model_state_dict": source.state_dict(),
+        },
+        checkpoint_path,
+    )
+
+    checkpoint = load_neural_checkpoint_payload(
+        checkpoint_path,
+        torch.device("cpu"),
+    )
+    agent = SimpleNamespace(
+        online_network=target_online,
+        target_network=target_network,
+    )
+
+    load_initial_checkpoint_into_agent(
+        "dqn",
+        agent,
+        checkpoint,
+        checkpoint_path,
+    )
+
+    for key, value in source.state_dict().items():
+        torch.testing.assert_close(
+            agent.online_network.state_dict()[key],
+            value,
+        )
+        torch.testing.assert_close(
+            agent.target_network.state_dict()[key],
+            value,
+        )
+
+
+def test_initial_checkpoint_rejects_incompatible_weights(tmp_path):
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    source = torch.nn.Linear(3, 2)
+    torch.save(
+        {
+            "algorithm": "ppo",
+            "model_state_dict": source.state_dict(),
+        },
+        checkpoint_path,
+    )
+    checkpoint = load_neural_checkpoint_payload(
+        checkpoint_path,
+        torch.device("cpu"),
+    )
+    agent = SimpleNamespace(
+        network=torch.nn.Linear(4, 2),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="compatible maze dimensions",
+    ):
+        load_initial_checkpoint_into_agent(
+            "ppo",
+            agent,
+            checkpoint,
+            checkpoint_path,
+        )
 
 
 def test_output_algorithm_name_uses_shared_algorithm_directory():
