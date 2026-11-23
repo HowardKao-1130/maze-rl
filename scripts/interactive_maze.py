@@ -565,10 +565,10 @@ class InteractiveMazeApp:
         )
         source_bbox = self.source_axis.get_position()
         agent_bbox = axes[0, 1].get_position()
-        edit_group_width = 0.34
-        edit_group_height = 0.19
+        edit_group_width = 0.28
+        edit_group_height = 0.15
         edit_group_center_x = (source_bbox.x0 + source_bbox.x1) / 2
-        edit_group_y = 0.76
+        edit_group_y = 0.79
         edit_group_x = edit_group_center_x - edit_group_width / 2
         edit_group_axis = self.figure.add_axes(
             [
@@ -587,9 +587,9 @@ class InteractiveMazeApp:
         radio_axis = self.figure.add_axes(
             [
                 edit_group_x + 0.01,
-                edit_group_y + 0.045,
+                edit_group_y + 0.02,
                 0.13,
-                0.12,
+                0.10,
             ],
             facecolor="none",
         )
@@ -606,7 +606,7 @@ class InteractiveMazeApp:
         random_button_width = 0.11
         random_button_height = 0.035
         random_button_gap = 0.02
-        random_val_y = edit_group_y + 0.065
+        random_val_y = edit_group_y + 0.03
         random_train_y = (
             random_val_y + random_button_height + random_button_gap
         )
@@ -665,6 +665,9 @@ class InteractiveMazeApp:
             initial="1",
         )
         self.row_textbox.label.set_fontsize(7)
+        self.row_textbox.on_submit(
+            self._load_recorded_task_from_input
+        )
         row_button_axis = self.figure.add_axes(
             [run_x + 0.125, row_y, 0.085, random_button_height]
         )
