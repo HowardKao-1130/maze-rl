@@ -21,7 +21,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 import matplotlib.pyplot as plt
-from matplotlib.widgets import Button, RadioButtons
+from matplotlib.widgets import Button, RadioButtons, TextBox
 import numpy as np
 import torch
 
@@ -108,6 +108,13 @@ class MazeRunState:
     message_annotation: object | None = None
     outcome_face: str | None = None
     load_error: str | None = None
+
+
+class TaskRowTextBox(TextBox):
+    """TextBox with a resize handler compatible with Matplotlib 3.11."""
+
+    def _resize(self, _event) -> None:
+        self.stop_typing()
 
 
 def discover_available_agents(
@@ -281,6 +288,125 @@ def load_random_v3_task(
         goal=goal,
         source=selected_path,
     )
+
+
+def load_recorded_task(
+    row: int,
+    failure_log_path: Path = DEFAULT_FAILURE_LOG,
+) -> SampledTask:
+    """Load the one-based task configuration stored in a failure-log row."""
+    if row <= 0:
+        raise ValueError("The recorded task row must be a positive integer.")
+
+    path = Path(failure_log_path).expanduser()
+    try:
+        with path.open("r", encoding="utf-8") as input_file:
+            for line_number, line in enumerate(input_file, start=1):
+                if line_number != row:
+                    continue
+                if not line.strip():
+                    raise ValueError(
+                        f"Recorded task row {row} is empty."
+                    )
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise ValueError(
+                        f"Recorded task row {row} is not valid JSON."
+                    ) from error
+                return _task_from_record(record, row, path)
+    except FileNotFoundError as error:
+        raise FileNotFoundError(
+            f"Interactive maze failure log does not exist: {path}"
+        ) from error
+    except OSError as error:
+        raise OSError(
+            f"Could not read interactive maze failure log {path}: {error}"
+        ) from error
+
+    raise IndexError(f"Interactive maze failure log has no row {row}.")
+
+
+def _task_from_record(
+    record: object,
+    row: int,
+    source: Path,
+) -> SampledTask:
+    if not isinstance(record, dict):
+        raise ValueError(f"Recorded task row {row} is not an object.")
+    maze = record.get("maze")
+    if not isinstance(maze, dict):
+        raise ValueError(
+            f"Recorded task row {row} does not contain a maze config."
+        )
+
+    try:
+        raw_layout = np.asarray(maze["layout"])
+        raw_start = maze["start"]
+        raw_goal = maze["goal"]
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            f"Recorded task row {row} is missing layout, start, or goal."
+        ) from error
+
+    if raw_layout.ndim != 2 or raw_layout.size == 0:
+        raise ValueError(
+            f"Recorded task row {row} has an invalid maze layout."
+        )
+    try:
+        layout = raw_layout.astype(np.uint8)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(
+            f"Recorded task row {row} has an invalid maze layout."
+        ) from error
+    if not np.array_equal(raw_layout, layout) or not np.isin(
+        layout,
+        (0, 1),
+    ).all():
+        raise ValueError(
+            f"Recorded task row {row} has an invalid maze layout."
+        )
+
+    start = _recorded_position(raw_start, "start", row, layout.shape)
+    goal = _recorded_position(raw_goal, "goal", row, layout.shape)
+    if start == goal:
+        raise ValueError(
+            f"Recorded task row {row} has identical start and goal cells."
+        )
+    if layout[start] or layout[goal]:
+        raise ValueError(
+            f"Recorded task row {row} places start or goal on a wall."
+        )
+
+    return SampledTask(
+        layout=layout.copy(),
+        start=start,
+        goal=goal,
+        source=source,
+    )
+
+
+def _recorded_position(
+    value: object,
+    name: str,
+    row: int,
+    shape: tuple[int, int],
+) -> tuple[int, int]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError(
+            f"Recorded task row {row} has an invalid {name} position."
+        )
+    try:
+        position = (int(value[0]), int(value[1]))
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(
+            f"Recorded task row {row} has an invalid {name} position."
+        ) from error
+    if not (0 <= position[0] < shape[0] and 0 <= position[1] < shape[1]):
+        raise ValueError(
+            f"Recorded task row {row} has an out-of-bounds {name} position."
+        )
+    return position
 
 
 def parse_args(
@@ -529,7 +655,6 @@ class InteractiveMazeApp:
         self.random_val_button.on_clicked(
             lambda _event: self._load_random_task("val")
         )
-
         button_height = 0.055
         button_y = edit_group_y + (edit_group_height - button_height) / 2
         button_gap = 0.015
@@ -537,6 +662,33 @@ class InteractiveMazeApp:
         reset_width = 0.08
         clear_width = 0.09
         run_x = agent_bbox.x0
+        row_y = button_y + button_height + button_gap
+        row_textbox_axis = self.figure.add_axes(
+            [run_x, row_y, 0.12, random_button_height]
+        )
+        self.row_textbox = TaskRowTextBox(
+            row_textbox_axis,
+            "Log row: ",
+            initial="1",
+        )
+        self.row_textbox.label.set_fontsize(7)
+        self.row_textbox.on_submit(
+            self._load_recorded_task_from_input
+        )
+        row_button_axis = self.figure.add_axes(
+            [run_x + 0.125, row_y, 0.085, random_button_height]
+        )
+        self.load_row_button = Button(
+            row_button_axis,
+            "Load row",
+            color="#6a1b9a",
+            hovercolor="#8e24aa",
+        )
+        self.load_row_button.label.set_color("white")
+        self.load_row_button.label.set_fontsize(7)
+        self.load_row_button.on_clicked(
+            self._load_recorded_task_from_input
+        )
         run_axis = self.figure.add_axes(
             [run_x, button_y, run_width, button_height]
         )
@@ -1003,6 +1155,43 @@ class InteractiveMazeApp:
         )
         self._wall_drag_active = False
         self._last_wall_position = None
+        self.figure.canvas.draw_idle()
+
+    def _load_recorded_task_from_input(self, _event) -> None:
+        raw_row = self.row_textbox.text.strip()
+        try:
+            row = int(raw_row)
+        except ValueError:
+            self.status_text.set_text(
+                f"Cannot load recorded task: {raw_row!r} is not a row number."
+            )
+            self.figure.canvas.draw_idle()
+            return
+
+        try:
+            task = load_recorded_task(row, self.failure_log_path)
+        except (FileNotFoundError, IndexError, OSError, ValueError) as error:
+            self.status_text.set_text(f"Cannot load recorded task: {error}")
+            self.figure.canvas.draw_idle()
+            return
+
+        if task.layout.shape != (self.args.height, self.args.width):
+            self.status_text.set_text(
+                "Cannot load recorded task: log row dimensions are "
+                f"{task.layout.shape[0]}×{task.layout.shape[1]}, but the "
+                f"editor is {self.args.height}×{self.args.width}."
+            )
+            self.figure.canvas.draw_idle()
+            return
+
+        self.maze = task.layout
+        self.start = task.start
+        self.goal = task.goal
+        self._invalidate_runs()
+        self._render_source()
+        self.status_text.set_text(
+            f"Loaded recorded task from log row {row}."
+        )
         self.figure.canvas.draw_idle()
 
     def _load_random_task(self, split: str) -> None:
