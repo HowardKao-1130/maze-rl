@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -199,6 +200,25 @@ def test_wall_drag_paints_the_interpolated_cursor_segment():
     assert app.maze[3, 4] == 1
 
 
+def test_wall_drag_erases_the_interpolated_cursor_segment():
+    app = object.__new__(InteractiveMazeApp)
+    app.maze = np.zeros((5, 5), dtype=np.uint8)
+    app.maze[1, 0] = 1
+    app.maze[1, 1] = 1
+    app.maze[2, 2] = 1
+    app.maze[2, 3] = 1
+    app.maze[3, 4] = 1
+    app.start = (0, 0)
+    app.goal = (4, 4)
+
+    changed = app._paint_wall_segment((1, 0), (3, 4), wall_value=0)
+
+    assert changed
+    assert app.maze[1, 0] == 0
+    assert app.maze[2, 2] == 0
+    assert app.maze[3, 4] == 0
+
+
 def test_wall_drag_never_overwrites_start_or_goal():
     app = object.__new__(InteractiveMazeApp)
     app.maze = np.zeros((5, 5), dtype=np.uint8)
@@ -207,6 +227,28 @@ def test_wall_drag_never_overwrites_start_or_goal():
 
     app._paint_wall_segment(app.start, app.goal)
 
+    assert app.maze[app.start] == 0
+    assert app.maze[app.goal] == 0
+
+
+def test_fill_walls_preserves_start_and_goal():
+    app = object.__new__(InteractiveMazeApp)
+    app.maze = np.zeros((3, 4), dtype=np.uint8)
+    app.start = (0, 0)
+    app.goal = (2, 3)
+    app._invalidate_runs = lambda: None
+    app._render_source = lambda: None
+    app.status_text = SimpleNamespace(set_text=lambda _text: None)
+    app.figure = SimpleNamespace(
+        canvas=SimpleNamespace(draw_idle=lambda: None)
+    )
+
+    app._fill_walls(None)
+
+    editable = np.ones_like(app.maze, dtype=bool)
+    editable[app.start] = False
+    editable[app.goal] = False
+    assert np.all(app.maze[editable] == 1)
     assert app.maze[app.start] == 0
     assert app.maze[app.goal] == 0
 
@@ -223,6 +265,57 @@ def test_source_title_reports_optimal_steps():
     assert app._source_title() == (
         "Build maze (0, 0) (optimal: unavailable)"
     )
+
+
+def test_task_key_treats_reversed_start_and_goal_as_the_same_task():
+    layout = np.asarray([[0, 1, 0], [0, 0, 0]], dtype=np.uint8)
+
+    assert InteractiveMazeApp._task_key(layout, (0, 0), (1, 2)) == (
+        InteractiveMazeApp._task_key(layout, (1, 2), (0, 0))
+    )
+
+
+def test_load_recorded_failure_keys_canonicalizes_legacy_task_keys(tmp_path):
+    failure_log_path = tmp_path / "failure_runs.jsonl"
+    layout = [[0, 1, 0], [0, 0, 0]]
+    legacy_task = {
+        "layout": layout,
+        "start": [1, 2],
+        "goal": [0, 0],
+    }
+    legacy_task_key = hashlib.sha256(
+        json.dumps(
+            legacy_task,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    legacy_record = {
+        "task_key": legacy_task_key,
+        "maze": {
+            "layout": layout,
+            "start": [1, 2],
+            "goal": [0, 0],
+        },
+        "agents": {
+            "failed": [{"algorithm": "dqn", "version": "v1"}],
+        },
+    }
+    failure_log_path.write_text(json.dumps(legacy_record) + "\n")
+
+    app = object.__new__(InteractiveMazeApp)
+    app.failure_log_path = failure_log_path
+
+    expected_key = (
+        InteractiveMazeApp._task_key(
+            np.asarray(layout, dtype=np.uint8),
+            (1, 2),
+            (0, 0),
+        )
+        + ":dqn:v1"
+    )
+
+    assert app._load_recorded_failure_keys() == {expected_key}
 
 
 def test_inference_record_persists_failed_agent_and_maze_data(tmp_path):
@@ -271,6 +364,15 @@ def test_inference_record_persists_failed_agent_and_maze_data(tmp_path):
         json.dumps(app.current_run_record)
     )
     app._persist_inference_record("completed")
+    first_record["maze"]["start"], first_record["maze"]["goal"] = (
+        first_record["maze"]["goal"],
+        first_record["maze"]["start"],
+    )
+    first_record["task_key"] = InteractiveMazeApp._task_key(
+        np.asarray(first_record["maze"]["layout"], dtype=np.uint8),
+        tuple(first_record["maze"]["start"]),
+        tuple(first_record["maze"]["goal"]),
+    )
     app.current_run_record = first_record
     app._persist_inference_record("completed")
 

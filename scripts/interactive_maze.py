@@ -376,6 +376,7 @@ class InteractiveMazeApp:
         )
         self.mode = "Wall"
         self._wall_drag_active = False
+        self._wall_drag_value: int | None = None
         self._last_wall_position: tuple[int, int] | None = None
         self._edit_invalidated_runs = False
         self.inference_timer = None
@@ -536,6 +537,7 @@ class InteractiveMazeApp:
         run_width = 0.10
         reset_width = 0.08
         clear_width = 0.09
+        fill_width = 0.09
         run_x = agent_bbox.x0
         run_axis = self.figure.add_axes(
             [run_x, button_y, run_width, button_height]
@@ -579,10 +581,30 @@ class InteractiveMazeApp:
             hovercolor="#e53935",
         )
         self.clear_button.on_clicked(self._clear_walls)
+        fill_axis = self.figure.add_axes(
+            [
+                run_x
+                + run_width
+                + reset_width
+                + clear_width
+                + 3 * button_gap,
+                button_y,
+                fill_width,
+                button_height,
+            ]
+        )
+        self.fill_button = Button(
+            fill_axis,
+            "Fill walls",
+            color="#ef6c00",
+            hovercolor="#fb8c00",
+        )
+        self.fill_button.on_clicked(self._fill_walls)
         for button in (
             self.run_button,
             self.reset_button,
             self.clear_button,
+            self.fill_button,
         ):
             button.label.set_color("white")
 
@@ -775,6 +797,7 @@ class InteractiveMazeApp:
         start: tuple[int, int],
         goal: tuple[int, int],
     ) -> str:
+        start, goal = sorted((tuple(start), tuple(goal)))
         task = {
             "layout": layout.astype(int).tolist(),
             "start": list(start),
@@ -804,18 +827,18 @@ class InteractiveMazeApp:
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            task_key = record.get("task_key")
-            if task_key is None:
-                maze = record.get("maze", {})
-                layout = maze.get("layout")
-                start = maze.get("start")
-                goal = maze.get("goal")
-                if layout is not None and start is not None and goal is not None:
-                    task_key = self._task_key(
-                        np.asarray(layout, dtype=np.uint8),
-                        tuple(start),
-                        tuple(goal),
-                    )
+            maze = record.get("maze", {})
+            layout = maze.get("layout")
+            start = maze.get("start")
+            goal = maze.get("goal")
+            if layout is not None and start is not None and goal is not None:
+                task_key = self._task_key(
+                    np.asarray(layout, dtype=np.uint8),
+                    tuple(start),
+                    tuple(goal),
+                )
+            else:
+                task_key = record.get("task_key")
             if task_key is None:
                 continue
             for agent in record.get("agents", {}).get("failed", []):
@@ -994,7 +1017,7 @@ class InteractiveMazeApp:
     def _set_mode(self, label: str) -> None:
         self.mode = label
         descriptions = {
-            "Wall": "click cells to toggle obstacles",
+            "Wall": "click to toggle obstacles; drag to paint or erase",
             "Start": "click one free cell to place the start",
             "Goal": "click one free cell to place the goal",
         }
@@ -1002,6 +1025,7 @@ class InteractiveMazeApp:
             f"{label} mode: {descriptions[label]}."
         )
         self._wall_drag_active = False
+        self._wall_drag_value = None
         self._last_wall_position = None
         self.figure.canvas.draw_idle()
 
@@ -1057,14 +1081,19 @@ class InteractiveMazeApp:
         if position is None:
             return
 
-        self._wall_drag_active = self.mode == "Wall"
+        self._wall_drag_active = (
+            self.mode == "Wall"
+            and position not in {self.start, self.goal}
+        )
+        self._wall_drag_value = None
         self._last_wall_position = position
         self._edit_invalidated_runs = False
         changed = False
 
         if self.mode == "Wall":
             if position not in {self.start, self.goal}:
-                self.maze[position] = 1 - self.maze[position]
+                self._wall_drag_value = 1 - int(self.maze[position])
+                self.maze[position] = self._wall_drag_value
                 changed = True
         elif self.mode == "Start":
             if position != self.goal and self.maze[position] == 0:
@@ -1087,7 +1116,14 @@ class InteractiveMazeApp:
         if position is None:
             return
         previous = self._last_wall_position or position
-        changed = self._paint_wall_segment(previous, position)
+        wall_value = self._wall_drag_value
+        if wall_value is None:
+            return
+        changed = self._paint_wall_segment(
+            previous,
+            position,
+            wall_value,
+        )
         self._last_wall_position = position
         if changed:
             self._invalidate_runs_for_edit()
@@ -1096,6 +1132,7 @@ class InteractiveMazeApp:
 
     def _on_grid_release(self, _event) -> None:
         self._wall_drag_active = False
+        self._wall_drag_value = None
         self._last_wall_position = None
         self._edit_invalidated_runs = False
 
@@ -1103,6 +1140,7 @@ class InteractiveMazeApp:
         self,
         start: tuple[int, int],
         end: tuple[int, int],
+        wall_value: int = 1,
     ) -> bool:
         changed = False
         steps = max(
@@ -1118,8 +1156,8 @@ class InteractiveMazeApp:
             position = (row, column)
             if position in {self.start, self.goal}:
                 continue
-            if self.maze[position] == 0:
-                self.maze[position] = 1
+            if self.maze[position] != wall_value:
+                self.maze[position] = wall_value
                 changed = True
         return changed
 
@@ -1218,7 +1256,18 @@ class InteractiveMazeApp:
         self._invalidate_runs()
         self._render_source()
         self.status_text.set_text(
-            "Wall mode: click or drag across cells to create walls."
+            "Wall mode: click to toggle; drag to paint or erase walls."
+        )
+        self.figure.canvas.draw_idle()
+
+    def _fill_walls(self, _event) -> None:
+        self.maze.fill(1)
+        self.maze[self.start] = 0
+        self.maze[self.goal] = 0
+        self._invalidate_runs()
+        self._render_source()
+        self.status_text.set_text(
+            "Filled all editable cells with walls; start and goal remain open."
         )
         self.figure.canvas.draw_idle()
 
