@@ -770,6 +770,18 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--init-checkpoint",
+        type=Path,
+        default=None,
+        help=(
+            "Initialize a neural agent from this checkpoint's model "
+            "weights while starting a fresh run on --dataset. Optimizer, "
+            "replay, sampler, RNG, and progress state are not restored. "
+            "Cannot be combined with --resume."
+        ),
+    )
+
+    parser.add_argument(
         "--plot-output",
         type=Path,
         default=None,
@@ -1643,6 +1655,137 @@ def current_neural_state_dict(
     }
 
 
+def load_neural_checkpoint_payload(
+    path: Path,
+    device: torch.device,
+) -> dict:
+    """Load and validate the metadata needed for neural transfer learning."""
+    if not path.is_file():
+        raise ValueError(
+            f"Initial checkpoint does not exist: {path}"
+        )
+
+    try:
+        checkpoint = torch.load(
+            path,
+            map_location=device,
+            weights_only=False,
+        )
+    except TypeError:
+        checkpoint = torch.load(
+            path,
+            map_location=device,
+        )
+
+    if not isinstance(checkpoint, dict):
+        raise ValueError(
+            f"Initial checkpoint {path} must contain a mapping."
+        )
+
+    if not isinstance(
+        checkpoint.get("model_state_dict"),
+        dict,
+    ):
+        raise ValueError(
+            f"Initial checkpoint {path} does not contain model_state_dict."
+        )
+
+    return checkpoint
+
+
+def initial_checkpoint_encoder_hyperparameters(
+    checkpoint: dict,
+) -> dict[str, int]:
+    defaults = {
+        "feature_dim": DEFAULT_FEATURE_DIM,
+        "kernel_size": DEFAULT_KERNEL_SIZE,
+        "base_channels": DEFAULT_BASE_CHANNELS,
+        "channel_multiplier": DEFAULT_CHANNEL_MULTIPLIER,
+        "conv_depth": DEFAULT_CONV_DEPTH,
+    }
+    hyperparameters = checkpoint.get(
+        "hyperparameters",
+        {},
+    )
+    if not isinstance(hyperparameters, dict):
+        hyperparameters = {}
+
+    return {
+        name: int(hyperparameters.get(name, default))
+        for name, default in defaults.items()
+    }
+
+
+def configure_initial_checkpoint(
+    args,
+    checkpoint: dict,
+) -> dict[str, int]:
+    source_algorithm = checkpoint.get("algorithm")
+    if source_algorithm != args.algorithm:
+        raise ValueError(
+            "Initial checkpoint algorithm "
+            f"{source_algorithm!r} does not match requested "
+            f"algorithm {args.algorithm!r}."
+        )
+
+    source_architecture = checkpoint.get(
+        "network_architecture",
+        "baseline",
+    )
+    source_residual_layers = int(
+        checkpoint.get(
+            "residual_layers",
+            DEFAULT_RESIDUAL_LAYERS,
+        )
+    )
+    validate_network_architecture(
+        source_architecture,
+        source_residual_layers,
+    )
+
+    provided_fields = getattr(
+        args,
+        "resume_metadata_cli_fields",
+        set(),
+    )
+    if "network_architecture" not in provided_fields:
+        args.network_architecture = source_architecture
+    if "residual_layers" not in provided_fields:
+        args.residual_layers = source_residual_layers
+
+    return initial_checkpoint_encoder_hyperparameters(
+        checkpoint
+    )
+
+
+def load_initial_checkpoint_into_agent(
+    algorithm: str,
+    agent,
+    checkpoint: dict,
+    checkpoint_path: Path,
+) -> None:
+    state_dict = checkpoint["model_state_dict"]
+    module = network_module_for_algorithm(
+        algorithm,
+        agent,
+    )
+
+    try:
+        module.load_state_dict(state_dict)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Could not initialize the agent from "
+            f"{checkpoint_path}. The checkpoint and target dataset must "
+            "use compatible maze dimensions, action counts, and encoder "
+            "settings."
+        ) from exc
+
+    if algorithm == "dqn":
+        agent.target_network.load_state_dict(
+            agent.online_network.state_dict()
+        )
+
+
 def model_snapshot_state_dict(
     algorithm,
     agent,
@@ -1933,6 +2076,11 @@ def training_state_metadata(
             agent_hyperparameters
         ),
         "dataset": str(args.dataset),
+        "initial_checkpoint": (
+            None
+            if getattr(args, "init_checkpoint", None) is None
+            else str(args.init_checkpoint)
+        ),
         "fixed_index": args.fixed_index,
         "max_steps": args.max_steps,
         "seed": args.seed,
@@ -1998,6 +2146,10 @@ def validate_training_state_metadata(
     )
     metadata.setdefault(
         "natural_validation_dataset",
+        None,
+    )
+    metadata.setdefault(
+        "initial_checkpoint",
         None,
     )
     metadata.setdefault(
@@ -2331,6 +2483,10 @@ def apply_retroactive_resume_metadata(
     args.rollout_group_size = metadata.get(
         "rollout_group_size"
     )
+    args.init_checkpoint = optional_metadata_path(
+        metadata,
+        "initial_checkpoint",
+    )
     args.network_architecture = metadata.get(
         "network_architecture",
         "baseline",
@@ -2395,6 +2551,10 @@ def apply_resume_training_state_defaults(
         ),
         "rollout_group_size": metadata.get(
             "rollout_group_size"
+        ),
+        "init_checkpoint": optional_metadata_path(
+            metadata,
+            "initial_checkpoint",
         ),
         "network_architecture": metadata.get(
             "network_architecture",
@@ -3617,6 +3777,13 @@ def optimization_epochs_for_round(
 def main():
     args = parse_args()
 
+    if args.resume and args.init_checkpoint is not None:
+        raise ValueError(
+            "--init-checkpoint cannot be combined with --resume. "
+            "Use --init-checkpoint for a fresh transfer-learning run, "
+            "or --resume to restore the complete existing run state."
+        )
+
     if args.dataset is None:
         raise ValueError(
             "--dataset must name a dataset bundle or training .npz file."
@@ -3668,6 +3835,28 @@ def main():
             args.residual_layers = (
                 best_config_overrides.residual_layers
             )
+
+    initial_checkpoint = None
+    initial_checkpoint_encoder_hyperparameters = {}
+    if args.init_checkpoint is not None:
+        if args.algorithm in TABULAR_ALGORITHMS:
+            raise ValueError(
+                "--init-checkpoint is only supported for neural agents."
+            )
+
+        args.init_checkpoint = (
+            args.init_checkpoint.expanduser().resolve()
+        )
+        initial_checkpoint = load_neural_checkpoint_payload(
+            args.init_checkpoint,
+            torch.device("cpu"),
+        )
+        initial_checkpoint_encoder_hyperparameters = (
+            configure_initial_checkpoint(
+                args,
+                initial_checkpoint,
+            )
+        )
 
     validate_network_architecture(
         args.network_architecture,
@@ -3734,6 +3923,12 @@ def main():
             training_state_path=preflight_training_state_path,
         )
         if existing_action == "resume":
+            if args.init_checkpoint is not None:
+                raise ValueError(
+                    "Cannot use --init-checkpoint when an existing run "
+                    "is resumed. Choose override for a fresh transfer "
+                    "learning run or use --resume without it."
+                )
             args.resume = True
             best_config_overrides = None
         elif existing_action == "reuse":
@@ -3822,6 +4017,10 @@ def main():
             else best_config_overrides.hyperparameters
         )
     )
+    if initial_checkpoint is not None:
+        loaded_hyperparameters.update(
+            initial_checkpoint_encoder_hyperparameters
+        )
     explicit_hyperparameters = neural_hyperparameters_from_args(
         args
     )
@@ -3879,6 +4078,14 @@ def main():
         network_architecture=args.network_architecture,
         residual_layers=args.residual_layers,
     )
+
+    if initial_checkpoint is not None:
+        load_initial_checkpoint_into_agent(
+            args.algorithm,
+            agent,
+            initial_checkpoint,
+            args.init_checkpoint,
+        )
 
     if args.algorithm == "dqn":
         agent_hyperparameters.setdefault(
@@ -4159,6 +4366,11 @@ def main():
         summary = {
             "status": status,
             "algorithm": args.algorithm,
+            "initial_checkpoint": (
+                None
+                if args.init_checkpoint is None
+                else str(args.init_checkpoint)
+            ),
             "rollouts_per_task_requested": args.rollouts_per_task,
             "task_batch_size": task_batch_size,
             "rollout_group_size": rollout_group_size,
