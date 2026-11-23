@@ -648,14 +648,16 @@ class InteractiveMazeApp:
         self.random_val_button.on_clicked(
             lambda _event: self._load_random_task("val")
         )
-        row_y = edit_group_y + 0.02
+        button_height = 0.055
+        button_y = edit_group_y + (edit_group_height - button_height) / 2
+        button_gap = 0.015
+        run_width = 0.10
+        reset_width = 0.08
+        clear_width = 0.09
+        run_x = agent_bbox.x0
+        row_y = button_y + button_height + button_gap
         row_textbox_axis = self.figure.add_axes(
-            [
-                random_button_x,
-                row_y,
-                0.08,
-                random_button_height,
-            ]
+            [run_x, row_y, 0.12, random_button_height]
         )
         self.row_textbox = TextBox(
             row_textbox_axis,
@@ -664,12 +666,7 @@ class InteractiveMazeApp:
         )
         self.row_textbox.label.set_fontsize(7)
         row_button_axis = self.figure.add_axes(
-            [
-                random_button_x + 0.085,
-                row_y,
-                0.085,
-                random_button_height,
-            ]
+            [run_x + 0.125, row_y, 0.085, random_button_height]
         )
         self.load_row_button = Button(
             row_button_axis,
@@ -682,14 +679,6 @@ class InteractiveMazeApp:
         self.load_row_button.on_clicked(
             self._load_recorded_task_from_input
         )
-
-        button_height = 0.055
-        button_y = edit_group_y + (edit_group_height - button_height) / 2
-        button_gap = 0.015
-        run_width = 0.10
-        reset_width = 0.08
-        clear_width = 0.09
-        run_x = agent_bbox.x0
         run_axis = self.figure.add_axes(
             [run_x, button_y, run_width, button_height]
         )
