@@ -110,6 +110,13 @@ class MazeRunState:
     load_error: str | None = None
 
 
+class TaskRowTextBox(TextBox):
+    """TextBox with a resize handler compatible with Matplotlib 3.11."""
+
+    def _resize(self, _event) -> None:
+        self.stop_typing()
+
+
 def discover_available_agents(
     repo_root: Path = REPO_ROOT,
 ) -> list[AvailableAgent]:
@@ -659,7 +666,7 @@ class InteractiveMazeApp:
         row_textbox_axis = self.figure.add_axes(
             [run_x, row_y, 0.12, random_button_height]
         )
-        self.row_textbox = TextBox(
+        self.row_textbox = TaskRowTextBox(
             row_textbox_axis,
             "Log row: ",
             initial="1",

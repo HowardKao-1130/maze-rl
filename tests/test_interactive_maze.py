@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+from matplotlib.backend_bases import ResizeEvent
+import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
@@ -11,6 +13,7 @@ from scripts.interactive_maze import (
     AGENT_PANEL_POSITIONS,
     AvailableAgent,
     InteractiveMazeApp,
+    TaskRowTextBox,
     TARGET_ALGORITHMS,
     discover_available_agents,
     load_recorded_task,
@@ -183,6 +186,18 @@ def test_load_recorded_task_rejects_invalid_row_and_missing_row(tmp_path):
         load_recorded_task(1, failure_log_path)
     with pytest.raises(IndexError, match="no row 2"):
         load_recorded_task(2, failure_log_path)
+
+
+def test_task_row_textbox_handles_resize_events():
+    figure, axis = plt.subplots()
+    try:
+        TaskRowTextBox(axis, "Log row: ", initial="1")
+        figure.canvas.callbacks.process(
+            "resize_event",
+            ResizeEvent("resize_event", figure.canvas),
+        )
+    finally:
+        plt.close(figure)
 
 
 def test_maze_env_can_be_created_from_arrays():
