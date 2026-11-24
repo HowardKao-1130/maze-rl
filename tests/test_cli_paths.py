@@ -653,6 +653,87 @@ def test_parse_train_args_accepts_initial_checkpoint(
     args = parse_train_args()
 
     assert args.init_checkpoint == checkpoint
+    assert "init_checkpoint" in args.resume_metadata_cli_fields
+
+
+def test_resume_preserves_explicit_initial_checkpoint(
+    tmp_path,
+):
+    checkpoint = tmp_path / "checkpoint.pt"
+    args = SimpleNamespace(
+        algorithm="ppo",
+        init_checkpoint=checkpoint,
+        resume_metadata_cli_fields={"init_checkpoint"},
+    )
+    metadata = {
+        "algorithm": "ppo",
+        "initial_checkpoint": str(checkpoint),
+        "dataset": str(tmp_path / "train.npz"),
+        "fixed_index": None,
+        "max_steps": 20,
+        "seed": 42,
+        "rollouts_per_task": 10,
+        "task_batch_size": 1,
+        "rollout_group_size": 1,
+        "network_architecture": "baseline",
+        "residual_layers": 2,
+        "validation_dataset": None,
+        "same_layout_dataset": None,
+        "natural_validation_dataset": None,
+        "train_greedy": True,
+        "validation_episodes": 1,
+        "validation_all_tasks": False,
+        "early_stopping_patience": None,
+        "early_stopping_min_delta": 0.0,
+    }
+
+    apply_resume_training_state_defaults(args, metadata)
+
+    assert args.init_checkpoint == checkpoint
+
+
+def test_training_state_metadata_rejects_different_initial_checkpoint(
+    tmp_path,
+):
+    args = SimpleNamespace(
+        algorithm="ppo",
+        dataset=tmp_path / "train.npz",
+        init_checkpoint=tmp_path / "used-checkpoint.pt",
+        fixed_index=None,
+        max_steps=20,
+        seed=42,
+        rollouts_per_task=10,
+        validation_dataset=tmp_path / "validation.npz",
+        same_layout_dataset=None,
+        validation_episodes=1,
+        validation_all_tasks=False,
+        early_stopping_patience=None,
+        early_stopping_min_delta=0.0,
+    )
+    metadata = training_state_metadata(
+        args=args,
+        agent_hyperparameters={"learning_rate": 0.001},
+        task_selection_pass_budget=10,
+        task_batch_size=1,
+        rollout_group_size=1,
+    )
+    args.init_checkpoint = tmp_path / "different-checkpoint.pt"
+    requested_metadata = training_state_metadata(
+        args=args,
+        agent_hyperparameters={"learning_rate": 0.001},
+        task_selection_pass_budget=10,
+        task_batch_size=1,
+        rollout_group_size=1,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="initial_checkpoint",
+    ):
+        validate_training_state_metadata(
+            {"metadata": metadata},
+            requested_metadata,
+        )
 
 
 def test_initial_checkpoint_configuration_uses_checkpoint_encoder(

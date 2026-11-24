@@ -83,3 +83,9 @@ _Avoid_: Filtered validation when referring to this split
 **Filtered/Stratified Test (`test`)** and **Natural Test (`test-natural`)**:
 The held-out counterparts of `val` and `val-natural`, respectively. Neither is
 used for tuning or early stopping.
+
+**Same-Family Early-Stopping Validation (`es-same-family`)**:
+A development split whose families also occur in training, but whose exact
+tasks and augmentation groups are held out from training. It may be used for
+checkpoint selection and early stopping, but it is not evidence of
+generalization to unseen layouts.

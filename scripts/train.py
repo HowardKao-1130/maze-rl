@@ -423,6 +423,7 @@ def resolve_dataset_bundle_args(args) -> None:
 
 RESUME_METADATA_CLI_OPTIONS = {
     "dataset": ("--dataset",),
+    "init_checkpoint": ("--init-checkpoint",),
     "fixed_index": ("--fixed-index",),
     "max_steps": ("--max-steps",),
     "seed": ("--seed",),
@@ -783,7 +784,8 @@ def parse_args():
             "Initialize a neural agent from this checkpoint's model "
             "weights while starting a fresh run on --dataset. Optimizer, "
             "replay, sampler, RNG, and progress state are not restored. "
-            "Cannot be combined with --resume."
+            "When resuming, the path must match the checkpoint recorded "
+            "for the existing run."
         ),
     )
 
@@ -2468,6 +2470,12 @@ def apply_retroactive_resume_metadata(
             f"--algorithm {args.algorithm!r}."
         )
 
+    provided_fields = getattr(
+        args,
+        "resume_metadata_cli_fields",
+        set(),
+    )
+
     args.dataset = Path(
         metadata["dataset"]
     )
@@ -2489,10 +2497,11 @@ def apply_retroactive_resume_metadata(
     args.rollout_group_size = metadata.get(
         "rollout_group_size"
     )
-    args.init_checkpoint = optional_metadata_path(
-        metadata,
-        "initial_checkpoint",
-    )
+    if "init_checkpoint" not in provided_fields:
+        args.init_checkpoint = optional_metadata_path(
+            metadata,
+            "initial_checkpoint",
+        )
     args.network_architecture = metadata.get(
         "network_architecture",
         "baseline",
@@ -3783,13 +3792,6 @@ def optimization_epochs_for_round(
 def main():
     args = parse_args()
 
-    if args.resume and args.init_checkpoint is not None:
-        raise ValueError(
-            "--init-checkpoint cannot be combined with --resume. "
-            "Use --init-checkpoint for a fresh transfer-learning run, "
-            "or --resume to restore the complete existing run state."
-        )
-
     if args.dataset is None:
         raise ValueError(
             "--dataset must name a dataset bundle or training .npz file."
@@ -3841,28 +3843,6 @@ def main():
             args.residual_layers = (
                 best_config_overrides.residual_layers
             )
-
-    initial_checkpoint = None
-    initial_checkpoint_encoder_hyperparameters = {}
-    if args.init_checkpoint is not None:
-        if args.algorithm in TABULAR_ALGORITHMS:
-            raise ValueError(
-                "--init-checkpoint is only supported for neural agents."
-            )
-
-        args.init_checkpoint = (
-            args.init_checkpoint.expanduser().resolve()
-        )
-        initial_checkpoint = load_neural_checkpoint_payload(
-            args.init_checkpoint,
-            torch.device("cpu"),
-        )
-        initial_checkpoint_encoder_hyperparameters = (
-            configure_initial_checkpoint(
-                args,
-                initial_checkpoint,
-            )
-        )
 
     validate_network_architecture(
         args.network_architecture,
@@ -3929,12 +3909,6 @@ def main():
             training_state_path=preflight_training_state_path,
         )
         if existing_action == "resume":
-            if args.init_checkpoint is not None:
-                raise ValueError(
-                    "Cannot use --init-checkpoint when an existing run "
-                    "is resumed. Choose override for a fresh transfer "
-                    "learning run or use --resume without it."
-                )
             args.resume = True
             best_config_overrides = None
         elif existing_action == "reuse":
@@ -3946,6 +3920,11 @@ def main():
             remove_existing_training_output(
                 preflight_existing_paths
             )
+
+    if args.init_checkpoint is not None:
+        args.init_checkpoint = (
+            args.init_checkpoint.expanduser().resolve()
+        )
 
     if (
         args.retroactive_early_stop
@@ -3995,6 +3974,25 @@ def main():
                 args,
                 resume_training_metadata,
             )
+
+    initial_checkpoint = None
+    initial_checkpoint_encoder_hyperparameters = {}
+    if args.init_checkpoint is not None and not args.resume:
+        if args.algorithm in TABULAR_ALGORITHMS:
+            raise ValueError(
+                "--init-checkpoint is only supported for neural agents."
+            )
+
+        initial_checkpoint = load_neural_checkpoint_payload(
+            args.init_checkpoint,
+            torch.device("cpu"),
+        )
+        initial_checkpoint_encoder_hyperparameters = (
+            configure_initial_checkpoint(
+                args,
+                initial_checkpoint,
+            )
+        )
 
     configure_reproducibility(args.seed)
 

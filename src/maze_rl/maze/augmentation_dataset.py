@@ -15,7 +15,7 @@ from maze_rl.maze.augmentation import (
     augment_task,
     canonical_layout_key,
 )
-from maze_rl.maze.pathfinding import shortest_path_length
+from maze_rl.maze.pathfinding import Position, shortest_path_length
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,10 @@ class SourceFamily:
     family_id: int
     key: tuple[tuple[int, int], bytes]
     tasks: tuple[SourceTask, ...]
+
+
+VariantRecord = tuple[TaskVariant, int]
+TaskIdentity = tuple[tuple[int, int], bytes, Position, Position]
 
 
 def load_failure_log(path: str | Path) -> list[SourceTask]:
@@ -232,31 +236,24 @@ def _select_family_variants(
     return [variants[index] for index in selected_indices]
 
 
-def build_split_arrays(
+def _generate_selected_variants(
     families: list[SourceFamily],
     *,
-    seed: int = 42,
-    perturbations_per_task: int = 0,
-    max_variants_per_family: int | None = 64,
-    max_edits: int = 4,
-    max_attempts: int = 100,
-    add_probability: float = 0.5,
-    max_path_increase: int | None = None,
-) -> dict[str, np.ndarray]:
-    """Build the existing NPZ task schema plus lineage and weights."""
+    seed: int,
+    perturbations_per_task: int,
+    max_variants_per_family: int | None,
+    max_edits: int,
+    max_attempts: int,
+    add_probability: float,
+    max_path_increase: int | None,
+    excluded_task_identities: set[TaskIdentity] | None = None,
+) -> dict[int, list[VariantRecord]]:
     rng = np.random.default_rng(seed)
-    layouts: list[np.ndarray] = []
-    layout_indices: list[int] = []
-    starts: list[Position] = []
-    goals: list[Position] = []
-    family_indices: list[int] = []
-    source_record_indices: list[int] = []
-    optimal_path_lengths: list[int] = []
-    layout_by_identity: dict[tuple[tuple[int, int], bytes], int] = {}
-    selected_by_family: dict[int, list[tuple[TaskVariant, int]]] = {}
+    selected_by_family: dict[int, list[VariantRecord]] = {}
 
     for family in families:
-        candidates: list[tuple[TaskVariant, int]] = []
+        candidates: list[VariantRecord] = []
+        seen_task_identities = set()
         for source_task in family.tasks:
             variants = augment_task(
                 source_task.task,
@@ -267,10 +264,17 @@ def build_split_arrays(
                 add_probability=add_probability,
                 max_path_increase=max_path_increase,
             )
-            candidates.extend(
-                (variant, source_task.record_index)
-                for variant in variants
-            )
+            for variant in variants:
+                identity = _task_identity(variant)
+                if identity in seen_task_identities:
+                    continue
+                if (
+                    excluded_task_identities is not None
+                    and identity in excluded_task_identities
+                ):
+                    continue
+                seen_task_identities.add(identity)
+                candidates.append((variant, source_task.record_index))
         selected_by_family[family.family_id] = _select_family_variants(
             candidates,
             family_id=family.family_id,
@@ -278,12 +282,112 @@ def build_split_arrays(
             rng=rng,
         )
 
-    family_variant_counts = {
-        family_id: len(variants)
-        for family_id, variants in selected_by_family.items()
-    }
+    globally_seen_task_identities = set()
     for family in families:
+        unique_variants = []
         for variant, source_record_index in selected_by_family[family.family_id]:
+            identity = _task_identity(variant)
+            if identity in globally_seen_task_identities:
+                continue
+            globally_seen_task_identities.add(identity)
+            unique_variants.append((variant, source_record_index))
+        selected_by_family[family.family_id] = unique_variants
+
+    return selected_by_family
+
+
+def _task_identity(variant: TaskVariant) -> TaskIdentity:
+    return (
+        variant.layout.shape,
+        variant.layout.tobytes(),
+        variant.start,
+        variant.goal,
+    )
+
+
+def _variant_group_key(
+    variant: TaskVariant,
+    source_record_index: int,
+) -> tuple[int, int | None]:
+    """Keep a source task's spatial/reversal orbit together."""
+    return source_record_index, variant.perturbation_index
+
+
+def _split_family_variants_for_es(
+    variants: list[VariantRecord],
+    *,
+    validation_fraction: float,
+    rng: np.random.Generator,
+) -> tuple[list[VariantRecord], list[VariantRecord]]:
+    """Split variants without separating an augmentation group."""
+    grouped: dict[tuple[int, int | None], list[VariantRecord]] = {}
+    for variant, source_record_index in variants:
+        grouped.setdefault(
+            _variant_group_key(variant, source_record_index),
+            [],
+        ).append((variant, source_record_index))
+
+    groups = list(grouped.values())
+    if len(groups) < 2:
+        return variants, []
+
+    rng.shuffle(groups)
+    target_validation_count = int(round(len(variants) * validation_fraction))
+    target_validation_count = max(
+        1,
+        min(len(variants) - 1, target_validation_count),
+    )
+
+    validation_groups: list[list[VariantRecord]] = []
+    validation_count = 0
+    for group in sorted(groups, key=len, reverse=True):
+        if not validation_groups:
+            validation_groups.append(group)
+            validation_count += len(group)
+            continue
+        if len(validation_groups) == len(groups) - 1:
+            break
+        current_error = abs(validation_count - target_validation_count)
+        proposed_error = abs(
+            validation_count + len(group) - target_validation_count
+        )
+        if proposed_error < current_error:
+            validation_groups.append(group)
+            validation_count += len(group)
+
+    validation_group_ids = {id(group) for group in validation_groups}
+    validation = [
+        record
+        for group in validation_groups
+        for record in group
+    ]
+    training = [
+        record
+        for group in groups
+        if id(group) not in validation_group_ids
+        for record in group
+    ]
+    return training, validation
+
+
+def _arrays_from_variant_records(
+    records_by_family: dict[int, list[VariantRecord]],
+) -> dict[str, np.ndarray]:
+    layouts: list[np.ndarray] = []
+    layout_indices: list[int] = []
+    starts: list[Position] = []
+    goals: list[Position] = []
+    family_indices: list[int] = []
+    source_record_indices: list[int] = []
+    optimal_path_lengths: list[int] = []
+    layout_by_identity: dict[tuple[tuple[int, int], bytes], int] = {}
+
+    family_variant_counts = {
+        family_id: len(records)
+        for family_id, records in records_by_family.items()
+    }
+    for family_id, records in records_by_family.items():
+        for variant, source_record_index in records:
             identity = (variant.layout.shape, variant.layout.tobytes())
             layout_index = layout_by_identity.get(identity)
             if layout_index is None:
@@ -293,7 +397,7 @@ def build_split_arrays(
             layout_indices.append(layout_index)
             starts.append(variant.start)
             goals.append(variant.goal)
-            family_indices.append(family.family_id)
+            family_indices.append(family_id)
             source_record_indices.append(source_record_index)
             optimal_path_lengths.append(variant.optimal_path_length)
 
@@ -317,7 +421,96 @@ def build_split_arrays(
             dtype=np.int64,
         ),
         "variant_weights": np.asarray(
-            [1.0 / family_variant_counts[family_id] for family_id in family_indices],
+            [
+                1.0 / family_variant_counts[family_id]
+                for family_id in family_indices
+            ],
             dtype=np.float64,
         ),
     }
+
+
+def build_mixed_family_es_arrays(
+    families: list[SourceFamily],
+    *,
+    seed: int = 42,
+    validation_fraction: float = 0.2,
+    perturbations_per_task: int = 1,
+    max_variants_per_family: int | None = 64,
+    max_edits: int = 4,
+    max_attempts: int = 100,
+    add_probability: float = 0.5,
+    max_path_increase: int | None = None,
+    excluded_task_identities: set[TaskIdentity] | None = None,
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+    """Build train/ES arrays with shared families and disjoint groups."""
+    if not 0 < validation_fraction < 1:
+        raise ValueError("validation_fraction must be between zero and one.")
+    if perturbations_per_task < 1 and all(
+        len(family.tasks) < 2 for family in families
+    ):
+        raise ValueError(
+            "mixed-family-es requires perturbations or multiple source tasks "
+            "per family so that an ES group can be held out."
+        )
+
+    selected_by_family = _generate_selected_variants(
+        families,
+        seed=seed,
+        perturbations_per_task=perturbations_per_task,
+        max_variants_per_family=max_variants_per_family,
+        max_edits=max_edits,
+        max_attempts=max_attempts,
+        add_probability=add_probability,
+        max_path_increase=max_path_increase,
+        excluded_task_identities=excluded_task_identities,
+    )
+    rng = np.random.default_rng(seed + 1)
+    training_by_family: dict[int, list[VariantRecord]] = {}
+    validation_by_family: dict[int, list[VariantRecord]] = {}
+    for family_id, variants in selected_by_family.items():
+        training, validation = _split_family_variants_for_es(
+            variants,
+            validation_fraction=validation_fraction,
+            rng=rng,
+        )
+        training_by_family[family_id] = training
+        if validation:
+            validation_by_family[family_id] = validation
+
+    if not validation_by_family:
+        raise ValueError(
+            "mixed-family-es could not produce a non-empty ES split; "
+            "increase perturbations_per_task or provide multiple source "
+            "tasks per family."
+        )
+
+    return (
+        _arrays_from_variant_records(training_by_family),
+        _arrays_from_variant_records(validation_by_family),
+    )
+
+
+def build_split_arrays(
+    families: list[SourceFamily],
+    *,
+    seed: int = 42,
+    perturbations_per_task: int = 0,
+    max_variants_per_family: int | None = 64,
+    max_edits: int = 4,
+    max_attempts: int = 100,
+    add_probability: float = 0.5,
+    max_path_increase: int | None = None,
+) -> dict[str, np.ndarray]:
+    """Build the existing NPZ task schema plus lineage and weights."""
+    selected_by_family = _generate_selected_variants(
+        families,
+        seed=seed,
+        perturbations_per_task=perturbations_per_task,
+        max_variants_per_family=max_variants_per_family,
+        max_edits=max_edits,
+        max_attempts=max_attempts,
+        add_probability=add_probability,
+        max_path_increase=max_path_increase,
+    )
+    return _arrays_from_variant_records(selected_by_family)

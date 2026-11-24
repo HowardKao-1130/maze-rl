@@ -5,6 +5,7 @@ import json
 import numpy as np
 
 from maze_rl.maze.augmentation_dataset import (
+    build_mixed_family_es_arrays,
     build_split_arrays,
     group_source_tasks,
     load_failure_log,
@@ -91,3 +92,38 @@ def test_split_arrays_include_inverse_family_weights(tmp_path):
             arrays["variant_weights"][mask],
             1 / mask.sum(),
         )
+
+
+def test_mixed_family_es_shares_families_without_duplicate_tasks(tmp_path):
+    path = tmp_path / "failure_runs.jsonl"
+    write_failure_log(path)
+    families = group_source_tasks(load_failure_log(path))
+
+    train, validation = build_mixed_family_es_arrays(
+        families,
+        seed=17,
+        validation_fraction=0.2,
+        perturbations_per_task=1,
+        max_variants_per_family=32,
+        max_edits=2,
+    )
+
+    train_families = set(train["family_indices"].tolist())
+    validation_families = set(validation["family_indices"].tolist())
+    assert train_families & validation_families
+
+    def task_keys(arrays):
+        return {
+            (
+                arrays["layouts"][int(layout_index)].tobytes(),
+                tuple(start),
+                tuple(goal),
+            )
+            for layout_index, start, goal in zip(
+                arrays["layout_indices"],
+                arrays["starts"],
+                arrays["goals"],
+            )
+        }
+
+    assert not task_keys(train) & task_keys(validation)

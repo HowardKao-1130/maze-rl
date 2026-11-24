@@ -108,6 +108,30 @@ source task's optimal path. Each split also contains `family_indices`,
 `variant_weights` for downstream sampling and auditability. The current command
 emits the weights; training-sampler integration is a separate step.
 
+For early stopping when the handcrafted source is especially scarce, use the
+explicit mixed-family development mode:
+
+```bash
+PYTHONPATH=src:. python scripts/augment_failure_log.py \
+  --failure-log runs/interactive_maze/failure_runs.jsonl \
+  --output-dir data/datasets/handcrafted_mixed_es \
+  --split-mode mixed-family-es \
+  --perturbations-per-task 2 \
+  --max-variants-per-family 64 \
+  --max-edits 4 \
+  --max-path-increase 5
+```
+
+`mixed-family-es` keeps the test families fully held out, then splits the
+remaining development families into `train.npz` and a same-family
+`validation.npz` at augmentation-group boundaries. A group contains all
+spatial and endpoint-reversal variants of one source task and perturbation.
+This validation split is intended only for checkpoint selection and early
+stopping; it is not an unseen-layout generalization result. At least one
+perturbation per source task (or multiple source tasks in a family) is needed
+to form a meaningful held-out group. The selected mode is recorded in
+`metadata.json`.
+
 ### Train an agent
 
 Train a neural agent against a dataset bundle. The bundle name automatically
@@ -379,7 +403,10 @@ python scripts/train_dnn.py --algorithm ppo \
   --init-checkpoint runs/dnn/v3/training/ppo/best_checkpoint.pt
 ```
 
-`--init-checkpoint` cannot be combined with `--resume`: use `--resume` when the
+When resuming a run, `--init-checkpoint` is optional. If supplied, it must be
+the same checkpoint path recorded when the run was started; the full training
+state is restored, so the checkpoint weights are not loaded again. A different
+path is rejected as a training-configuration mismatch. Use `--resume` when the
 goal is to continue the original run with its complete training state.
 Training prints completed task-selection-pass progress by default, including
 training-set mean path efficiency and success rate. When validation datasets are
