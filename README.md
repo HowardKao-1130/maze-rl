@@ -729,8 +729,10 @@ mean to the aggregate plot. Training curves use dataset epoch as their primary
 x-axis; cumulative environment steps and internal updates remain available as
 additional views.
 
-Evaluation also writes the training plot automatically when it can find
-`metrics.csv` next to the checkpoint. The checkpoint path defaults to
+Evaluation does not write training plots, value plots, or rollout animations
+by default. Pass `--plot`, `--q-plots`, or `--rollout-animations` to enable
+those outputs. When enabled, evaluation writes the training plot when it can
+find `metrics.csv` next to the checkpoint. The checkpoint path defaults to
 `runs/tabular/training/<algorithm>/checkpoint.pkl` for tabular agents and
 `runs/dnn/<dataset>/training/<algorithm>/checkpoint.pt` for neural agents. If the
 baseline neural checkpoint does not exist but a residual checkpoint does,
@@ -744,11 +746,11 @@ python scripts/evaluate.py --algorithm q_learning \
 
 By default, evaluation runs every task in the dataset exactly once with a fixed
 seed for deterministic tie-breaking. For `validation.npz`, evaluation also
-looks for a sibling `same_layout_new_goals.npz` split and renders rollout videos
-for the `val` and `val-same` views when MP4 support is installed. Use `--best-trial` to
-evaluate the best checkpoint recorded in the selected dataset bundle's
-`runs/dnn/<dataset>/tuning/tuning_results.csv`, or
-`--no-rollout-animations` to skip rollout videos.
+looks for a sibling `same_layout_new_goals.npz` split. Pass
+`--rollout-animations` to render rollout videos for the `val` and `val-same`
+views when MP4 support is installed. Use `--best-trial` to evaluate the best
+checkpoint recorded in the selected dataset bundle's
+`runs/dnn/<dataset>/tuning/tuning_results.csv`.
 For alternate evaluation plans, use `--episodes N` to sample random tasks,
 `--fixed-index I` to repeat one task, or `--all-tasks` to request the default
 all-task pass explicitly.
@@ -776,8 +778,8 @@ set. Evaluation saves Q-value plots under
 visited during evaluation, and writes
 `runs/tabular/training/q_learning/q_value_plots/task_XXXXX/task_XXXXX_q_values.mp4` beside the
 `frames` directory when MP4 support is installed. The plot title still shows the
-actual epoch. Use `--no-q-videos` to skip MP4s, or `--no-q-plots` to skip Q
-plots entirely.
+actual epoch. Use `--no-q-videos` to skip MP4s, or `--q-plots` to opt into
+Q/state-value plots. They are disabled by default.
 
 Open an existing task video with:
 

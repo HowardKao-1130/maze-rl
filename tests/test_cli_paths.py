@@ -234,7 +234,9 @@ def test_evaluate_rollout_animation_defaults(monkeypatch):
         "q_learning/checkpoint.pkl"
     )
     assert args.dataset_label == "val"
-    assert not args.no_rollout_animations
+    assert args.no_rollout_animations
+    assert args.no_q_plots
+    assert args.no_plot
     assert args.rollout_animation_fps == 8.0
     assert args.rollout_animation_output_dir is None
     assert default_rollout_animation_output_dir(
@@ -272,6 +274,28 @@ def test_evaluate_rollout_animation_cli_overrides(monkeypatch, tmp_path):
     assert args.rollout_animation_output_dir == output_dir
     assert args.rollout_animation_fps == 12.0
     assert args.no_rollout_animations
+
+
+def test_evaluate_visual_outputs_can_be_enabled(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "evaluate.py",
+            "--algorithm",
+            "ppo",
+            "--dataset",
+            "data/datasets/dataset_200x50x50_t5_seed42/validation.npz",
+            "--plot",
+            "--q-plots",
+            "--rollout-animations",
+        ],
+    )
+
+    args = parse_evaluate_args()
+
+    assert not args.no_plot
+    assert not args.no_q_plots
+    assert not args.no_rollout_animations
 
 
 def test_evaluate_accepts_legacy_sampling_flags(monkeypatch):

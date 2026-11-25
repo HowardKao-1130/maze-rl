@@ -396,10 +396,18 @@ def parse_args():
         ),
     )
 
+    parser.set_defaults(no_plot=True)
+    parser.add_argument(
+        "--plot",
+        dest="no_plot",
+        action="store_false",
+        help="Generate training-metrics plots.",
+    )
     parser.add_argument(
         "--no-plot",
+        dest="no_plot",
         action="store_true",
-        help="Skip automatic training-metrics plot generation.",
+        help="Skip automatic training-metrics plot generation (default).",
     )
 
     parser.add_argument(
@@ -421,10 +429,18 @@ def parse_args():
         ),
     )
 
+    parser.set_defaults(no_q_plots=True)
+    parser.add_argument(
+        "--q-plots",
+        dest="no_q_plots",
+        action="store_false",
+        help="Generate available Q-value or state-value snapshot plots.",
+    )
     parser.add_argument(
         "--no-q-plots",
+        dest="no_q_plots",
         action="store_true",
-        help="Skip tabular Q-value snapshot plots.",
+        help="Skip Q-value and state-value snapshot plots (default).",
     )
 
     parser.add_argument(
@@ -450,10 +466,18 @@ def parse_args():
         ),
     )
 
+    parser.set_defaults(no_rollout_animations=True)
+    parser.add_argument(
+        "--rollout-animations",
+        dest="no_rollout_animations",
+        action="store_false",
+        help="Generate validation rollout MP4 animations.",
+    )
     parser.add_argument(
         "--no-rollout-animations",
+        dest="no_rollout_animations",
         action="store_true",
-        help="Skip validation rollout MP4 animations.",
+        help="Skip validation rollout MP4 animations (default).",
     )
 
     parser.add_argument(
