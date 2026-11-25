@@ -146,7 +146,9 @@ python scripts/train_dnn.py \
 ```
 
 Neural training automatically uses the best configuration produced by tuning
-when `--dataset` names a dataset bundle:
+when `--dataset` names a dataset bundle. During fine-tuning with
+`--init-checkpoint`, the best config associated with the initial checkpoint
+takes precedence over the target dataset's config:
 
 ```bash
 python scripts/train_dnn.py \
@@ -397,7 +399,9 @@ resume decision; it does not rewind model weights to an earlier epoch.
 For transfer learning or fine-tuning on a new dataset, pass a neural checkpoint
 with `--init-checkpoint`. This loads only the model weights from that exact
 checkpoint path and starts fresh optimizer, replay, sampler, RNG, and progress
-state for the new dataset. The source and target algorithm, maze dimensions,
+state for the new dataset. Its recorded tuned configuration is reused by
+default, while explicit CLI hyperparameters can override it. The source and
+target algorithm, maze dimensions,
 action count, and encoder settings must be compatible; encoder settings are
 inherited from the source checkpoint unless explicitly supplied. For example,
 to fine-tune a PPO checkpoint from a v3 dataset on v4:
@@ -760,11 +764,12 @@ For alternate evaluation plans, use `--episodes N` to sample random tasks,
 `--fixed-index I` to repeat one task, or `--all-tasks` to request the default
 all-task pass explicitly.
 
-Training skips training-metric plots by default to avoid large memory
+Training skips all training-metric plots by default to avoid large memory
 spikes on long runs. Pass `--plot` to write
 `runs/tabular/training/q_learning/training_metrics.png`,
 `runs/tabular/training/q_learning/task_training_metrics.png`, and
-`runs/tabular/training/q_learning/task_training_metrics.html`. Use `--plot-output`,
+`runs/tabular/training/q_learning/task_training_metrics.html`, and the
+validation plot when validation metrics are available. Use `--plot-output`,
 `--task-plot-output`, and `--task-html-output` to choose different paths.
 
 For tabular checkpoints trained with the current script, evaluation also writes

@@ -55,6 +55,7 @@ from scripts.train import (
     format_training_epoch_progress_message,
     format_validation_progress_message,
     load_best_config_overrides,
+    load_initial_checkpoint_best_config_overrides,
     load_agent_training_state,
     load_initial_checkpoint_into_agent,
     load_neural_checkpoint_payload,
@@ -2205,6 +2206,102 @@ def test_load_best_config_overrides_reads_algorithm_file(tmp_path):
     }
     assert overrides.task_batch_size == 64
     assert overrides.rollout_group_size == 1
+
+
+def test_initial_checkpoint_uses_source_best_config(tmp_path):
+    checkpoint_path = (
+        tmp_path
+        / "training"
+        / "ppo"
+        / "best_checkpoint.pt"
+    )
+    checkpoint_path.parent.mkdir(parents=True)
+    config_path = tmp_path / "tuning" / "best_config_ppo.json"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        json.dumps(
+            {
+                "algorithm": "ppo",
+                "hyperparameters": {
+                    "gamma": 0.965,
+                    "gae_lambda": 0.88,
+                },
+                "task_batch_size": 64,
+                "rollout_group_size": 1,
+            }
+        )
+    )
+    (checkpoint_path.parent / "training_summary.json").write_text(
+        json.dumps(
+            {
+                "best_config_path": str(config_path),
+            }
+        )
+    )
+
+    overrides = load_initial_checkpoint_best_config_overrides(
+        checkpoint_path,
+        {
+            "algorithm": "ppo",
+            "hyperparameters": {
+                "gamma": 0.99,
+            },
+        },
+        "ppo",
+    )
+
+    assert overrides.path == config_path
+    assert overrides.hyperparameters == {
+        "gamma": 0.965,
+        "gae_lambda": 0.88,
+    }
+    assert overrides.task_batch_size == 64
+    assert overrides.rollout_group_size == 1
+
+
+def test_initial_checkpoint_config_falls_back_to_checkpoint_metadata(
+    tmp_path,
+):
+    checkpoint_path = (
+        tmp_path
+        / "training"
+        / "a2c"
+        / "best_checkpoint.pt"
+    )
+    checkpoint_path.parent.mkdir(parents=True)
+    (checkpoint_path.parent / "training_summary.json").write_text(
+        json.dumps(
+            {
+                "task_batch_size": 16,
+                "rollout_group_size": 1,
+                "network_architecture": "baseline",
+                "residual_layers": 2,
+            }
+        )
+    )
+
+    overrides = load_initial_checkpoint_best_config_overrides(
+        checkpoint_path,
+        {
+            "algorithm": "a2c",
+            "hyperparameters": {
+                "gamma": 0.959,
+                "gae_lambda": 0.872,
+            },
+            "network_architecture": "baseline",
+            "residual_layers": 2,
+        },
+        "a2c",
+    )
+
+    assert overrides.hyperparameters == {
+        "gamma": 0.959,
+        "gae_lambda": 0.872,
+    }
+    assert overrides.task_batch_size == 16
+    assert overrides.rollout_group_size == 1
+    assert overrides.network_architecture == "baseline"
+    assert overrides.residual_layers == 2
 
 
 def test_load_best_config_overrides_rejects_mismatched_algorithm(tmp_path):

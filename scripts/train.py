@@ -903,7 +903,9 @@ def parse_args():
         help=(
             "Load the tuned best hyperparameter combination for "
             "--algorithm. This is automatic for neural training "
-            "against a dataset bundle. Omitting the path reads "
+            "against a dataset bundle, or reuses the source config "
+            "during --init-checkpoint fine-tuning. Otherwise, "
+            "omitting the path reads "
             "runs/dnn/<dataset>/tuning/best_config_<algorithm>.json. "
             "A provided directory or bare tuning run name resolves to "
             "best_config_<algorithm>.json within that tuning output. "
@@ -1312,6 +1314,108 @@ def load_best_config_overrides(
         rollout_group_size=rollout_group_size,
         network_architecture=network_architecture,
         residual_layers=residual_layers,
+    )
+
+
+def initial_checkpoint_training_summary_path(
+    checkpoint_path: Path,
+) -> Path:
+    return checkpoint_path.parent / "training_summary.json"
+
+
+def initial_checkpoint_best_config_path(
+    checkpoint_path: Path,
+    algorithm: str,
+) -> Path | None:
+    del algorithm
+
+    summary_path = initial_checkpoint_training_summary_path(
+        checkpoint_path
+    )
+    if not summary_path.exists():
+        return None
+
+    try:
+        with summary_path.open() as file:
+            summary = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    raw_path = summary.get("best_config_path")
+    if not isinstance(raw_path, str) or not raw_path:
+        return None
+
+    candidate = Path(raw_path).expanduser()
+    candidates = (
+        (candidate,)
+        if candidate.is_absolute()
+        else (
+            candidate,
+            REPO_ROOT / candidate,
+            summary_path.parent / candidate,
+        )
+    )
+    for path in candidates:
+        if path.is_file():
+            return path
+
+    return None
+
+
+def load_initial_checkpoint_best_config_overrides(
+    checkpoint_path: Path,
+    checkpoint: dict,
+    algorithm: str,
+) -> BestConfigOverrides:
+    config_path = initial_checkpoint_best_config_path(
+        checkpoint_path,
+        algorithm,
+    )
+    if config_path is not None:
+        return load_best_config_overrides(
+            config_path,
+            algorithm,
+        )
+
+    summary_path = initial_checkpoint_training_summary_path(
+        checkpoint_path
+    )
+    summary = {}
+    if summary_path.exists():
+        try:
+            with summary_path.open() as file:
+                loaded_summary = json.load(file)
+            if isinstance(loaded_summary, dict):
+                summary = loaded_summary
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    raw_hyperparameters = checkpoint.get(
+        "hyperparameters"
+    )
+    if not isinstance(raw_hyperparameters, dict):
+        raw_hyperparameters = summary.get(
+            "hyperparameters",
+            {},
+        )
+    if not isinstance(raw_hyperparameters, dict):
+        raw_hyperparameters = {}
+
+    return BestConfigOverrides(
+        path=summary_path,
+        hyperparameters=dict(raw_hyperparameters),
+        task_batch_size=summary.get("task_batch_size"),
+        rollout_group_size=summary.get(
+            "rollout_group_size"
+        ),
+        network_architecture=checkpoint.get(
+            "network_architecture",
+            summary.get("network_architecture"),
+        ),
+        residual_layers=checkpoint.get(
+            "residual_layers",
+            summary.get("residual_layers"),
+        ),
     )
 
 
@@ -3808,7 +3912,38 @@ def main():
         )
 
     resolve_dataset_bundle_args(args)
-    apply_default_best_config(args)
+
+    initial_checkpoint = None
+    initial_checkpoint_encoder_hyperparameters = {}
+    best_config_overrides = None
+
+    if (
+        args.init_checkpoint is not None
+        and not args.resume
+        and args.best_config is None
+    ):
+        if args.algorithm in TABULAR_ALGORITHMS:
+            raise ValueError(
+                "--init-checkpoint is only supported for neural agents."
+            )
+
+        args.init_checkpoint = (
+            args.init_checkpoint.expanduser().resolve()
+        )
+        initial_checkpoint = load_neural_checkpoint_payload(
+            args.init_checkpoint,
+            torch.device("cpu"),
+        )
+        best_config_overrides = (
+            load_initial_checkpoint_best_config_overrides(
+                args.init_checkpoint,
+                initial_checkpoint,
+                args.algorithm,
+            )
+        )
+
+    if best_config_overrides is None:
+        apply_default_best_config(args)
 
     if args.best_config == BEST_CONFIG_DEFAULT_SENTINEL:
         if args.dataset_bundle_name is None:
@@ -3829,7 +3964,6 @@ def main():
             args.algorithm,
         )
 
-    best_config_overrides = None
     if args.best_config is not None and not args.resume:
         if args.algorithm not in NEURAL_ALGORITHMS:
             raise ValueError(
@@ -3988,18 +4122,17 @@ def main():
                 resume_training_metadata,
             )
 
-    initial_checkpoint = None
-    initial_checkpoint_encoder_hyperparameters = {}
     if args.init_checkpoint is not None and not args.resume:
         if args.algorithm in TABULAR_ALGORITHMS:
             raise ValueError(
                 "--init-checkpoint is only supported for neural agents."
             )
 
-        initial_checkpoint = load_neural_checkpoint_payload(
-            args.init_checkpoint,
-            torch.device("cpu"),
-        )
+        if initial_checkpoint is None:
+            initial_checkpoint = load_neural_checkpoint_payload(
+                args.init_checkpoint,
+                torch.device("cpu"),
+            )
         initial_checkpoint_encoder_hyperparameters = (
             configure_initial_checkpoint(
                 args,
@@ -5399,7 +5532,7 @@ def main():
             f"{task_html_path}"
         )
 
-    if validation_metrics_path.exists():
+    if not args.no_plot and validation_metrics_path.exists():
         validation_plot_path = (
             run_dir / "validation_metrics.png"
         )

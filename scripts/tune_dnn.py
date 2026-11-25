@@ -1960,6 +1960,8 @@ def build_evaluation_command(
 
     if not args.keep_plots:
         command.append("--no-plot")
+    else:
+        command.append("--plot")
 
     command.append("--all-tasks")
 

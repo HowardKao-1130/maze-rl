@@ -1850,6 +1850,7 @@ def test_evaluation_command_keeps_plots_when_requested(tmp_path):
     assert "--all-tasks" in command
     assert "--episodes" not in command
     assert "--no-plot" not in command
+    assert "--plot" in command
     assert "--no-rollout-animations" in command
 
 
