@@ -41,6 +41,7 @@ from scripts.open_tensorboard import (
 from scripts.train import (
     HierarchicalTaskSampler,
     agent_training_state_dict,
+    apply_default_best_config,
     append_validation_csv,
     apply_resume_training_state_defaults,
     apply_retroactive_resume_metadata,
@@ -654,6 +655,52 @@ def test_training_uses_baseline_network_by_default(monkeypatch):
 
     assert args.network_architecture == "baseline"
     assert args.residual_layers == 2
+
+
+def test_raw_neural_training_keeps_constructor_defaults(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "ppo",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.best_config is None
+
+
+def test_dataset_bundle_neural_training_uses_best_config_by_default():
+    args = SimpleNamespace(
+        algorithm="ppo",
+        best_config=None,
+        dataset_bundle_name="v3_dataset",
+    )
+
+    apply_default_best_config(args)
+
+    assert args.best_config.name == (
+        "__algorithm_default_best_config__"
+    )
+
+
+def test_tabular_training_does_not_use_best_config_by_default(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "--algorithm",
+            "q_learning",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.best_config is None
 
 
 def test_parse_train_args_accepts_initial_checkpoint(

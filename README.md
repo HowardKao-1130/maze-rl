@@ -145,15 +145,20 @@ python scripts/train_dnn.py \
   --plot
 ```
 
-To train from the best configuration produced by tuning:
+Neural training automatically uses the best configuration produced by tuning
+when `--dataset` names a dataset bundle:
 
 ```bash
 python scripts/train_dnn.py \
   --algorithm ppo \
-  --best-config \
   --dataset <dataset-name> \
   --rollouts-per-task 1000
 ```
+
+The equivalent explicit form is still supported with `--best-config`. Explicit
+neural hyperparameters override values loaded from the best config. Training
+against a raw `.npz` file must provide an explicit `--best-config` path if tuned
+values are desired; otherwise the agent constructor defaults are used.
 
 `train.py` contains the shared implementation for both tabular and neural
 agents. Supported algorithms include `mc`, `sarsa`, `q_learning`, `dyna_q`, `dqn`,
@@ -648,7 +653,7 @@ under `data/datasets` or point at a dataset directory; training then uses its
 under the matching `runs/dnn/<dataset-directory>/training/<algorithm>` directory:
 
 ```bash
-python scripts/train_dnn.py --algorithm ppo --best-config --dataset v3_dataset_5000x500x500_t5_seed42_stratified_s00_m60_l40_dedupe050 --rollouts-per-task 1000
+python scripts/train_dnn.py --algorithm ppo --dataset v3_dataset_5000x500x500_t5_seed42_stratified_s00_m60_l40_dedupe050 --rollouts-per-task 1000
 ```
 
 `--best-config` reads

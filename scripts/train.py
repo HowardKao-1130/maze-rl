@@ -265,6 +265,15 @@ def resolve_best_config_path(
     return path / f"best_config_{algorithm}.json"
 
 
+def apply_default_best_config(args) -> None:
+    if (
+        args.best_config is None
+        and args.algorithm in NEURAL_ALGORITHMS
+        and args.dataset_bundle_name is not None
+    ):
+        args.best_config = BEST_CONFIG_DEFAULT_SENTINEL
+
+
 def default_output_dir(
     algorithm: str,
 ) -> Path:
@@ -893,7 +902,8 @@ def parse_args():
         default=None,
         help=(
             "Load the tuned best hyperparameter combination for "
-            "--algorithm. Omitting the path reads "
+            "--algorithm. This is automatic for neural training "
+            "against a dataset bundle. Omitting the path reads "
             "runs/dnn/<dataset>/tuning/best_config_<algorithm>.json. "
             "A provided directory or bare tuning run name resolves to "
             "best_config_<algorithm>.json within that tuning output. "
@@ -3798,12 +3808,15 @@ def main():
         )
 
     resolve_dataset_bundle_args(args)
+    apply_default_best_config(args)
 
     if args.best_config == BEST_CONFIG_DEFAULT_SENTINEL:
         if args.dataset_bundle_name is None:
             raise ValueError(
-                "Omitting the --best-config path requires "
-                "--dataset to name a dataset bundle."
+                "Neural training defaults to the tuned best config; "
+                "--dataset must name a dataset bundle so its default "
+                "best config can be resolved, or pass an explicit "
+                "--best-config path."
             )
 
         args.best_config = default_best_config_path(
