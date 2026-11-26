@@ -76,6 +76,7 @@ from scripts.train import (
     resolve_dataset_bundle_args,
     remove_existing_training_output,
     resolve_resume_training_state_path,
+    save_neural_checkpoint_state,
     save_training_state,
     should_record_train_greedy_validation,
     should_validate_epoch,
@@ -875,6 +876,95 @@ def test_initial_checkpoint_loads_weights_and_syncs_dqn_target(
             agent.target_network.state_dict()[key],
             value,
         )
+
+
+def test_initial_checkpoint_inherits_entropy_coefficient(
+    tmp_path,
+):
+    source = torch.nn.Linear(3, 2)
+    target = torch.nn.Linear(3, 2)
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    torch.save(
+        {
+            "algorithm": "a2c",
+            "model_state_dict": source.state_dict(),
+            "entropy_coefficient": 0.004,
+        },
+        checkpoint_path,
+    )
+
+    checkpoint = load_neural_checkpoint_payload(
+        checkpoint_path,
+        torch.device("cpu"),
+    )
+    agent = SimpleNamespace(
+        network=target,
+        entropy_coefficient=0.18,
+    )
+
+    load_initial_checkpoint_into_agent(
+        "a2c",
+        agent,
+        checkpoint,
+        checkpoint_path,
+    )
+
+    assert agent.entropy_coefficient == 0.004
+
+
+def test_initial_checkpoint_entropy_cli_override_is_preserved(
+    tmp_path,
+):
+    source = torch.nn.Linear(3, 2)
+    target = torch.nn.Linear(3, 2)
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    torch.save(
+        {
+            "algorithm": "a2c",
+            "model_state_dict": source.state_dict(),
+            "entropy_coefficient": 0.004,
+        },
+        checkpoint_path,
+    )
+
+    checkpoint = load_neural_checkpoint_payload(
+        checkpoint_path,
+        torch.device("cpu"),
+    )
+    agent = SimpleNamespace(
+        network=target,
+        entropy_coefficient=0.01,
+    )
+
+    load_initial_checkpoint_into_agent(
+        "a2c",
+        agent,
+        checkpoint,
+        checkpoint_path,
+        inherit_entropy_coefficient=False,
+    )
+
+    assert agent.entropy_coefficient == 0.01
+
+
+def test_best_checkpoint_saves_dynamic_entropy_coefficient(
+    tmp_path,
+):
+    checkpoint_path = tmp_path / "best_checkpoint.pt"
+    save_neural_checkpoint_state(
+        checkpoint_path,
+        "a2c",
+        {"weight": torch.ones(1)},
+        entropy_coefficient=0.004,
+    )
+
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+
+    assert checkpoint["entropy_coefficient"] == 0.004
 
 
 def test_initial_checkpoint_rejects_incompatible_weights(tmp_path):

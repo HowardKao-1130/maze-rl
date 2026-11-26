@@ -271,13 +271,20 @@ def test_evaluate_vectorizes_maze_neural_rollouts(tmp_path):
     dataset_path = tmp_path / "evaluation_tasks.npz"
     np.savez(
         dataset_path,
-        layouts=np.zeros((1, 2, 2), dtype=np.int8),
+        layouts=np.zeros((1, 2, 3), dtype=np.int8),
         layout_indices=np.asarray([0, 0]),
         starts=np.asarray([[0, 0], [1, 0]]),
-        goals=np.asarray([[0, 1], [1, 1]]),
+        goals=np.asarray([[0, 1], [1, 2]]),
     )
     env = MazeEnv(dataset_path, max_steps=3)
     progress = []
+    terminated_states = []
+
+    def record_progress(episode, total):
+        progress.append((episode, total))
+        terminated_states.append(
+            env._evaluation_vectorized_env.terminated_flags.copy()
+        )
 
     results, summary = evaluate(
         algorithm="dqn",
@@ -286,15 +293,15 @@ def test_evaluate_vectorizes_maze_neural_rollouts(tmp_path):
         episodes=99,
         task_indices=[0, 1],
         capture_rollouts=True,
-        progress_callback=lambda episode, total: progress.append(
-            (episode, total)
-        ),
+        progress_callback=record_progress,
     )
 
     assert [result["task_index"] for result in results] == [0, 1]
-    assert [result["steps"] for result in results] == [1, 1]
+    assert [result["steps"] for result in results] == [1, 2]
     assert summary["success_rate"] == 1.0
     assert progress == [(1, 2), (2, 2)]
+    assert terminated_states[0].tolist() == [True, False]
+    assert terminated_states[1].tolist() == [True, True]
     assert results[0]["rollout_trace"] == {
         "positions": [[0, 0], [0, 1]],
         "actions": [3],

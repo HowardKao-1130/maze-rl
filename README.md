@@ -400,8 +400,9 @@ For transfer learning or fine-tuning on a new dataset, pass a neural checkpoint
 with `--init-checkpoint`. This loads only the model weights from that exact
 checkpoint path and starts fresh optimizer, replay, sampler, RNG, and progress
 state for the new dataset. Its recorded tuned configuration is reused by
-default, while explicit CLI hyperparameters can override it. The source and
-target algorithm, maze dimensions,
+default, including the live entropy coefficient when the checkpoint records
+one, while explicit CLI hyperparameters can override it. The source and target
+algorithm, maze dimensions,
 action count, and encoder settings must be compatible; encoder settings are
 inherited from the source checkpoint unless explicitly supplied. For example,
 to fine-tune a PPO checkpoint from a v3 dataset on v4:

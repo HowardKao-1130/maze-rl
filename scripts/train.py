@@ -1885,6 +1885,7 @@ def load_initial_checkpoint_into_agent(
     agent,
     checkpoint: dict,
     checkpoint_path: Path,
+    inherit_entropy_coefficient: bool = True,
 ) -> None:
     state_dict = checkpoint["model_state_dict"]
     module = network_module_for_algorithm(
@@ -1907,6 +1908,15 @@ def load_initial_checkpoint_into_agent(
             agent.online_network.state_dict()
         )
 
+    if (
+        inherit_entropy_coefficient
+        and hasattr(agent, "entropy_coefficient")
+        and checkpoint.get("entropy_coefficient") is not None
+    ):
+        agent.entropy_coefficient = float(
+            checkpoint["entropy_coefficient"]
+        )
+
 
 def model_snapshot_state_dict(
     algorithm,
@@ -1927,24 +1937,28 @@ def save_neural_checkpoint_state(
     validation_metadata=None,
     network_architecture="baseline",
     residual_layers=DEFAULT_RESIDUAL_LAYERS,
+    entropy_coefficient: float | None = None,
 ) -> None:
     path.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    torch.save(
-        {
-            "algorithm": algorithm,
-            "model_state_dict": model_state_dict,
-            "model_snapshots": model_snapshots or [],
-            "hyperparameters": hyperparameters or {},
-            "validation": validation_metadata or {},
-            "network_architecture": network_architecture,
-            "residual_layers": residual_layers,
-        },
-        path,
-    )
+    checkpoint = {
+        "algorithm": algorithm,
+        "model_state_dict": model_state_dict,
+        "model_snapshots": model_snapshots or [],
+        "hyperparameters": hyperparameters or {},
+        "validation": validation_metadata or {},
+        "network_architecture": network_architecture,
+        "residual_layers": residual_layers,
+    }
+    if entropy_coefficient is not None:
+        checkpoint["entropy_coefficient"] = float(
+            entropy_coefficient
+        )
+
+    torch.save(checkpoint, path)
 
 
 def network_module_for_algorithm(
@@ -4235,6 +4249,10 @@ def main():
             agent,
             initial_checkpoint,
             args.init_checkpoint,
+            inherit_entropy_coefficient=(
+                "entropy_coefficient"
+                not in explicit_hyperparameters
+            ),
         )
 
     if args.algorithm == "dqn":
@@ -4456,6 +4474,44 @@ def main():
             task_selection_pass_budget,
             completed_tasks,
             sampler.total_task_count,
+        )
+        print(
+            f"\r{message}\033[K",
+            end="",
+            flush=True,
+        )
+        task_progress_line_active = True
+
+    def write_evaluation_progress_line(
+        split: str,
+        dataset_epoch: int,
+        completed_tasks: int,
+        total_tasks: int,
+    ) -> None:
+        nonlocal task_progress_line_active
+
+        if args.no_progress or not sys.stdout.isatty():
+            return
+
+        split_label = {
+            "validation": "val",
+            "same_layout": "same-val",
+            "natural_validation": "val-natural",
+            "train_greedy": "train-greedy",
+        }.get(split, split)
+        progress_percent = (
+            100.0
+            if total_tasks <= 0
+            else completed_tasks / total_tasks * 100.0
+        )
+        message = (
+            format_progress_continuation_prefix(
+                dataset_epoch,
+                task_selection_pass_budget,
+            )
+            + f"{split_label:<12s} "
+            f"{completed_tasks}/{total_tasks} "
+            f"[{progress_percent:.1f}%]"
         )
         print(
             f"\r{message}\033[K",
@@ -5001,6 +5057,40 @@ def main():
                     if args.validation_all_tasks
                     else None
                 )
+                evaluation_progress_state = {
+                    "last_completed": 0,
+                }
+
+                def evaluation_progress_callback(
+                    completed_tasks: int,
+                    total_tasks: int,
+                ) -> None:
+                    update_interval = max(
+                        1,
+                        total_tasks // 100,
+                    )
+                    is_final_update = (
+                        completed_tasks >= total_tasks
+                    )
+                    if (
+                        not is_final_update
+                        and completed_tasks
+                        - evaluation_progress_state[
+                            "last_completed"
+                        ]
+                        < update_interval
+                    ):
+                        return
+                    evaluation_progress_state[
+                        "last_completed"
+                    ] = completed_tasks
+                    write_evaluation_progress_line(
+                        split,
+                        dataset_epoch,
+                        completed_tasks,
+                        total_tasks,
+                    )
+
                 _, validation_summary = evaluate(
                     algorithm=args.algorithm,
                     agent=agent,
@@ -5008,6 +5098,7 @@ def main():
                     episodes=args.validation_episodes,
                     seed=args.seed,
                     task_indices=validation_task_indices,
+                    progress_callback=evaluation_progress_callback,
                 )
                 validation_score = validation_summary[
                     "average_path_efficiency"
@@ -5047,17 +5138,19 @@ def main():
                 ] = validation_row
 
                 if split != "validation":
-                    print(
-                        format_validation_progress_message(
-                            split,
-                            dataset_epoch,
-                            task_selection_pass_budget,
-                            validation_score,
-                            success_rate=validation_row[
-                                "success_rate"
-                            ],
-                        )
+                    final_message = format_validation_progress_message(
+                        split,
+                        dataset_epoch,
+                        task_selection_pass_budget,
+                        validation_score,
+                        success_rate=validation_row[
+                            "success_rate"
+                        ],
                     )
+                    if task_progress_line_active and sys.stdout.isatty():
+                        print_progress_summary(final_message)
+                    else:
+                        print(final_message)
                     continue
 
                 if validation_score > 0.0:
@@ -5087,30 +5180,37 @@ def main():
                         network_architecture=args.network_architecture,
                         residual_layers=args.residual_layers,
                         validation_metadata=validation_row,
+                        entropy_coefficient=getattr(
+                            agent,
+                            "entropy_coefficient",
+                            None,
+                        ),
                     )
                 else:
                     validation_checks_without_improvement += 1
 
-                print(
-                    format_validation_progress_message(
-                        "validation",
-                        dataset_epoch,
-                        task_selection_pass_budget,
-                        validation_score,
-                        success_rate=validation_row[
-                            "success_rate"
-                        ],
-                        best_score=best_validation[
-                            "mean_path_efficiency"
-                        ],
-                        early_stopping_counter=(
-                            validation_checks_without_improvement
-                        ),
-                        early_stopping_patience=(
-                            effective_patience
-                        ),
-                    )
+                final_message = format_validation_progress_message(
+                    "validation",
+                    dataset_epoch,
+                    task_selection_pass_budget,
+                    validation_score,
+                    success_rate=validation_row[
+                        "success_rate"
+                    ],
+                    best_score=best_validation[
+                        "mean_path_efficiency"
+                    ],
+                    early_stopping_counter=(
+                        validation_checks_without_improvement
+                    ),
+                    early_stopping_patience=(
+                        effective_patience
+                    ),
                 )
+                if task_progress_line_active and sys.stdout.isatty():
+                    print_progress_summary(final_message)
+                else:
+                    print(final_message)
 
             if (
                 should_stop_early(

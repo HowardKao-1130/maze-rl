@@ -289,16 +289,16 @@ def _evaluate_vectorized(
                     result["rollout_trace"] = traces[slot]
                 results[slot] = result
                 active_slots[slot] = False
+                if progress_callback is not None:
+                    progress_callback(
+                        len(results) - int(np.count_nonzero(active_slots)),
+                        len(results),
+                    )
 
         observations = next_observations
 
     for episode, result in enumerate(results, start=1):
         result["episode"] = episode
-        if progress_callback is not None:
-            progress_callback(
-                episode,
-                len(results),
-            )
 
     return results, _summarize_results(results)
 
