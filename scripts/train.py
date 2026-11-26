@@ -4460,27 +4460,48 @@ def main():
     ) -> None:
         nonlocal task_progress_line_active
 
-        if args.no_progress or not sys.stdout.isatty():
+        if args.no_progress:
             return
 
+        is_tty = sys.stdout.isatty()
         completed_tasks = completed_task_count_for_epoch(
             epoch_metrics_by_epoch.get(
                 dataset_epoch,
                 [],
             )
         )
+        if not is_tty:
+            previous_completed_tasks = (
+                non_tty_progress_tasks_by_epoch.get(
+                    dataset_epoch,
+                    0,
+                )
+            )
+            if (
+                completed_tasks < sampler.total_task_count
+                and completed_tasks - previous_completed_tasks
+                < non_tty_progress_task_interval
+            ):
+                return
+            non_tty_progress_tasks_by_epoch[
+                dataset_epoch
+            ] = completed_tasks
+
         message = format_task_selection_pass_task_progress_message(
             dataset_epoch,
             task_selection_pass_budget,
             completed_tasks,
             sampler.total_task_count,
         )
-        print(
-            f"\r{message}\033[K",
-            end="",
-            flush=True,
-        )
-        task_progress_line_active = True
+        if is_tty:
+            print(
+                f"\r{message}\033[K",
+                end="",
+                flush=True,
+            )
+            task_progress_line_active = True
+        else:
+            print(message, flush=True)
 
     def write_evaluation_progress_line(
         split: str,
@@ -4536,7 +4557,7 @@ def main():
                 flush=True,
             )
         else:
-            print(message)
+            print(message, flush=True)
 
         task_progress_line_active = False
 
@@ -4545,6 +4566,18 @@ def main():
         layout_indices=env.layout_indices,
         seed=args.seed,
     )
+    non_tty_progress_task_interval = max(
+        1,
+        (sampler.total_task_count + 9) // 10,
+    )
+    non_tty_progress_tasks_by_epoch = {}
+    if not args.no_progress:
+        print(
+            f"{args.algorithm} training started: "
+            f"{task_selection_pass_budget} task-selection passes "
+            f"over {sampler.total_task_count} tasks.",
+            flush=True,
+        )
     rollout = 0
     restored_epoch_metrics_by_epoch = {}
     restored_next_epoch_to_log = 1
